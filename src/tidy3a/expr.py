@@ -397,6 +397,18 @@ class Groups:
         self.axis = axis
         self.codes = codes
         self.labels = list(labels)
+        self._blocks: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+
+    def blocks(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Positions sorted by group, keeping their order within a group, and each group's start and end."""
+        if self._blocks is None:
+            codes = self.codes.values
+            # NumPy's stable sort is a radix sort for 8- and 16-bit integers, far faster than for int64.
+            narrow = np.min_scalar_type(builtins.max(len(self.labels) - 1, 0))
+            order = np.argsort(codes.astype(narrow, copy=False), kind="stable")
+            ends = np.cumsum(np.bincount(codes, minlength=len(self.labels)))
+            self._blocks = (order, np.concatenate(([0], ends[:-1])), ends)
+        return self._blocks
 
 
 # ── Evaluation ──────────────────────────────────────────────────────────────
@@ -700,16 +712,42 @@ def _check_has_group_axes(node: Reduce, array: xr.DataArray, ctx: Context) -> No
 
 
 def _group_reduce(array, op, groups: Groups, others, na_rm, min_count) -> xr.DataArray:
-    codes = groups.codes.values
-    stats = []
-    for code in range(len(groups.labels)):
-        part = array.isel({groups.axis: codes == code})
-        stats.append(reduce_array(part, op, [groups.axis, *others], na_rm, min_count))
+    stats = [
+        reduce_array(part, op, [groups.axis, *others], na_rm, min_count)
+        for part in _group_parts(array, groups)
+    ]
     index = label_index(groups.labels, groups.name)
     if stats:
         return xr.concat(stats, dim=index)
     empty = reduce_array(array.isel({groups.axis: slice(0, 0)}), op, [groups.axis, *others], na_rm, min_count)
     return empty.expand_dims({groups.name: 0}).assign_coords({groups.name: index})
+
+
+# Up to this many groups, scanning the axis once per group is cheaper than sorting it.
+_FEW_GROUPS = 8
+
+
+def _group_parts(array: xr.DataArray, groups: Groups) -> list[xr.DataArray]:
+    """Each group's positions, in their original order.
+
+    With many groups, in-memory arrays are reordered once so groups sit in
+    contiguous blocks, instead of scanning the whole axis once per group.
+    Each block holds the same values in the same order and layout as a
+    per-group mask would, so reductions give bit-identical results. Chunked
+    arrays keep per-group masks, which stay lazy.
+    """
+    codes = groups.codes.values
+    count = len(groups.labels)
+    if array.chunks is not None or count <= _FEW_GROUPS:
+        return [array.isel({groups.axis: codes == code}) for code in range(count)]
+    order, starts, ends = groups.blocks()
+    ordered = array.isel({groups.axis: order})
+    first = array.get_axis_num(groups.axis) == 0
+    parts = []
+    for start, end in zip(starts, ends):
+        part = ordered.isel({groups.axis: builtins.slice(int(start), int(end))})
+        parts.append(part if first else part.copy())  # a contiguous copy, as a mask would give
+    return parts
 
 
 def _broadcast_back(stats: xr.DataArray, groups: Groups) -> xr.DataArray:
@@ -768,9 +806,26 @@ def _value_groups(key: ValueKey, axis: Hashable, values: xr.DataArray) -> Groups
             f"group_by({key.label}): {int(np.isnan(raw).sum()):,} positions have a missing "
             f"{key.label}; filter them out first"
         )
-    labels, codes = np.unique(raw, return_inverse=True)
-    codes_da = xr.DataArray(codes.reshape(-1), dims=axis, coords=values.coords)
+    labels, codes = _factorize(raw)
+    codes_da = xr.DataArray(codes, dims=axis, coords=values.coords)
     return Groups(key.name, axis, codes_da, [_plain(label) for label in labels])
+
+
+def _factorize(raw: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Sorted unique values and each position's code, exactly as ``np.unique`` gives them.
+
+    pandas finds the groups by hashing, which is much faster than sorting
+    every value. It gives missing values such as NaT no code, and some
+    object values cannot be sorted; those fall back to ``np.unique``.
+    """
+    try:
+        codes, labels = pd.factorize(raw, sort=True)
+    except TypeError:
+        codes = None
+    if codes is None or (codes < 0).any():
+        labels, codes = np.unique(raw, return_inverse=True)
+        return labels, codes.reshape(-1)
+    return np.asarray(labels), codes
 
 
 def _bin_groups(key: ValueKey, axis: Hashable, values: xr.DataArray) -> Groups:

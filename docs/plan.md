@@ -93,6 +93,7 @@ Array-layer helpers are used inside tidy-layer verbs, for example `mutate(p = do
 | Formula input | Support ordinary mathematical text such as `"x^2"` and a documented subset of LaTeX |
 | Notebook use | Support bare variable/field names, consistent with tidy3's notebook experience |
 | Generality | No built-in nuScenes schema or automatic interpretation of XYZ, intensity, or quantum amplitudes |
+| Array backend | Keep xarray over NumPy; reviewed against PyTorch, JAX, Scipp, Polars, DuckDB, and others in 2026 (§13.1). Speed comes from optional xarray-compatible arrays and accelerators, not a rewrite; Scipp is a possible interop target |
 
 These are design directions. Detailed selection, grouping, and index-binding semantics need the small prototype in milestone 0 before becoming a public contract.
 
@@ -1125,6 +1126,8 @@ Metadata import checks now verify Dataset/DataArray attributes, encodings, and d
 
 Fixed after review (2026-10-24): `select(~values)` on the array holding the field axis now drops that array; previously the remaining field labels brought it back. Selecting a field label after excluding every array that holds it is an error. Inspection output drops a reader's `inferred:` note once a verb resizes or removes that axis, since the inferred size no longer describes the data. pandas, imported directly, is now a declared dependency at 2.2.2 or newer, the first pandas built for NumPy 2; the minimum-version jobs pin it. The full local suite reports 413 passed and 2 skipped; with minimum NumPy, pandas, and xarray, 395 passed and 8 skipped.
 
+Grouping by value is faster (2026-10-24): groups are found by hashing (`pd.factorize`) instead of sorting every value, and with more than 8 groups an in-memory array is reordered once into per-group blocks instead of scanned once per group. Each block holds the same values in the same order as a per-group mask, so results are bit-identical; tests compare them with per-group masks. At 10M points and 32 rings, `summarise(mean(intensity))` by ring went from 1,244 to 147 ms and grouped `mutate` from 1,355 to 173 ms. Chunked arrays and groupings with few groups, such as most `bins()`, keep per-group masks.
+
 Exit: the reader handles metadata-rich input without redundant declarations and mixed typed records without coercing everything into one numeric array. Lazy operations avoid unintended full-data computation; unavoidable materialization is documented.
 
 ### Milestone 7 — Independent first release
@@ -1197,6 +1200,45 @@ Earlier attempts to make array programming friendlier fall into five groups. Ite
 Implications carried into this plan: the two-layer split (§1.1), the `over=` convention (§6.1), stars as the reference for open verb questions, and choosing a home community, such as sensor and point-cloud data, for examples and outreach while keeping the core general.
 
 Sources checked: [stars dplyr methods](https://search.r-project.org/CRAN/refmans/stars/html/dplyr.html), [stars tidyverse vignette](https://r-spatial.github.io/stars/articles/stars3.html), [stars arithmetic](https://r-spatial.github.io/stars/reference/ops_stars.html), [stars c()](https://r-spatial.github.io/stars/reference/c.stars.html), [dppd](https://dppd.readthedocs.io/), [pipda](https://pypi.org/project/pipda/), [pydplyr](https://pypi.org/project/pydplyr), [rray](https://rray.r-lib.org/), [Tullio.jl](https://docs.juliahub.com/Tullio/PIgzC/0.2.9), [Julia einsum comparison](https://github.com/JuliaPackageComparisons/JuliaPackageComparisons.github.io/blob/main/docs/comparisons/math/einsum.md), [Haliax](https://pypi.org/project/marin-haliax/0.2.5.dev202606020954/).
+
+### 13.1 Backend review (2026-10-24)
+
+Decided: keep xarray, over NumPy, as the array backend. The original plan took xarray as its starting point without comparing alternatives, so after the first-release preparation the candidates were reviewed for labels, dependencies, maintenance, and speed. Only xarray and Scipp provide what the tidy layer is built on: coordinate labels on axes, alignment by label, and grouping. xarray adds NetCDF/Zarr readers, Dask and Cubed, and the largest user base; on gridded data, every array library measured within noise of NumPy.
+
+| Candidate | Labels on axes | Dependencies | Status (2026-10) | Conclusion |
+|---|---|---|---|---|
+| **xarray** | Coordinates, alignment, groupby | NumPy, pandas, packaging | Very active | Keep as the backend |
+| **Scipp** | Coordinates, plus physical units, uncertainties, binned event data | NumPy only (C++ core) | Active, 26.9.0 (2026-09-22) | Possible interop target (below) |
+| **PyTorch** | Names only, no labels; the named tensor API is documented as experimental, and binary operations broadcast by position from the right, checking names rather than aligning by them (`align_as()` is explicit) | 526 MB installed, 0.56 s import | Array API tracker ([pytorch#58743](https://github.com/pytorch/pytorch/issues/58743)) open since 2021; 2.14.1 tensors lack `__array_namespace__`, so xarray converts them to NumPy | Not a backend; revisit when xarray can wrap tensors |
+| **JAX** (Haliax, Penzai) | Names and sizes only | About 240 MB plus SciPy | Haliax active; Penzai last released April 2025 | Not a backend; JAX arrays already work inside xarray |
+| **Awkward Array** | Field names, no coordinates | NumPy plus a C++ core | Active, 2.14.0 | For ragged records, not grids |
+| **Iris** | Coordinates under strict CF conventions | Cartopy, Dask, netCDF4, SciPy, … | Active | Climate-specific; narrower than xarray |
+| **Polars, DuckDB, pandas** | Tables, not axes | About 150 MB / small / 44 MB | Active | Right for tidy3's tables; gridded data needs one row per cell |
+
+Measurements on an Apple M4 (synthetic data, best of several runs, milliseconds; ratios matter more than absolute values):
+
+| | Rotate + 50 m filter, 10M points | Mean per ring, 10M points | Mean over time, 14.6M cells | Anomaly, 14.6M cells |
+|---|---|---|---|---|
+| NumPy | 145 | 58 | 1.3 | 3.8 |
+| xarray | 167 | 2,279 (no flox) | 1.4 | 4.2 |
+| tidy3A | 198 | 147 | 1.6 | 4.4 |
+| PyTorch CPU / MPS | 71 / 47 | 221 / 463 | 1.9 / 1.4 | 4.1 / 4.9 |
+| JAX (jit) | 23 | 1,028 | 1.1 | 3.1 |
+| Scipp | 58 (float64) | 9 with binning; 6,496 with `groupby` | 1.2 | 3.3 |
+| Polars | 72 | 7 | 161 (long table) | 212 (long table) |
+| DuckDB | 72 | 14 | 42 (long table) | 338 (long table) |
+| pandas | 133 | 50 | 242 (long table) | 539 (long table) |
+
+A 64 × 1024 × 1024 by 1024 × 1024 contraction took 95–100 ms in NumPy and xarray, 91 ms with PyTorch on the CPU, 59 ms with PyTorch on the GPU (MPS), and 133 ms with JAX. Tables need about 7 times the memory of the array for gridded data. The tidy3A value-grouping time above includes the 2026-10-24 speedup (milestone 6).
+
+Consequences:
+
+- Speed comes from optional pieces that xarray already accepts, not from changing backend: flox or numbagg for grouping, Dask or Cubed for parallel and larger-than-memory work, and JAX arrays inside xarray for compiled or GPU computation. Checked with xarray 2026.9.0 and JAX 0.12: selection, arithmetic, reductions, boolean indexing, `dot`, and groupby keep JAX arrays, and most tidy3A verbs run on them unchanged; field write-back and `dot` with a NumPy matrix return NumPy. xarray's documentation does not yet list JAX among supported array types, so this is not yet a promise.
+- PyTorch becomes an option in the same way once its tensors implement the Array API protocol; follow [pytorch#58743](https://github.com/pytorch/pytorch/issues/58743).
+- Scipp is a possible interop target rather than a replacement: `tidy()` could accept a Scipp `DataArray` or `Dataset` if physical units or binned point-cloud data become central, mapping dimensions and coordinates and carrying units into metadata. Its binning API, which grouped 10M points in 9 ms, is a reference for faster value grouping. Scipp itself describes xarray as the more mature choice for many applications, and its homepage does not cover lazy or larger-than-memory data.
+- No Python package offers dplyr-style verbs on labeled N-D arrays; the tidy3A gap identified in §13 remains.
+
+Sources checked: [PyTorch 2.10 named tensor operator coverage](https://docs.pytorch.org/docs/2.10/name_inference.html), [pytorch#54581](https://github.com/pytorch/pytorch/issues/54581), [pytorch#58743](https://github.com/pytorch/pytorch/issues/58743), [Reviving Named Tensors (2026)](https://dev-discuss.pytorch.org/t/reviving-named-tensors-strategy-for-addressing-the-experimental-backlog/3289), [Scipp](https://scipp.github.io/), [Scipp paper](https://arxiv.org/pdf/2010.00257), [xarray duck arrays](https://docs.xarray.dev/en/stable/user-guide/duckarrays.html), [xarray NamedArray design](https://github.com/pydata/xarray/blob/main/design_notes/named_array_design_doc.md), [array-api#698](https://github.com/data-apis/array-api/issues/698), [Penzai named axes](https://penzai.readthedocs.io/en/stable/notebooks/named_axes.html), [Levanter 1.0 and Haliax](https://levanter.readthedocs.io/en/latest/Levanter-1.0-Release/), [Awkward Array](https://awkward-array.readthedocs.io/en/main/getting-started/what-is-an-awkward-array.html), [Iris and xarray](https://scitools-iris.readthedocs.io/en/latest/community/iris_xarray.html), PyPI metadata for each package.
 
 ## 14. Reference material
 

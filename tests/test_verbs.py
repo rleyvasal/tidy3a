@@ -462,6 +462,57 @@ def test_group_by_value_field():
     assert out["m"].values.tolist() == [20.0, 30.0] and out["k"].values.tolist() == [2, 2]
 
 
+@pytest.mark.parametrize("key_type", ["float32", "int16", "uint64", "datetime64[s]", "str"])
+def test_group_by_many_values_matches_per_group_masks(key_type):
+    # More groups than the mask path handles, so positions are reordered into blocks;
+    # results must equal reducing each group's mask, bit for bit.
+    rng = np.random.default_rng(1)
+    count, size = 40, 2_000
+    keys = rng.integers(0, count, size)
+    if key_type == "str":
+        key_values = np.array([f"k{k:02d}" for k in keys])
+    elif key_type.startswith("datetime"):
+        key_values = np.datetime64("2026-01-01", "s") + keys.astype("timedelta64[h]")
+    else:
+        key_values = keys.astype(key_type)
+    values = rng.normal(size=(3, size)).astype("float32")  # the grouped axis is not first
+    values[0, ::97] = np.nan
+    counts = rng.integers(0, 1000, (3, size)).astype("int32")
+    ds = xr.Dataset(
+        {"v": (("sensor", "point"), values), "c": (("sensor", "point"), counts), "key": ("point", key_values)}
+    )
+    out = (tidy(ds) >> group_by("sensor", "key") >> summarise(
+        m=mean(col("v")), s=sum(col("v"), na_rm=True), mx=max(col("v")), sc=sum(col("c")),
+        sd=std(col("v"), na_rm=True), k=n(),
+    )).collect()
+    labels = np.unique(key_values)
+    np.testing.assert_array_equal(out.key.values, labels)  # older xarray stores times as nanoseconds
+    for i, label in enumerate(labels):
+        mask = key_values == label
+        part = ds.isel(point=mask)
+        group = out.isel(key=i).transpose("sensor")
+        np.testing.assert_array_equal(group["m"].values, part.v.mean("point", skipna=False).values)
+        np.testing.assert_array_equal(group["s"].values, part.v.sum("point").values)
+        np.testing.assert_array_equal(group["mx"].values, part.v.max("point", skipna=False).values)
+        np.testing.assert_array_equal(group["sd"].values, part.v.std("point").values)
+        np.testing.assert_array_equal(group["sc"].values, part.c.sum("point").values)
+        assert group["k"].item() == mask.sum()
+    centred = (tidy(ds) >> group_by("key") >> mutate(d=col("c") - mean(col("c")))).collect()
+    expected = counts.astype(float)
+    for label in labels:
+        mask = key_values == label
+        expected[:, mask] -= ds.c.isel(point=mask).mean().item()
+    np.testing.assert_array_equal(centred["d"].transpose("sensor", "point").values, expected)
+
+
+def test_group_by_value_with_missing_times_keeps_them_as_a_group():
+    times = np.array(["2026-01-02", "NaT", "2026-01-01", "NaT"], dtype="datetime64[s]")
+    ds = xr.Dataset({"v": ("point", [1.0, 2.0, 3.0, 4.0]), "t": ("point", times)})
+    out = (tidy(ds) >> group_by("t") >> summarise(m=mean(col("v")))).collect()
+    assert out["m"].values.tolist() == [3.0, 1.0, 3.0]
+    assert np.isnat(out.t.values[-1])
+
+
 def test_group_by_bins_and_empty_bins():
     out = (field_cloud() >> group_by(bins(intensity, [0, 15, 35, 100, 200]))
            >> summarise(k = n(), s = sum(intensity), m = mean(intensity))).collect()
