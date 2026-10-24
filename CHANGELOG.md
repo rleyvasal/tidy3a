@@ -27,3 +27,8 @@
   notebook variable; `[x, y, z] = …` inside `mutate`; only tidy3A's own
   calls are rewritten, so tidy3 and tidy3A share a notebook.
 - `n()` counts observations on the axes every variable shares.
+- Inspection output shows time labels to the second (or as dates) and
+  floats to 10 significant digits, with a gap before each axis role.
+- Examples on real data: a nuScenes Mini LiDAR sweep, and three public
+  sample datasets (air temperature, ERA-Interim wind, a Landsat scene),
+  each checked against plain NumPy or xarray.

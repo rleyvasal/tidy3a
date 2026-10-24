@@ -86,6 +86,16 @@ def test_inspection_matches_the_plan_example():
     assert lines[4].endswith("field axis (labels act as columns)")
 
 
+def test_time_and_float_labels_are_shown_compactly():
+    times = np.array(["2013-01-01T00:00", "2013-01-01T06:00"], dtype="datetime64[ns]")
+    text = repr(tidy(xr.DataArray([1.0, 2.0], dims="time", coords={"time": times})))
+    assert "2013-01-01T00:00:00  2013-01-01T06:00:00    observation axis" in text
+    days = np.array(["2026-06-01", "2026-07-01"], dtype="datetime64[ns]")
+    assert "2026-06-01  2026-07-01" in repr(tidy(xr.DataArray([1.0, 2.0], dims="t", coords={"t": days})))
+    noisy = xr.DataArray([1.0, 2.0], dims="y", coords={"y": [9120746.500028737, 9120718.000028737]})
+    assert "y: 9120746.5  9120718    observation axis" in repr(tidy(noisy))
+
+
 def test_long_label_lists_are_shortened():
     da = xr.DataArray(np.zeros(20), dims="band", coords={"band": [f"b{i}" for i in range(20)]})
     assert "b0  b1  b2  b3  b4  b5  …  b19" in repr(tidy(da))

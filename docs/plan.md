@@ -1080,6 +1080,16 @@ Exit: the same documented examples run in scripts and notebooks, including the f
 Status (2026-10-24): complete, including the manual nuScenes Mini run.
 
 - nuScenes Mini, real data: `examples/nuscenes_sweep.py` runs §7 on the earliest key-frame `LIDAR_TOP` sweep. It reads the nuScenes JSON tables directly to find the file and its calibration; the SDK and its dependencies are not needed, which is a decision taken here. `read_array` infers 34,688 points from 693,760 bytes. After the calibration rotation and translation, 33,653 points lie within 50 m of the vehicle-frame origin, across 32 rings (0–31). An independent NumPy calculation agrees on the kept positions, distances, intensities, and points per ring. The rotation matrix built from nuScenes' (w, x, y, z) quaternion matches `pyquaternion`, the quaternion library the SDK uses. `tests/test_nuscenes.py` reruns this when `NUSCENES_DATAROOT` is set and is skipped otherwise.
+- Public sample data: `examples/sample_data.py` runs tidy3A on three datasets, opened by xarray or rioxarray and wrapped with `tidy()`, and checks 17 results against plain xarray, all passing. `tests/test_sample_data.py` reruns it when `TIDY3A_SAMPLES` is set.
+  - `air_temperature.nc` (xarray tutorial data, `time × lat × lon`): label filters, a mean per latitude, anomalies from grouped `mutate`, 30-day `bins` windows matching `resample("30D")`, and a formula.
+  - `eraint_uvz.nc` (ERA-Interim, `month × level × latitude × longitude`): wind speed as a formula, `pack([u, v])` rotated with `dot` with speed preserved, and a mean speed per level for the northern hemisphere.
+  - `L7_ETMs.tif` (stars' Landsat 7 example, `band × y × x`, uint8): bands as a field axis, NDVI, a mean per band as stars' `st_apply(x, "band", mean)`, a crop as stars' `filter(x > …)`, and a count of vegetated pixels.
+
+Findings from real data:
+
+- Inspection output now shows time labels to the second, or as dates alone when every label is at midnight, and floats to 10 significant digits. A gap always separates labels from the axis role. Map coordinates such as `9120746.500028737` print as `9120746.5`; stored labels are unchanged.
+- `group_by(bins(time, "30 days"))` reduces every observation axis that is not a key, as the grouping rule says and as dplyr does. A window per grid point, like xarray's `resample`, is `group_by(bins(time, "30 days"), lat, lon)`. The example documents both.
+- Open: integer arithmetic follows NumPy, so `nir - red` on uint8 bands wraps around instead of going negative. stars avoids this because R reads such rasters as doubles. The example converts first (`nir * 1.0 - red`). A rule, such as promoting integer subtraction or warning when it wraps, is a candidate decision for a later milestone; NumPy and xarray behave the same way today.
 
 - tidy3 change, on the tidy3 branch `notebook-ownership` (commit `6adec50`, not merged or released): `Tidy3MaskTransformer` rewrites a call only when the function is tidy3's, decided by the cell's own imports and then the live namespace. Two new tests fail on the previous code and pass now; the full tidy3 suite passes (1,531 passed, 49 skipped).
 - `src/tidy3a/jupyter.py`, loaded with `%load_ext tidy3a.jupyter`. It is copied and adapted from tidy3's notebook layer, with credit, and imports no tidy3 code. 13 IPython tests run real cells, covering:

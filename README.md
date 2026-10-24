@@ -22,6 +22,10 @@ against plain NumPy:
 python examples/nuscenes_sweep.py /path/to/nuscenes-mini
 ```
 
+Three public sample datasets (gridded air temperature, ERA-Interim wind, and
+stars' Landsat scene) run the same way against plain xarray; see
+`examples/sample_data.py` for the files and what each one checks.
+
 Before pushing, run what CI runs, each job in a fresh environment with only
 tidy3A's declared dependencies (needs [uv](https://docs.astral.sh/uv/)):
 

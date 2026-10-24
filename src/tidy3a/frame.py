@@ -166,7 +166,7 @@ def _inspect(frame: TidyArray) -> str:
     for axis, (text, note) in zip(axes, rows):
         label = f"{axis}:".ljust(width + 1)
         if note:
-            lines.append(f"  {label}{text.ljust(column)}{note}")
+            lines.append(f"  {label}{text.ljust(column - 4)}    {note}")
         else:
             lines.append(f"  {label}{text}")
         if axis == "variable" and axis != frame._field_axis and axis in data.indexes:
@@ -215,7 +215,15 @@ def _axis_row(frame: TidyArray, axis: Hashable) -> tuple[str, str]:
 def _format_labels(values: np.ndarray) -> str:
     if len(values) == 0:
         return "no labels (0 positions)"
-    shown = [str(value) for value in values]
+    if values.dtype.kind == "M":
+        # Times to the second, or dates alone when every label is at midnight.
+        seconds = values.astype("datetime64[s]")
+        midnight = (seconds == seconds.astype("datetime64[D]")).all()
+        shown = list(np.datetime_as_string(seconds, unit="D" if midnight else "s"))
+    elif values.dtype.kind == "f":
+        shown = [format(value, ".10g") for value in values]  # display only; labels are unchanged
+    else:
+        shown = [str(value) for value in values]
     if len(shown) > _LABELS_SHOWN + 2:
         shown = [*shown[:_LABELS_SHOWN], "…", shown[-1]]
     return "  ".join(shown)
