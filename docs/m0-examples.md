@@ -5,7 +5,7 @@ Status: prototype comparison for review. None of the tidy3A code below is implem
 The question this answers (plan §5.1, milestone 0): does `select` with a declared **field axis** read better than the **stars style**, where fields become separate variables (stars' `split`, tidy3A's `variables_from=`) and `select` picks only variables?
 
 - **Style A, field axis:** `read_array(..., field_axis="feature")`. One array; field labels act as columns.
-- **Style B, stars style:** `read_array(..., variables_from="feature")`. One variable per field, as after stars' `split(x, "feature")`. Vectors are rebuilt with a helper, shown here as `merge(x, y, z, along="feature")` after stars' `merge()`.
+- **Style B, stars style:** `read_array(..., variables_from="feature")`. One variable per field, as after stars' `split(x, "feature")`. This comparison was written with a re-packing helper, `merge(x, y, z, along="feature")` after stars' `merge()`; since decided: `[x, y, z]` rebuilds the recorded axis (plan §5.2), so Style B's vector line now matches Style A.
 - **Style C, strict without splitting:** no field axis and no split. Field labels are reached only through `filter` and xarray. Shown once, for comparison.
 
 ## Example 1: point cloud
@@ -46,7 +46,7 @@ cloud = read_array(
 
 nearby = (
     cloud
-    >> mutate(p = dot(R, merge(x, y, z, along="feature"), over="feature") + offset)
+    >> mutate(p = dot(R, [x, y, z], over="feature") + offset)   # rebuilds the recorded feature axis
     >> mutate(distance = formula(r"\sqrt{\sum_i p_i^2}"))
     >> filter(distance <= 50)
 )
@@ -108,7 +108,7 @@ Expected (checked): NDVI at the first date is 0.5, 0, 0, 0.75, 0.5, 0 by pixel; 
 | Aspect | Style A, field axis | Style B, stars style | Style C, strict |
 |---|---|---|---|
 | Scalar expressions (`distance <= 50`, NDVI, `mean(x)`) | Bare names | Bare names, identical text | Not available without xarray |
-| Vector operations (rotation) | `[x, y, z]` directly | Needs a re-packing helper (`merge`) | xarray |
+| Vector operations (rotation) | `[x, y, z]` directly | `[x, y, z]` rebuilds the recorded axis (decided after this comparison; it first needed a `merge` helper) | xarray |
 | One summary for every field | `mean(values)` keeps the field axis | One expression per field, or an `across()`-style helper | xarray |
 | Fields with different types (`ring` as integer) | Not possible: one array, one type | Natural | Not possible |
 | Concepts a user must learn | Field axis, observation axis | Separate variables only | Separate variables only |
@@ -122,6 +122,6 @@ Findings:
 4. **Style B wins where fields are heterogeneous:** different types and units, such as nuScenes' `ring`, and it needs fewer rules.
 5. Both styles are already in the plan, as `field_axis=` and `variables_from=`. The comparison supports keeping both, with documented guidance: use `field_axis=` when fields are components of one quantity (`x y z`, spectral bands, RGB), and `variables_from=` when they are different quantities.
 
-Recommendation for review: keep the field axis. Its advantage is real but narrow (vectors and spectra), so the documentation should present `variables_from=` as equally first-class, and milestone 2 should check the tidy layer's one-page complexity budget (`docs/decisions.md`) before adding more field-axis rules.
+Decided (2026-10-24): keep the field axis, with `variables_from=` equally first-class (plan §5.1). The recommendation as reviewed: keep the field axis. Its advantage is real but narrow (vectors and spectra), so the documentation should present `variables_from=` as equally first-class, and milestone 2 should check the tidy layer's one-page complexity budget (`docs/decisions.md`) before adding more field-axis rules.
 
-Open item found while writing Style B: the re-packing helper (`merge(x, y, z, along=)`) is not in the plan. Style B needs it, or an equivalent, for vector operations on split variables. Its name clashes conceptually with joins, so it needs its own decision.
+Re-packing, found while writing Style B and since decided (plan §5.2): `[x, y, z]` rebuilds a vector from variables of the same recorded `variables_from` axis, and `pack([...], along=...)` re-packs other variables, with the axis always named. `merge` was avoided because `xr.merge` implements joins.

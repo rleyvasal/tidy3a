@@ -48,6 +48,7 @@ Array-layer helpers are used inside tidy-layer verbs, for example `mutate(p = do
 | Select vs filter | `select` picks variables and field-axis labels (columns); observation-axis labels are values and go through `filter` |
 | Bare field names | In expressions, a field-axis label is the field with the field axis dropped, e.g. `x(point)` |
 | Vector form | `[x, y, z]` of field-axis references is a vector view keeping the narrowed field axis; lists of values or strings stay literals |
+| Re-packing variables | `[x, y, z]` rebuilds the recorded `variables_from` axis; otherwise `pack([...], along=...)` with the axis always named |
 | Mutate on field labels | `mutate(x = …)` writes back into the shared array; the result must have the field's shape |
 | Multi-axis filter | Error with hints: reduce with `any`/`all(…, over=)`, or mask explicitly with `mutate(… where …)` |
 | Filter across axes | One-axis predicates on different axes each filter their own axis (AND, comma or `&`); OR across axes is an error |
@@ -176,6 +177,8 @@ ReadError: field_axis="feature" names an axis that variables_from="feature" turn
   Use one: variables_from="feature" already makes x, y, z, … selectable as columns.
 ```
 - Labels that are not valid Python identifiers still become variables but require `col("...")` in expressions.
+
+Each variable made by `variables_from=` records its origin, the axis name and label order, so `[x, y, z]` can rebuild the vector later (§5.2).
 
 The option names the result, not the file layout. If on-disk planar files need support later, describe them with a separate file-layout option using `interleaved`/`planar`, so the two are never confused.
 
@@ -306,7 +309,9 @@ TypeError: where() selects columns by predicate, as in tidy3 (select(where(is_nu
 
 Precedents: tidy3's selection helpers and `if_else`; dplyr; stars' `select`, which passes through to dplyr's tidyselect; `xr.where` and `np.where` on the array side.
 
-Relation to stars. The field axis extends stars, the closest precedent, which takes the strict route: its `select` picks only attributes (variables), and a field-like dimension such as spectral bands is an ordinary dimension, subset with `slice(band, 6)` or `filter(band > 3)`; users who want bands as columns call `split(x, "band")`. In tidy3A terms, stars style would be `cloud >> filter(feature.is_in(["x", "y", "z"]))`, where the field axis allows `cloud >> select(x, y, z)`. tidy3A keeps the field axis because point-cloud and record fields are column-like in a way spectral bands mostly are not, and the strict style makes the most common point-cloud operation awkward. Several decisions depend on it: bare field names in expressions (§5.2), the `[x, y, z]` vector form, `mutate` write-back (§5.4), and the `variable` hint. Because this is the largest departure from a proven design, milestone 0 must test both styles, field-axis select and stars-style strict select, on the point-cloud and time-series examples before the field axis becomes a public contract.
+Relation to stars. The field axis extends stars, the closest precedent, which takes the strict route: its `select` picks only attributes (variables), and a field-like dimension such as spectral bands is an ordinary dimension, subset with `slice(band, 6)` or `filter(band > 3)`; users who want bands as columns call `split(x, "band")`. In tidy3A terms, stars style would be `cloud >> filter(feature.is_in(["x", "y", "z"]))`, where the field axis allows `cloud >> select(x, y, z)`. Several decisions depend on the field axis: bare field names in expressions (§5.2), the `[x, y, z]` vector form, `mutate` write-back (§5.4), and the `variable` hint.
+
+Decided after milestone 0 (`docs/m0-examples.md`): keep the field axis, with `variables_from=` equally first-class. The prototypes compared field-axis style, stars style (`variables_from=`, as after stars' `split`), and strict style on point-cloud, sensor, and geospatial raster examples. Scalar expressions read identically in the first two. The field axis wins where fields are components of one quantity, such as `x y z`, spectral bands, or RGB: vector operations use `[x, y, z]` directly and one summary covers every field (`mean(values)`). Separate variables win where fields are different quantities with different types or units, such as nuScenes' `ring`, and need fewer rules. Strict style, with neither, pushes common work out to xarray and is not offered. Documentation presents both import forms with that guidance.
 
 Relation to xarray. xarray avoids this ambiguity by always naming the axis: `ds["x"]` selects a variable and `da.sel(feature="x")` selects a label, with every axis treated alike. In its tabular view, `Dataset.to_dataframe()` makes only variables into columns and every dimension into the row index, and the NetCDF/CF practice it follows stores distinct quantities, such as wind components `u` and `v`, as separate variables. xarray still marks an axis that holds variable names as special: `Dataset.to_dataarray()` (formerly `to_array()`) and `to_stacked_array()` name it `variable` by default. The field-axis rule exists because tidy3A drops the explicit axis name from `select(x)`, so the axis's role has to be declared instead. Declaring `field_axis="feature"` means `select` treats the data as if `to_dataset(dim="feature")` had been applied, without moving any data; `variables_from="feature"` performs that conversion at import. `tidy()` accepts the same explicit `field_axis=` as `read_array`, for example `tidy(da, field_axis="variable")`.
 
@@ -355,7 +360,21 @@ Rules:
 - A list whose items are all data references becomes a vector view. A list of plain values, such as `[1.0, 0.0, 0.0]`, stays a literal.
 - A list of strings, such as `["x", "y", "z"]`, stays a literal; it is never read as data.
 - A list mixing references and values, such as `[x, 0.0, z]`, is an error.
-- All references must be labels on the same field axis; otherwise the error names the axes involved.
+- All references must be labels on the same field axis, or variables from the same recorded `variables_from` axis (below); otherwise the error names the axes involved.
+
+Decided: `[x, y, z]` also rebuilds a vector from separate variables when they came from the same `variables_from=` import. tidy3A records each such variable's origin at import, the axis name and its label order, so `[x, y, z]` gives `(point, feature: 3)` exactly as it does with the field axis. Nothing is guessed: the origin was recorded, not inferred from names. Vector code therefore reads the same with either import form:
+
+```python
+mutate(p = dot(R, [x, y, z], over="feature") + offset)     # field_axis= or variables_from=
+```
+
+For variables without a shared recorded origin, such as ones created by `mutate`, the explicit helper is `pack([...], along=...)`; the axis name is always required:
+
+```python
+mutate(v = pack([vx, vy, vz], along="feature"))   # new axis feature, labels vx vy vz
+```
+
+A list of variables without a shared origin is an error that suggests `pack`. Precedents: tidyr's `pack()`, which packs columns into one (tidy3 has a `pack` verb; the notebook ownership rule of §5.6 keeps them apart); stars' `merge(x, name = "attributes")`, which turns attributes into a dimension but invents the name `"attributes"` by default, which tidy3A does not; xarray's `to_dataarray(dim=)` and `xr.concat(..., dim=)`; NumPy's `np.stack`. `merge` was avoided because `xr.merge` combines datasets and implements tidy3A's joins, and `stack` because xarray's `stack` builds a multi-index.
 
 `c()` is not added: tidy3 has no `c()`, and `c` is a common notebook name that would collide under the name-resolution rule below. The documentation notes that `[x, y, z]` corresponds to R's `c(x, y, z)`.
 
@@ -973,13 +992,13 @@ Write `docs/decisions.md` covering selection/field resolution, grouping/reductio
 
 Exit: the reviewer can trace the point cloud and time-series examples without wondering whether a name means a variable, axis, label, or external Python object. No large shared-framework refactor is required to begin.
 
-Status (2026-10-24), awaiting review:
+Status (2026-10-24): reviewed and complete. The field axis is kept, with `variables_from=` equally first-class (§5.1), and the re-packing helper is decided (§5.2).
 
 - `prototypes/test_xarray_assumptions.py`: 26 checks of the xarray and NumPy behavior this plan relies on, all passing on xarray 2026.9.0 and NumPy 2.5.4. No plan claim needed correcting.
 - `prototypes/test_examples.py`: the point-cloud, sensor time-series, and geospatial raster examples in plain xarray, with hand-checked answers; 13 tests passing. The geospatial example (bands, map coordinates, dates, NDVI) was added because it is the data stars is proven on.
 - `docs/m0-examples.md`: the examples in field-axis style, stars style (`variables_from=`), and strict style. Finding: scalar expressions read identically in the first two; the field axis wins for vectors and per-field summaries, splitting wins for heterogeneous fields; strict style is not viable. Recommendation: keep the field axis and present `variables_from=` as equally first-class.
 - `docs/decisions.md`: the tidy-layer rules on one page (about 480 words), within the complexity budget.
-- New open item: style B needs a helper to re-pack split variables into a vector (shown as `merge(x, y, z, along=)`), which the plan does not yet define.
+- The re-packing gap found in style B is decided: `[x, y, z]` rebuilds a recorded `variables_from` axis, and `pack([...], along=...)` covers other variables (§5.2).
 
 ### Milestone 1 — Create the repository and import foundation
 
