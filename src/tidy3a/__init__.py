@@ -32,6 +32,7 @@ from tidy3a.expr import (
     var,
     variable,
 )
+from tidy3a.formula import FormulaError, formula
 from tidy3a.frame import TidyArray, tidy
 from tidy3a.io import infer, read_array
 from tidy3a.linalg import (
@@ -104,6 +105,8 @@ __all__ = [
     "mean", "median", "min", "mutate", "n", "nan", "num_range", "pull", "read_array", "select",
     "slice", "slice_head", "slice_tail", "starts_with", "std", "sum", "summarise", "summarize",
     "tidy", "ungroup", "var", "variable", "where",
+    # formula
+    "FormulaError", "formula",
     # array layer
     "angle", "arccos", "arcsin", "arctan", "arctan2", "ceil", "conj", "cos", "cosh", "dot",
     "exp", "floor", "imag", "log", "log2", "log10", "pack", "real", "rename_axes", "sign",

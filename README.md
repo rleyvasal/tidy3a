@@ -39,9 +39,9 @@ The example shows the planned interface. Implemented so far: `read_array`,
 `mutate`, `group_by`, `summarise`, joins, `pull`, `bind_cols`) in script
 syntax, where names are written with `col("x")` or declared with
 `x, y, z = fields("x", "y", "z")`, and the array layer (`dot`, numeric
-functions, `conj`, `rename_axes`, `pack`). Not yet: `formula()` and
-notebook bare names, so the example's distance line is written
-`sqrt(sum(p ** 2, over="i"))` today.
+functions, `conj`, `rename_axes`, `pack`), and `formula()` for plain
+mathematical text and a strict LaTeX dialect. Not yet: notebook bare names,
+so scripts declare names with `fields()` or write `col("x")`.
 
 ## License
 

@@ -18,3 +18,7 @@
 - Exact label alignment, with reordering by label and explicit joins.
 - Array layer: `dot` with `over=`, elementwise numeric functions, `conj`,
   `real`, `imag`, `angle`, `arctan2`, `rename_axes`, and `pack`.
+- `formula()`: plain mathematical text and a strict LaTeX dialect with
+  plot3's conventions, subscripts as axis indices, labels, and positions,
+  `\sum` with optional checked bounds, `bind=` for index letters and
+  values, and show-back of how each formula was read.

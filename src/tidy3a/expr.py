@@ -190,7 +190,8 @@ class Reduce(Expr):
     def text(self) -> str:
         parts = [] if self.arg is None else [self.arg.text()]
         if self.over is not None:
-            parts.append(f"over={self.over!r}")
+            over = f'"{self.over}"' if isinstance(self.over, str) else repr(self.over)
+            parts.append(f"over={over}")
         if self.na_rm:
             parts.append("na_rm=True")
         if self.min_count is not None:
@@ -418,6 +419,14 @@ def evaluate(node: Expr, ctx: Context) -> Any:
         return function(node, ctx)
     if isinstance(node, Reduce):
         return _evaluate_reduce(node, ctx)
+    lower = getattr(node, "lower", None)
+    if lower is not None:  # a formula: compile against the data, evaluate, and show how it was read
+        compiled, log = lower(ctx)
+        value = evaluate(compiled, ctx)
+        dims = ", ".join(map(str, getattr(value, "dims", ()))) or "a single value"
+        lines = [f"formula: {node.source}", *log, f"result: ({dims})", f"as array code: {compiled.text()}"]
+        ctx.notes.append("\n  ".join(lines))
+        return value
     raise TypeError(f"cannot evaluate {type(node).__name__}")
 
 

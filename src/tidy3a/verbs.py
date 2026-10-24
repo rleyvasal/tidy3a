@@ -377,12 +377,23 @@ def assign(target: Any, value: Any) -> Assignment:
     return Assignment(target, value)
 
 
-def mutate(*assignments: Assignment, **named: Any) -> Verb:
-    """Add or replace variables, in order; field labels are written into their array."""
-    steps = [*assignments, *(Assignment(name, value) for name, value in named.items())]
+def mutate(*assignments: Any, **named: Any) -> Verb:
+    """Add or replace variables, in order; field labels are written into their array.
+
+    A formula with a left side, ``formula("p_i = …")``, may be passed on its own.
+    """
+    from tidy3a.formula import Formula
+
+    positional = []
     for step in assignments:
+        if isinstance(step, Formula) and step.target is not None:
+            step = Assignment(step.target, step)
         if not isinstance(step, Assignment):
-            raise TypeError("mutate() takes name = value, or assign(target, value)")
+            raise TypeError(
+                'mutate() takes name = value, assign(target, value), or formula("name = …")'
+            )
+        positional.append(step)
+    steps = [*positional, *(Assignment(name, value) for name, value in named.items())]
 
     def apply(frame: TidyArray) -> TidyArray:
         for step in steps:
@@ -400,7 +411,7 @@ def mutate(*assignments: Assignment, **named: Any) -> Verb:
             frame = frame._evolve(data, notes=notes, origins=origins)
         return frame
 
-    return Verb(_call_text("mutate", assignments, named), apply)
+    return Verb(_call_text("mutate", positional, named), apply)
 
 
 def _store(frame: TidyArray, name: Hashable, value: Any, text: str, notes: list[str]) -> xr.Dataset:

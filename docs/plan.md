@@ -1057,6 +1057,20 @@ Implement plain mathematical text first, then the scoped LaTeX subset. Extend su
 
 Exit: `formula("x^2")` matches `col("x") ** 2`; an indexed sum matches the native reduction; the distance formula works; ambiguity and unsupported syntax produce precise errors. Ordinary text literals are unaffected.
 
+Status (2026-10-24): complete. `formula.py` parses plain text and the LaTeX dialect, compiles formulas against the data into the same expressions as Python syntax when a verb evaluates them, and shows how each was read. 27 new tests, 223 in total, pass on the minimum and latest versions, covering every §6.3 decision: plot3's conventions, letters side by side, the `\mathrm{xy}` collision error, subscripts as indices, labels, and positions, `bind=` for axes and values, `\sum_i` and checked bounds, `\mathrm{i}`, `e`, and show-back.
+
+Details decided from precedents while implementing:
+
+- Plain text or LaTeX: a string with a backslash or wrapped in `$…$` is LaTeX, as plot3's `is_latex`. In plain text, names may have several letters and underscores, so `p_1` is the name `p_1`, as in plot3; subscripts are LaTeX only. `**` is accepted as `^`.
+- A function's argument is the following factor and any implicit products after it, stopping at another function: `\sin x y` is `sin(x·y)`, `\sin x + y` is `sin(x) + y` (plot3).
+- `\ln` and `\log` are natural logarithms; `\log_{10}` is base 10, and other bases are errors (plot3). `\sqrt[n]{…}`, `\frac`, `|…|`, `\left( … \right)`, `\left| … \right|`, `\cdot`, `\times`, `\pi`, and Greek-letter names are supported. A string whose backslashes Python already ate (`"\frac"` without `r`) is an error suggesting a raw string (plot3).
+- The body of `\sum` is the product that follows it, the usual reading: `\sum_i a_i b_i + c` adds `c` after the sum. Sums nest.
+- Names in a formula resolve, in order, to `bind=` values, then to the data or a Python value in the calling code, captured when `formula()` is called, as `env()` does. A name that is both data and a Python value is an error, under the §5.2 collision rule; references made with `fields()` count as data, so scripts that declare `x, y, z = fields(...)` keep working.
+- A numeric subscript `p_1` means a position on `p`'s component axis: the field axis, or the one axis of `p` no other variable has. Anything else is an error asking for a label or index letter.
+- A formula with a left side, `formula("p_i = \sum_j R_{ij} v_j", bind=…)`, can be passed to `mutate` on its own; the left side's index letters must be free indices of the right side.
+- Show-back prints the formula's source rather than a Unicode rendering, then each binding, the result's axes, and the compiled array code, in the inspection output of the verb that used it. On its own, `repr(formula)` shows the parse and its summed index letters; `_repr_latex_` renders the source in Jupyter. A Unicode rendering is deferred.
+- Not supported yet, each with a precise error: `\prod` (there is no product reduction yet), integrals, sums over more than one letter, and implicit multiplication in plain text (`2x`; write `2*x`).
+
 ### Milestone 5 — Notebook experience and handoff examples
 
 Prerequisite: the tidy3 change in §5.6, so tidy3's transformer rewrites only tidy3-owned calls. Add optional bare-name support using a small, clearly owned transformer/integration layer that rewrites only tidy3A-owned calls. Review tidy3/plot3 behavior for collaboration opportunities without importing their execution backends. Test real IPython cells, import order, external constants/operators, and explicit `col`/environment escapes.
