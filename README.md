@@ -4,8 +4,16 @@ Tidy-style verbs for named multidimensional arrays: point clouds, images,
 sensor measurements, scientific and complex-valued arrays. Built on xarray
 and NumPy, in the spirit of [tidy3](https://github.com/rleyvasal/tidy3).
 
-**Status:** design stage. No code has been released yet. The design and
-its decisions are in [docs/plan.md](docs/plan.md).
+**Status:** early development, not yet released. The design and its
+decisions are in [docs/plan.md](docs/plan.md); the rules fit on one page in
+[docs/decisions.md](docs/decisions.md).
+
+To work on it:
+
+```bash
+python -m pip install -e ".[dev]"
+python -m pytest -q
+```
 
 ```python
 from tidy3a import *
@@ -26,7 +34,8 @@ nearby = (
 )
 ```
 
-The example shows the planned interface; none of it is implemented yet.
+The example shows the planned interface. Implemented so far: `read_array`,
+`infer`, and `tidy()`, with inspection output.
 
 ## License
 

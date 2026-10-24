@@ -156,13 +156,15 @@ The reader returns the tidy3A wrapper, ready for pipes; `.to_xarray()` leaves it
 The ordered `dims` mapping defines shape and axis names and holds only sizes and `infer`. `labels` is a separate mapping of label lists, written one axis per line for readability. A size is kept even when labels imply it: a mismatch between the size and the label count is an error, which catches mislabelled raw bytes. Labels are always lists; there is no space-separated string shorthand, so labels containing spaces and numeric labels need no special rule. Unlabeled axes are usable by integer position; do not invent timestamps or physical coordinates. The reader must explain what it inferred in its representation or an inspection report:
 
 ```text
-<TidyArray source: raw file, float32 little-endian, row-major>
+<TidyArray source: raw file "sensors.bin", float32 little-endian, row-major>
 values (time: 1200, sensor: 2, feature: 3) float32
-  feature: x  y  z          field axis (labels act as columns)
-  sensor:  front  rear      observation axis (labels are values)
-  time:    unlabeled, 0 … 1199
-inferred: time = 28,800 bytes / 4 bytes / (2 × 3) = 1200
+  time:    unlabeled, positions 1 … 1,200
+  sensor:  front  rear    observation axis (labels are values)
+  feature: x  y  z        field axis (labels act as columns)
+inferred: time = 28,800 bytes / 4 bytes / (2 × 3) = 1,200
 ```
+
+This is the implemented output (milestone 1): axes are listed in storage order, and unlabeled positions are shown 1-based, matching `slice` and `pull` (§5.3, §5.5).
 
 `field_axis=` declares which axis holds field names, the labels that would be column names in a tidy table, such as `x y z intensity ring`. Every other axis is an observation axis, whose labels are values, such as `front rear` or timestamps. Each array has at most one field axis. The reader never guesses it from the labels; without `field_axis=`, the array has no field axis and `select` picks only variables (§5.1).
 
@@ -176,6 +178,8 @@ Separate variables are opt-in. By default the data stays one array named `values
 ReadError: field_axis="feature" names an axis that variables_from="feature" turns into variables.
   Use one: variables_from="feature" already makes x, y, z, … selectable as columns.
 ```
+
+- The `variables_from` labels must be text, since they become variable names (decided in milestone 1).
 - Labels that are not valid Python identifiers still become variables but require `col("...")` in expressions.
 
 Each variable made by `variables_from=` records its origin, the axis name and label order, so `[x, y, z]` can rebuild the vector later (§5.2).
@@ -468,7 +472,7 @@ Decided: assigning to a field-axis label writes back into the shared array. On `
 ```text
 values (point: 34688, feature: 5) float64
   feature: x  y  z  intensity  ring      field axis (labels act as columns)
-  point:   unlabeled, 0 … 34687
+  point:   unlabeled, positions 1 … 34,688
   changed: values promoted float32 → float64 by mutate(x = …); all fields on feature now float64
 ```
 
@@ -1005,6 +1009,8 @@ Status (2026-10-24): reviewed and complete. The field axis is kept, with `variab
 Create the separate repository/package scaffold, installation configuration, license, tests, and independent CI. Implement wrapping existing xarray objects, generic raw numeric/`.npy` reads, `infer`, naming/labeling, inspection, and conversion back to xarray.
 
 Exit: 1D through 5D arrays, malformed record lengths, labels, complex types, and empty observations have defined behavior. An installed wheel can import the package without optional integrations.
+
+Status (2026-10-24): complete. `src/tidy3a/` has `read_array` and `infer` (`io.py`), `TidyArray` and `tidy()` with inspection output (`frame.py`), and `ReadError`/`TidyError` (`errors.py`). Python ≥ 3.11 with NumPy ≥ 2.0 and xarray ≥ 2024.6; 109 tests pass on both the minimum and the latest versions, and an installed wheel imports without optional packages. CI (`.github/workflows/tests.yml`) runs Python 3.11–3.14, the minimum versions, and the clean-wheel import. Decided while implementing: `variables_from=` labels must be text, and `read_array` requires `dims=` for every source rather than inventing axis names.
 
 ### Milestone 2 — Familiar manipulation verbs
 

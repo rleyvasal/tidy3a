@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tidy3a"
+dynamic = ["version"]
+description = "Tidy-style verbs for named multidimensional arrays, built on xarray"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Rigoberto Leyva Salmeron" }]
+keywords = ["xarray", "arrays", "tidyverse", "dplyr", "point-cloud", "raster"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering",
+]
+# NumPy 2's promotion rules (x * 2 on float32 stays float32) are assumed by
+# the write-back rules in docs/plan.md §5.4.
+dependencies = [
+  "numpy>=2.0",
+  "xarray>=2024.6",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "flox>=0.9"]
+
+[project.urls]
+Homepage = "https://github.com/rleyvasal/tidy3a"
+
+[tool.setuptools.dynamic]
+version = { attr = "tidy3a.__version__.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+tidy3a = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "prototypes"]
+pythonpath = ["src"]
+filterwarnings = [
+  # flox imports a NumPy NaT dtype with a deprecated generic unit.
+  "ignore:The 'generic' unit for NumPy timedelta is deprecated:DeprecationWarning",
+]

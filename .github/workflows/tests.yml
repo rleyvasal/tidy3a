@@ -1,0 +1,62 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    name: pytest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install tidy3a
+        run: python -m pip install -e ".[dev]"
+      - name: Run tests
+        run: python -m pytest -q --tb=short
+
+  # The dependency floors in pyproject.toml, checked rather than assumed.
+  minimum-versions:
+    name: pytest (minimum NumPy and xarray)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install tidy3a with its oldest supported dependencies
+        run: python -m pip install "numpy==2.0.*" "xarray==2024.6.0" pytest -e .
+      - name: Run tests
+        run: python -m pytest -q --tb=short
+
+  wheel:
+    name: Installed wheel imports without optional packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Build the wheel
+        run: |
+          python -m pip install build
+          python -m build --wheel
+      - name: Install it in a clean environment and import
+        run: |
+          python -m venv /tmp/clean
+          /tmp/clean/bin/pip install dist/*.whl
+          cd /tmp && /tmp/clean/bin/python -c "import tidy3a, numpy as np; print(tidy3a.read_array(np.zeros(3), dims=['t']))"
