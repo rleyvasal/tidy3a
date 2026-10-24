@@ -30,6 +30,7 @@ from tidy3a.expr import (
     std,
     sum,
     var,
+    variable,
 )
 from tidy3a.frame import TidyArray, tidy
 from tidy3a.io import infer, read_array
@@ -102,7 +103,7 @@ __all__ = [
     "infer", "inner_join", "is_numeric", "label", "last_col", "left_join", "matches", "max",
     "mean", "median", "min", "mutate", "n", "nan", "num_range", "pull", "read_array", "select",
     "slice", "slice_head", "slice_tail", "starts_with", "std", "sum", "summarise", "summarize",
-    "tidy", "ungroup", "var", "where",
+    "tidy", "ungroup", "var", "variable", "where",
     # array layer
     "angle", "arccos", "arcsin", "arctan", "arctan2", "ceil", "conj", "cos", "cosh", "dot",
     "exp", "floor", "imag", "log", "log2", "log10", "pack", "real", "rename_axes", "sign",

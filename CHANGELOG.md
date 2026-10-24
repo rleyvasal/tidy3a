@@ -11,9 +11,10 @@
   `slice`/`slice_head`/`slice_tail`, `mutate` with write-back and vector
   assignment, `group_by` by axis, value, or `bins()`, `summarise`,
   `ungroup`, `pull`, `bind_cols`, and `left_join`/`inner_join`/`full_join`.
-- Expressions: `col`, `var`, `label`, `env`, `fields`, `[x, y, z]` vectors,
-  `if_else`, and reductions `mean`, `sum`, `min`, `max`, `median`, `std`,
-  `any`, `all`, `n` with `over=` and `na_rm=`.
+- Expressions: `col`, `variable`, `label`, `env`, `fields`, `[x, y, z]`
+  vectors, `if_else`, and reductions `mean`, `sum`, `min`, `max`, `median`,
+  `std`, `var` (variance, as in tidy3 and dplyr), `any`, `all`, `n` with
+  `over=` and `na_rm=`.
 - Exact label alignment, with reordering by label and explicit joins.
 - Array layer: `dot` with `over=`, elementwise numeric functions, `conj`,
   `real`, `imag`, `angle`, `arctan2`, `rename_axes`, and `pack`.

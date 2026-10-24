@@ -96,7 +96,8 @@ class Ref(Expr):
     def text(self) -> str:
         if self.kind == "any":
             return str(self.name)
-        return f'{self.kind}("{self.name}")'
+        helper = "variable" if self.kind == "var" else self.kind
+        return f'{helper}("{self.name}")'
 
 
 class Literal(Expr):
@@ -246,7 +247,7 @@ def col(name: Hashable) -> Ref:
     return Ref(name)
 
 
-def var(name: Hashable) -> Ref:
+def variable(name: Hashable) -> Ref:
     """The variable *name*, when a field label has the same name."""
     return Ref(name, "var")
 
@@ -312,8 +313,8 @@ def _is_data(value: Any) -> bool:
 mean = _reduction("mean")
 median = _reduction("median")
 std = _reduction("std")
-# Variance is not exported yet: tidy3's var() is variance, but tidy3A's var("x")
-# names a variable (plan §5.1). Open decision, see docs/plan.md milestone 2.
+# Variance, as tidy3's and dplyr's var(); the variable reference is variable("x").
+var = _reduction("var")
 sum = _reduction("sum", builtins.sum)  # noqa: A001
 min = _reduction("min", builtins.min)  # noqa: A001
 max = _reduction("max", builtins.max)  # noqa: A001
@@ -461,7 +462,7 @@ def resolve(ref: Ref, ctx: Context) -> xr.DataArray:
 
     if ref.kind == "var":
         if not is_variable:
-            raise ctx.error(f'var("{name}"): there is no variable {name}. {_inventory(ctx)}')
+            raise ctx.error(f'variable("{name}"): there is no variable {name}. {_inventory(ctx)}')
         return data[name]
     if ref.kind == "label":
         if not is_label:
@@ -470,7 +471,7 @@ def resolve(ref: Ref, ctx: Context) -> xr.DataArray:
     if is_variable and is_label:
         raise ctx.error(
             f'"{name}" is both a variable and a label on {field_axis}.\n'
-            f'  variable:  var("{name}")\n'
+            f'  variable:  variable("{name}")\n'
             f'  label:     label("{name}")'
         )
     if is_variable:

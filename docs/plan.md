@@ -79,7 +79,7 @@ Array-layer helpers are used inside tidy-layer verbs, for example `mutate(p = do
 | Formula show-back | Every formula displays its bindings and compiled array code in notebooks and `repr()`; never printed during execution |
 | Notebook coexistence | Each package's transformer rewrites only calls to functions it owns, checked in the live namespace; requires a tidy3 change (§5.6) |
 | Notebook code | Copy and adapt tidy3's `masking.py` into tidy3A with attribution; no dependency on tidy3 |
-| Variable vs label names | `var("x")` for the variable, `label("x")` for the field-axis label when a name is both |
+| Variable vs label names | `variable("x")` for the variable, `label("x")` for the field-axis label when a name is both |
 | Selection helpers | tidy3's tidyselect helpers (`~`, `starts_with`, …) on variables and field labels |
 | Masking function | `if_else(cond, x, y)` as in dplyr/tidy3; three-argument `where` is an error pointing to `if_else` |
 | Slice and axes | `slice(time = 1)` keeps `time: 1`, like dplyr; `drop=True` removes the axis explicitly |
@@ -278,19 +278,19 @@ Resolution rule, to validate in milestone 0:
 4. Keep all other axes and their coordinate identities intact.
 5. If a name is both a variable and a field-axis label, report both meanings; do not pick one silently.
 
-Decided: `var("x")` names the variable and `label("x")` names the field-axis label when a name is both. `col()` and `env()` cannot do this, because they separate data from notebook values, and both meanings here are data.
+Decided: `variable("x")` names the variable and `label("x")` names the field-axis label when a name is both. `col()` and `env()` cannot do this, because they separate data from notebook values, and both meanings here are data.
 
 ```python
-data >> select(var("x"))                    # the variable x
+data >> select(variable("x"))                    # the variable x
 data >> select(label("x"))                  # the x label on the field axis
-data >> mutate(d = var("x") - label("x"))
+data >> mutate(d = variable("x") - label("x"))
 ```
 
-`label("x")` applies to every field axis that has `x`, as label selection does across variables. Both helpers work in `select` and in expressions; in a formula, a collision is resolved with `bind={"x": var("x")}`. The error lists both spellings:
+`label("x")` applies to every field axis that has `x`, as label selection does across variables. Both helpers work in `select` and in expressions; in a formula, a collision is resolved with `bind={"x": variable("x")}`. The error lists both spellings:
 
 ```text
 SelectError: "x" is both a variable and a label on feature.
-  variable:  var("x")
+  variable:  variable("x")
   label:     label("x")
 ```
 
@@ -1033,7 +1033,7 @@ Known limitations, to address later:
 - An xarray object on the left of an operator with a tidy3A expression (`R * x`) fails inside xarray, which does not defer to other types' reflected operators. Write the expression first (`x * R`) or use `dot()`. NumPy values on the left work.
 - Grouping by more than one value field; `slice` on grouped data; `over=` inside reductions when grouped by a value field; summaries that refer to earlier summaries in the same `summarise`; `tolerance=` on `inner_join` and `full_join`; `case_when`.
 
-Open decision found while implementing: tidy3's `var()` is variance, as in dplyr, but tidy3A's `var("x")` names a variable (§5.1). Variance is not exported until this is settled; `std` is.
+Decided after milestone 3: tidy3's `var()` is variance, as in dplyr and R, and tidy3A had used `var("x")` to name a variable (§5.1). The variable reference is renamed `variable("x")`, and `var()` is variance, so the same name means the same thing in tidy3, dplyr, and tidy3A.
 
 ### Milestone 3 — Generalized array mathematics
 
@@ -1106,7 +1106,7 @@ The current approximately 20-minute tidy3 publication time is user-reported cont
 
 All seven questions are resolved; the decisions are in the sections cited and summarized in §2.
 
-1. Resolved: selection uses the field-axis rule, with `var()`/`label()` for collisions and tidy3's selection helpers (§5.1); milestone 0 still tests field-axis select against stars-style strict select.
+1. Resolved: selection uses the field-axis rule, with `variable()`/`label()` for collisions and tidy3's selection helpers (§5.1); milestone 0 still tests field-axis select against stars-style strict select.
 2. Resolved: `group_by` axes are kept and other observation axes reduced; grouping by values and `bins()`; a variable lacking the grouping axis is an error (§5.4).
 3. Resolved: exact matching with reorder by label; joins via `left_join`/`inner_join`/`full_join`; `over=` names summed axes, so batch axes are kept (§5.5, §6.1–6.2).
 4. Resolved: `read_array` returns the wrapper directly; `tidy()` wraps existing xarray objects (§4.1).

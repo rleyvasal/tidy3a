@@ -52,7 +52,9 @@ from tidy3a import (
     summarise,
     tidy,
     ungroup,
+    std,
     var,
+    variable,
     where,
 )
 
@@ -172,16 +174,21 @@ def test_select_label_applies_to_every_variable_with_the_axis():
     assert out.sizes["feature"] == 1
 
 
-def test_variable_and_label_collision_needs_var_or_label():
-    frame = field_cloud() >> mutate(assign("xx", 1.0))
+def test_variable_and_label_collision_needs_variable_or_label():
     ds = field_cloud().to_xarray().assign(x=("point", [9.0, 9.0, 9.0, 9.0]))
     frame = tidy(ds, field_axis="feature")
-    with pytest.raises(SelectError, match=r'var\("x"\)'):
+    with pytest.raises(SelectError, match=r'variable\("x"\)'):
         frame >> select(x)
-    assert list((frame >> select(var("x"))).collect().data_vars) == ["x"]
+    assert list((frame >> select(variable("x"))).collect().data_vars) == ["x"]
     assert data(frame >> select(label("x"))).feature.values.tolist() == ["x"]
-    out = frame >> mutate(d = var("x") - label("x"))
+    out = frame >> mutate(d = variable("x") - label("x"))
     assert data(out, "d").values.tolist() == [9.0, 9.0, -42.0, 9.0]
+
+
+def test_var_is_variance_as_in_tidy3_and_dplyr():
+    out = (field_cloud() >> summarise(v = var(intensity), s = std(intensity))).collect()
+    assert out["v"].item() == pytest.approx(np.var([10.0, 20.0, 30.0, 40.0]))
+    assert out["s"].item() == pytest.approx(np.std([10.0, 20.0, 30.0, 40.0]))
 
 
 # ── expressions ─────────────────────────────────────────────────────────────
