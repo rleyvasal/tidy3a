@@ -100,6 +100,46 @@ class Ref(Expr):
         return f'{helper}("{self.name}")'
 
 
+class NameRef(Ref):
+    """A bare notebook name: data, a Python value, or an error if it is both (§5.2).
+
+    The notebook layer creates these when a cell runs; *python* is the
+    Python value the name had then, or ``MISSING``.
+    """
+
+    def __init__(self, name: Hashable, python: Any):
+        super().__init__(name)
+        self.python = python
+
+
+MISSING = object()
+
+
+def is_data_name(name: Hashable, ctx: Context) -> bool:
+    data = ctx.data
+    return (
+        name in data.data_vars
+        or name in data.dims
+        or (ctx.field_axis is not None and name in data.indexes[ctx.field_axis])
+    )
+
+
+def check_name(ref: Ref, ctx: Context) -> bool:
+    """For a notebook name, raise if it is both data and a Python value; return whether it is data."""
+    if not isinstance(ref, NameRef):
+        return True
+    data = is_data_name(ref.name, ctx)
+    if data and ref.python is not MISSING:
+        shown = repr(ref.python) if isinstance(ref.python, (int, float, complex, str)) else type(ref.python).__name__
+        raise ctx.error(
+            f'"{ref.name}" is both data and a notebook variable ({ref.name} = {shown}).\n'
+            f'  data:      col("{ref.name}")\n'
+            f'  notebook:  env("{ref.name}")\n'
+            "  tidy3 lets data win here; tidy3A asks, because array notebooks reuse short names."
+        )
+    return data
+
+
 class Literal(Expr):
     def __init__(self, value: Any, label: str | None = None):
         self.value = value
@@ -458,8 +498,13 @@ def combine(op: Callable, left: Any, right: Any, left_text: str, right_text: str
         return op(left, right)
 
 
-def resolve(ref: Ref, ctx: Context) -> xr.DataArray:
-    """Resolve a name: variable, then field label, then axis labels (plan §5.1–5.2)."""
+def resolve(ref: Ref, ctx: Context) -> Any:
+    """Resolve a name: variable, then field label, then axis labels (plan §5.1–5.2).
+
+    A notebook name that is not data resolves to its Python value.
+    """
+    if isinstance(ref, NameRef) and not check_name(ref, ctx) and ref.python is not MISSING:
+        return ref.python
     data = ctx.data
     name = ref.name
     field_axis = ctx.field_axis
@@ -533,6 +578,7 @@ def resolve_vector(node: Vector, ctx: Context) -> xr.DataArray:
     field_axis = ctx.field_axis
     kinds = []
     for item in node.items:
+        check_name(item, ctx)
         value_is_var = item.name in data.data_vars and item.kind != "label"
         value_is_label = (
             field_axis is not None and item.name in data.indexes[field_axis] and item.kind != "var"
@@ -663,8 +709,15 @@ def _broadcast_back(stats: xr.DataArray, groups: Groups) -> xr.DataArray:
 
 
 def _count(ctx: Context) -> Any:
+    """``n()``: positions on the observation axes every variable shares, as dplyr counts rows.
+
+    Axes only some variables have, such as a rotation's component axis, are not observations.
+    """
     data = ctx.data
-    observation = [d for d in data.dims if d != ctx.field_axis and d not in ctx.group_axes]
+    shared = set(data.dims)
+    for variable in data.data_vars.values():
+        shared &= set(variable.dims)
+    observation = [d for d in data.dims if d in shared and d != ctx.field_axis and d not in ctx.group_axes]
     if ctx.value_key is None:
         return int(np.prod([data.sizes[d] for d in observation], dtype=np.int64))
     groups = ctx.groups()

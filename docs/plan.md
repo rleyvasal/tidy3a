@@ -1026,7 +1026,7 @@ Decided or corrected while implementing:
 - `select(~[intensity, ring])` is not valid Python, since `~` cannot apply to a list; the form is `select(~intensity, ~ring)`.
 - Storing a vector view next to its source, `mutate(v = [x, y, z])`, is an error: variables in one dataset share one `feature` axis, so `v` with 3 of its 5 labels cannot be stored. The error suggests `rename_axes` (milestone 3). Vector views are used inside expressions, such as `dot` or `sum([x, y, z], over="feature")`.
 - `slice` drops positions past the end, as tidy3 does.
-- `n()` counts observations per group: positions on the grouped axis times the sizes of the other reduced observation axes.
+- `n()` counts observations per group: positions on the grouped axis times the sizes of the other reduced observation axes, where observation axes are those every variable shares (corrected in milestone 5).
 
 Known limitations, to address later:
 
@@ -1076,6 +1076,29 @@ Details decided from precedents while implementing:
 Prerequisite: the tidy3 change in §5.6, so tidy3's transformer rewrites only tidy3-owned calls. Add optional bare-name support using a small, clearly owned transformer/integration layer that rewrites only tidy3A-owned calls. Review tidy3/plot3 behavior for collaboration opportunities without importing their execution backends. Test real IPython cells, import order, external constants/operators, and explicit `col`/environment escapes.
 
 Exit: the same documented examples run in scripts and notebooks, including the first cell after enabling shorthand, and in a notebook that imports both tidy3 and tidy3A in either order. A small synthetic binary fixture covers the complete cloud workflow in CI. A manually run nuScenes Mini example validates metadata lookup and calibration conventions separately.
+
+Status (2026-10-24): complete except the manual nuScenes Mini run, which needs the dataset and the nuScenes SDK and has not been done.
+
+- tidy3 change, on the tidy3 branch `notebook-ownership` (commit `6adec50`, not merged or released): `Tidy3MaskTransformer` rewrites a call only when the function is tidy3's, decided by the cell's own imports and then the live namespace. Two new tests fail on the previous code and pass now; the full tidy3 suite passes (1,531 passed, 49 skipped).
+- `src/tidy3a/jupyter.py`, loaded with `%load_ext tidy3a.jupyter`. It is copied and adapted from tidy3's notebook layer, with credit, and imports no tidy3 code. 13 IPython tests run real cells, covering:
+  - the first cell after loading, with the import in the same cell
+  - bare names in every rewritten verb
+  - notebook constants, outside arrays, and `nan`
+  - the collision error and its `col()`/`env()` escapes
+  - `[x, y, z] = …` and names inside functions
+  - a notebook's own `select`, prefixed `ta.select(...)` calls, and tidy3 with tidy3A in both import orders
+- `tests/test_workflow.py` runs the complete §7 workflow from a synthetic raw `.bin` file. 237 tests pass in total.
+
+Details decided from precedents while implementing:
+
+- Loading is explicit, `%load_ext tidy3a.jupyter`, as for tidy3; importing tidy3A does not change how cells are parsed.
+- A bare name becomes `__tidy3a_name__("x", lambda: x)`, settled when the verb runs. If the notebook has no `x`, it is data. If the data has no `x`, it is the Python value. If both have it, it is an error. Functions, classes, modules, and existing tidy3A expressions (`fields()`, `col()`, `formula()`) keep their Python meaning, so `where(is_numeric)` and `xx = fields("x")` work. The lambda keeps closures working inside functions.
+- Rewritten verbs: `select`, `filter`, `mutate`, `summarise`, `group_by`, `pull`. Verbs whose arguments are positions, counts, outside arrays, or other datasets (`slice`, `bind_cols`, joins) are left alone. Names are not rewritten where they are a function being called, the object of an attribute (`np.pi`), the object of a subscript (`R[0]`), or bound inside a lambda or comprehension.
+- Calls through a module prefix (`ta.select(...)`) are rewritten when the prefix is tidy3A. This goes beyond tidy3, which rewrites only plain names.
+- `[x, y, z] = …` inside `mutate(…)` is rewritten in the source to `__tidy3a_assign__([x, y, z], …)` before Python parses the cell, after tidy3's backtick precedent. The rewrite skips strings and comments and leaves `[x] == y` alone.
+- Fixed while writing the workflow test: `n()` counted every axis in the dataset, including a rotation's component axis `i`. It now counts positions on the observation axes that every variable shares, as dplyr counts rows.
+
+Known limitations: multi-line pipes must be wrapped in parentheses (tidy3's input transformer for lines starting with `>>` handles tidy3 pipes only); tidy3's backtick names are not supported in tidy3A verbs.
 
 ### Milestone 6 — Additional readers and lazy execution (after the first release)
 

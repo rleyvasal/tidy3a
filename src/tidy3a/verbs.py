@@ -26,6 +26,7 @@ from tidy3a.errors import (
     TidyError,
 )
 from tidy3a.expr import (
+    MISSING,
     AxisKey,
     BinOp,
     Context,
@@ -36,6 +37,7 @@ from tidy3a.expr import (
     Vector,
     as_expr,
     axis_labels,
+    check_name,
     evaluate,
     resolve,
     resolve_value_key,
@@ -168,6 +170,13 @@ def _excluded(item: Any) -> Any:
     return list(item.operand.items) if isinstance(item.operand, Vector) else item.operand
 
 
+def _columns_hint(ctx: Context) -> str:
+    text = "\n  variables: " + (", ".join(map(str, ctx.data.data_vars)) or "none")
+    if ctx.field_axis is not None:
+        text += f"\n  labels on {ctx.field_axis}: " + "  ".join(map(str, ctx.data.indexes[ctx.field_axis]))
+    return text
+
+
 def _match(item: Any, columns: list[Column], ctx: Context) -> list[Column]:
     if isinstance(item, (list, tuple)):
         return [c for part in item for c in _match(part, columns, ctx)]
@@ -177,6 +186,8 @@ def _match(item: Any, columns: list[Column], ctx: Context) -> list[Column]:
         item = Ref(item)
     if not isinstance(item, Ref):
         raise TypeError(f"select() takes names, references, and selection helpers, not {_text(item)}")
+    if not check_name(item, ctx) and item.python is not MISSING:
+        raise SelectError(f'"{item.name}" is a notebook variable, not a column of this data.{_columns_hint(ctx)}')
     variables = [c for c in columns if c.kind == "var" and c.name == item.name]
     labels = [c for c in columns if c.kind == "label" and c.name == item.name]
     if item.kind == "var":
@@ -524,6 +535,9 @@ def group_by(*keys: Any, **named: Any) -> Verb:
             name = key.name if isinstance(key, Ref) else key
             if not isinstance(name, Hashable) or isinstance(key, (Expr, list)) and not isinstance(key, Ref):
                 raise GroupError("group_by() takes names, bins(...), or name = expression")
+            if isinstance(key, Ref) and not check_name(key, Context(frame, verb="group_by", error=GroupError, grouped=False)):
+                if key.python is not MISSING:
+                    raise GroupError(f'"{name}" is a notebook variable, not an axis or field of this data')
             if name in data.dims:
                 if name == frame._field_axis:
                     raise GroupError(f"{name} is the field axis; fields are columns, not groups")
@@ -620,6 +634,8 @@ def pull(item: Any) -> Verb:
         ref = Ref(item) if isinstance(item, str) else item
         if not isinstance(ref, Ref):
             raise TypeError("pull() takes one name")
+        if not check_name(ref, ctx) and ref.python is not MISSING:
+            raise RefError(f'"{ref.name}" is a notebook variable, not data to pull')
         if ref.kind == "any" and ref.name in ctx.data.dims and ref.name not in ctx.data.data_vars:
             return axis_labels(ctx.data, ref.name).values
         return resolve(ref, ctx).values

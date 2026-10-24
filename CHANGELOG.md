@@ -22,3 +22,8 @@
   plot3's conventions, subscripts as axis indices, labels, and positions,
   `\sum` with optional checked bounds, `bind=` for index letters and
   values, and show-back of how each formula was read.
+- Notebook layer (`%load_ext tidy3a.jupyter`): bare names in tidy3A verbs,
+  settled when the verb runs, with an error when a name is both data and a
+  notebook variable; `[x, y, z] = …` inside `mutate`; only tidy3A's own
+  calls are rewritten, so tidy3 and tidy3A share a notebook.
+- `n()` counts observations on the axes every variable shares.

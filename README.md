@@ -40,8 +40,10 @@ The example shows the planned interface. Implemented so far: `read_array`,
 syntax, where names are written with `col("x")` or declared with
 `x, y, z = fields("x", "y", "z")`, and the array layer (`dot`, numeric
 functions, `conj`, `rename_axes`, `pack`), and `formula()` for plain
-mathematical text and a strict LaTeX dialect. Not yet: notebook bare names,
-so scripts declare names with `fields()` or write `col("x")`.
+mathematical text and a strict LaTeX dialect. In notebooks,
+`%load_ext tidy3a.jupyter` turns on bare names as in the example above; it
+works alongside tidy3's notebook layer. Scripts declare names with
+`fields()` or write `col("x")`.
 
 ## License
 
