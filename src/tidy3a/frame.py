@@ -1,9 +1,10 @@
 """The ``TidyArray`` wrapper and ``tidy()``.
 
-A ``TidyArray`` holds an xarray Dataset plus the few facts xarray does not
-keep: which axis is the field axis, where variables made by
-``variables_from=`` came from, and what the reader inferred. Verbs receive
-and return ``TidyArray`` objects through ``>>``.
+A ``TidyArray`` holds a backend's collection of variables (an xarray
+Dataset with the xarray backend) plus the few facts it does not keep: which
+axis is the field axis, where variables made by ``variables_from=`` came
+from, and what the reader inferred. Verbs receive and return ``TidyArray``
+objects through ``>>``.
 """
 
 from __future__ import annotations
@@ -12,8 +13,8 @@ from collections.abc import Callable, Hashable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
-import xarray as xr
 
+from tidy3a.backend import XARRAY, is_xarray_object
 from tidy3a.errors import TidyError
 
 # Long label lists are shortened in the inspection output.
@@ -24,12 +25,13 @@ _ANNOTATION_COLUMN = 40
 class TidyArray:
     """Named arrays with tidy3A's axis roles; build one with ``tidy()`` or ``read_array()``."""
 
-    __slots__ = ("_data", "_field_axis", "_origins", "_source", "_notes", "_groups")
+    __slots__ = ("_data", "_backend", "_field_axis", "_origins", "_source", "_notes", "_groups")
 
     def __init__(
         self,
-        data: xr.Dataset,
+        data: Any,
         *,
+        backend: Any = None,
         field_axis: str | None = None,
         origins: Mapping[Hashable, tuple[str, tuple[Any, ...]]] | None = None,
         source: str | None = None,
@@ -37,6 +39,7 @@ class TidyArray:
         groups: Sequence[Any] = (),
     ):
         self._data = data
+        self._backend = XARRAY if backend is None else backend
         self._field_axis = field_axis
         # variable name -> (axis it came from, that axis's labels in order)
         self._origins = dict(origins or {})
@@ -45,17 +48,19 @@ class TidyArray:
         # group_by keys, in order (tidy3a.verbs.AxisKey / ValueKey)
         self._groups = tuple(groups)
 
-    def _evolve(self, data: xr.Dataset | None = None, *, notes: Sequence[str] = (), **changes: Any) -> TidyArray:
+    def _evolve(self, data: Any = None, *, notes: Sequence[str] = (), **changes: Any) -> TidyArray:
         """A copy with *data* and other parts replaced; *notes* are appended."""
+        backend = self._backend
         data = self._data if data is None else data
         origins = changes.pop(
             "origins",
-            {name: origin for name, origin in self._origins.items() if name in data.data_vars},
+            {name: origin for name, origin in self._origins.items() if backend.has_variable(data, name)},
         )
         # What the reader inferred about an axis is stale once a verb resizes or removes it.
+        sizes = backend.sizes(data)
         resized = [
-            dim for dim, size in self._data.sizes.items()
-            if dim not in data.dims or data.sizes[dim] != size
+            dim for dim, size in backend.sizes(self._data).items()
+            if dim not in sizes or sizes[dim] != size
         ]
         new_notes = [
             note for note in self._notes
@@ -66,6 +71,7 @@ class TidyArray:
                 new_notes.append(note)
         return TidyArray(
             data,
+            backend=backend,
             field_axis=changes.pop("field_axis", self._field_axis),
             origins=origins,
             source=changes.pop("source", self._source),
@@ -73,16 +79,16 @@ class TidyArray:
             groups=changes.pop("groups", self._groups),
         )
 
-    def to_xarray(self) -> xr.Dataset:
+    def to_xarray(self) -> Any:
         """A shallow Dataset copy sharing values, without computing lazy arrays."""
-        return self._data.copy(deep=False)
+        return self._backend.to_xarray(self._data)
 
-    def collect(self) -> xr.Dataset:
-        """Compute lazy variables into memory; the wrapped Dataset stays lazy.
+    def collect(self) -> Any:
+        """Compute lazy variables into memory as an xarray Dataset; the wrapped data stays lazy.
 
         Eager and memory-mapped values are not copied.
         """
-        return self._data.compute()
+        return self._backend.collect(self._data)
 
     def __rshift__(self, verb: Callable[[TidyArray], Any]) -> Any:
         if not callable(verb):
@@ -118,15 +124,10 @@ def tidy(data: Any, *, field_axis: str | None = None) -> TidyArray:
                 f'this data already has field axis "{data._field_axis}"; '
                 f'it cannot also use field_axis="{field_axis}"'
             )
-        check_field_axis(data._data, field_axis, TidyError)
+        check_field_axis(data._data, field_axis, TidyError, data._backend)
         return data._evolve(field_axis=field_axis)
-    if isinstance(data, xr.DataArray):
-        name = data.name if data.name is not None else "values"
-        dataset = data.to_dataset(name=name)
-        source = "xarray DataArray"
-    elif isinstance(data, xr.Dataset):
-        dataset = data
-        source = "xarray Dataset"
+    if is_xarray_object(data):
+        dataset, source = XARRAY.wrap(data)
     else:
         raise TypeError(
             f"tidy() wraps xarray DataArray and Dataset objects, not {type(data).__name__}; "
@@ -137,19 +138,19 @@ def tidy(data: Any, *, field_axis: str | None = None) -> TidyArray:
     return TidyArray(dataset, field_axis=field_axis, source=source)
 
 
-def check_field_axis(data: xr.Dataset, axis: Any, error: type[TidyError]) -> None:
+def check_field_axis(data: Any, axis: Any, error: type[TidyError], backend: Any = XARRAY) -> None:
     """Raise unless *axis* can be a field axis: an existing axis with unique labels."""
     if not isinstance(axis, str):
         raise error(f"field_axis must be an axis name, not {type(axis).__name__}")
-    if axis not in data.dims:
-        axes = ", ".join(str(dim) for dim in data.dims) or "none"
+    if not backend.has_axis(data, axis):
+        axes = ", ".join(str(dim) for dim in backend.axes(data)) or "none"
         raise error(f'field_axis="{axis}" is not an axis of this data (axes: {axes})')
-    if axis not in data.indexes:
+    if not backend.has_labels(data, axis):
         raise error(
             f'field_axis="{axis}" has no labels; its labels become column names, '
             "so give it labels first"
         )
-    if not data.indexes[axis].is_unique:
+    if not backend.labels_unique(data, axis):
         raise error(f'field_axis="{axis}" has repeated labels; column names must be unique')
 
 
@@ -158,12 +159,13 @@ def check_field_axis(data: xr.Dataset, axis: Any, error: type[TidyError]) -> Non
 
 def _inspect(frame: TidyArray) -> str:
     data = frame._data
+    backend = frame._backend
     header = "<TidyArray"
     if frame._source:
         header += f" source: {frame._source}"
     lines = [header + ">"]
 
-    for name, variable in data.data_vars.items():
+    for name, variable in backend.variables(data).items():
         sizes = ", ".join(f"{dim}: {variable.sizes[dim]}" for dim in variable.dims)
         lines.append(f"{name} ({sizes}) {variable.dtype}")
 
@@ -174,7 +176,7 @@ def _inspect(frame: TidyArray) -> str:
         listed = "  ".join(str(name) for name in names)
         lines.append(f"  {listed}    from axis {axis} (variables_from)")
 
-    axes = [dim for dim in _axes_in_order(data)]
+    axes = [dim for dim in _axes_in_order(data, backend)]
     width = max((len(str(axis)) for axis in axes), default=0) + 1
     rows = [_axis_row(frame, axis) for axis in axes]
     column = min(
@@ -187,7 +189,7 @@ def _inspect(frame: TidyArray) -> str:
             lines.append(f"  {label}{text.ljust(column - 4)}    {note}")
         else:
             lines.append(f"  {label}{text}")
-        if axis == "variable" and axis != frame._field_axis and axis in data.indexes:
+        if axis == "variable" and axis != frame._field_axis and backend.has_labels(data, axis):
             lines.append(
                 '  hint: "variable" looks like an axis of variable names '
                 "(xarray's to_dataarray default)."
@@ -203,23 +205,23 @@ def _inspect(frame: TidyArray) -> str:
     return "\n".join(lines)
 
 
-def _axes_in_order(data: xr.Dataset) -> list[Hashable]:
+def _axes_in_order(data: Any, backend: Any) -> list[Hashable]:
     seen: list[Hashable] = []
-    for variable in data.data_vars.values():
+    for variable in backend.variables(data).values():
         for dim in variable.dims:
             if dim not in seen:
                 seen.append(dim)
-    for dim in data.dims:
+    for dim in backend.axes(data):
         if dim not in seen:
             seen.append(dim)
     return seen
 
 
 def _axis_row(frame: TidyArray, axis: Hashable) -> tuple[str, str]:
-    data = frame._data
-    size = data.sizes[axis]
-    if axis in data.indexes:
-        text = _format_labels(data.indexes[axis].to_numpy())
+    data, backend = frame._data, frame._backend
+    size = backend.sizes(data)[axis]
+    if backend.has_labels(data, axis):
+        text = _format_labels(backend.label_values(data, axis))
         if axis == frame._field_axis:
             return text, "field axis (labels act as columns)"
         return text, "observation axis (labels are values)"

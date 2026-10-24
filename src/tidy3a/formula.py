@@ -21,9 +21,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
-import xarray as xr
 
 import tidy3a.linalg  # noqa: F401  registers sqrt, exp, … in FUNCTIONS
+from tidy3a.backend import is_xarray
 from tidy3a.errors import RefError, TidyError
 from tidy3a.expr import (
     FUNCTIONS,
@@ -512,7 +512,12 @@ def parse(source: str) -> tuple[Parsed, bool]:
 # ── The formula expression ──────────────────────────────────────────────────
 
 
-_PY_VALUE_TYPES = (int, float, complex, np.number, np.ndarray, xr.DataArray)
+_PY_VALUE_TYPES = (int, float, complex, np.number, np.ndarray)
+
+
+def _is_python_value(value: Any) -> bool:
+    """A number or an array from the calling code; outside arrays are xarray objects."""
+    return isinstance(value, _PY_VALUE_TYPES) or is_xarray(value)
 
 
 class Formula(Expr):
@@ -676,7 +681,7 @@ class _Compiler:
         python = self.scope.get(name)
         if isinstance(python, Ref):
             return Ref(python.name, python.kind)
-        python_value = python if isinstance(python, _PY_VALUE_TYPES) and not isinstance(python, bool) else None
+        python_value = python if _is_python_value(python) and not isinstance(python, bool) else None
         if self.is_data(name):
             if python_value is not None:
                 raise RefError(
@@ -726,7 +731,7 @@ class _Compiler:
         if letters is None or len(letters) < 2:
             return
         joined = "".join(letters)
-        if self.is_data(joined) or joined in self.bind or isinstance(self.scope.get(joined), (*_PY_VALUE_TYPES, Ref)):
+        if self.is_data(joined) or joined in self.bind or (_is_python_value(self.scope.get(joined)) or isinstance(self.scope.get(joined), Ref)):
             product = " \\cdot ".join(letters)  # Python 3.11 allows no backslash inside f-string braces
             raise FormulaError(
                 f'formula: {joined} is read as {" · ".join(letters)}, but "{joined}" is also a name.\n'
@@ -780,7 +785,7 @@ class _Compiler:
                 expr, value = self.position(expr, value, sub.value, base_name)
         return expr
 
-    def describe_index(self, letter: str, axis: Hashable, base: str, value: xr.DataArray) -> None:
+    def describe_index(self, letter: str, axis: Hashable, base: str, value: Any) -> None:
         labels = ""
         coords = self.ctx.coords_for(value)
         if axis in coords:
@@ -793,7 +798,7 @@ class _Compiler:
             how += f", positions {lower}–{upper} of {value.sizes[axis]}"
         self.note(f'{letter} → axis "{axis}" of {base}{labels}{bound}, {how}')
 
-    def label(self, expr: Expr, value: xr.DataArray, name: str, base: str) -> tuple[Expr, xr.DataArray]:
+    def label(self, expr: Expr, value: Any, name: str, base: str) -> tuple[Expr, Any]:
         coords = self.ctx.coords_for(value)
         axes = [d for d in value.dims if d in coords and name in coords[d]]
         if len(axes) != 1:
@@ -807,7 +812,7 @@ class _Compiler:
         self.note(f'{name} → label "{name}" on axis "{axis}" of {base}')
         return Call("pick", (expr,), {"axis": axis, "label": name}), self.ctx.pick_label(value, axis, name)
 
-    def position(self, expr: Expr, value: xr.DataArray, position: int, base: str) -> tuple[Expr, xr.DataArray]:
+    def position(self, expr: Expr, value: Any, position: int, base: str) -> tuple[Expr, Any]:
         axis = self.component_axis(value, base)
         if not 1 <= position <= value.sizes[axis]:
             raise FormulaError(f"formula: {base}_{position}: {axis} has positions 1 … {value.sizes[axis]}")
@@ -817,7 +822,7 @@ class _Compiler:
             self.ctx.pick_position(value, axis, position - 1),
         )
 
-    def component_axis(self, value: xr.DataArray, base: str) -> Hashable:
+    def component_axis(self, value: Any, base: str) -> Hashable:
         """The one axis a numeric subscript can mean: the field axis, or an axis no other variable has."""
         variables, axes = self.ctx.variables, self.ctx.axes
         candidates = []
@@ -876,7 +881,7 @@ def _letter_run(node: Any) -> list[str] | None:
 
 
 def _short(value: Any) -> str:
-    if isinstance(value, xr.DataArray):
+    if is_xarray(value):
         return f"an array ({', '.join(map(str, value.dims))})"
     if isinstance(value, np.ndarray):
         return "a NumPy array"
@@ -890,23 +895,23 @@ def _inventory(ctx: Context) -> str:
 # ── Evaluation helpers registered with the expression system ────────────────
 
 
-def _positions(node: Call, ctx: Context) -> xr.DataArray:
+def _positions(node: Call, ctx: Context) -> Any:
     value = evaluate(node.args[0], ctx)
     axis, lower, upper = node.options["axis"], node.options["lower"], node.options["upper"]
     size = value.sizes[axis]
     if not 1 <= lower <= upper <= size:
         raise FormulaError(f"formula: bounds {lower} … {upper} are outside {axis}, which has positions 1 … {size}")
-    return value.isel({axis: slice(lower - 1, upper)})
+    return ctx.backend.isel(value, {axis: slice(lower - 1, upper)})
 
 
-def _pick(node: Call, ctx: Context) -> xr.DataArray:
+def _pick(node: Call, ctx: Context) -> Any:
     value = evaluate(node.args[0], ctx)
-    return value.sel({node.options["axis"]: node.options["label"]}, drop=True)
+    return ctx.backend.sel(value, {node.options["axis"]: node.options["label"]}, drop=True)
 
 
-def _position(node: Call, ctx: Context) -> xr.DataArray:
+def _position(node: Call, ctx: Context) -> Any:
     value = evaluate(node.args[0], ctx)
-    return value.isel({node.options["axis"]: node.options["position"] - 1}, drop=True)
+    return ctx.backend.isel(value, {node.options["axis"]: node.options["position"] - 1}, drop=True)
 
 
 FUNCTIONS.update({"positions": _positions, "pick": _pick, "position": _position})

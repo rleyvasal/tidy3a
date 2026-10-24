@@ -12,7 +12,6 @@ from collections.abc import Callable, Hashable, Sequence
 from typing import Any
 
 import numpy as np
-import xarray as xr
 
 from tidy3a.align import align_many, align_pair
 from tidy3a.expr import (
@@ -23,7 +22,6 @@ from tidy3a.expr import (
     _is_data,
     as_expr,
     evaluate,
-    label_index,
 )
 
 
@@ -44,13 +42,14 @@ def dot(a: Any, b: Any, *, over: Any = None) -> Call:
     return Call("dot", (as_expr(a), as_expr(b)), {"over": over})
 
 
-def _dot(node: Call, ctx: Context) -> xr.DataArray:
+def _dot(node: Call, ctx: Context) -> Any:
+    backend = ctx.backend
     left, right = (evaluate(arg, ctx) for arg in node.args)
     texts = [arg.text() for arg in node.args]
     for value, text in zip((left, right), texts):
-        if not isinstance(value, xr.DataArray):
+        if not backend.is_array(value):
             raise ctx.error(f"dot(): {text} is not an array with named axes")
-    left, right = align_pair(left, right, texts[0], texts[1], ctx.notes)
+    left, right = align_pair(left, right, texts[0], texts[1], ctx.notes, backend=backend)
     shared = [d for d in left.dims if d in right.dims]
     over = _axes(node.options.get("over"))
     if over is None:
@@ -65,8 +64,7 @@ def _dot(node: Call, ctx: Context) -> xr.DataArray:
         missing = [t for v, t in zip((left, right), texts) if axis not in v.dims]
         if missing:
             raise ctx.error(f"{node.text()}: {axis} is not an axis of {missing[0]}")
-    with xr.set_options(arithmetic_join="exact"):
-        return xr.dot(left, right, dim=over)
+    return backend.dot(left, right, over)
 
 
 # ── elementwise numeric functions ───────────────────────────────────────────
@@ -119,11 +117,11 @@ def arctan2(y: Any, x: Any) -> Any:
 
 
 def _arctan2(node: Call, ctx: Context) -> Any:
+    backend = ctx.backend
     y, x = (evaluate(arg, ctx) for arg in node.args)
-    if isinstance(y, xr.DataArray) and isinstance(x, xr.DataArray):
-        y, x = align_pair(y, x, node.args[0].text(), node.args[1].text(), ctx.notes)
-    with xr.set_options(arithmetic_join="exact"):
-        return np.arctan2(y, x)
+    if backend.is_array(y) and backend.is_array(x):
+        y, x = align_pair(y, x, node.args[0].text(), node.args[1].text(), ctx.notes, backend=backend)
+    return backend.apply(np.arctan2, y, x)
 
 
 # ── axis helpers ────────────────────────────────────────────────────────────
@@ -136,10 +134,10 @@ def rename_axes(x: Any, **names: str) -> Call:
     return Call("rename_axes", (as_expr(x),), {"names": names})
 
 
-def _rename_axes(node: Call, ctx: Context) -> xr.DataArray:
+def _rename_axes(node: Call, ctx: Context) -> Any:
     value = evaluate(node.args[0], ctx)
     names: dict[str, str] = node.options["names"]
-    if not isinstance(value, xr.DataArray):
+    if not ctx.backend.is_array(value):
         raise ctx.error(f"rename_axes(): {node.args[0].text()} has no axes")
     for old, new in names.items():
         if old not in value.dims:
@@ -147,7 +145,7 @@ def _rename_axes(node: Call, ctx: Context) -> xr.DataArray:
                             f"(axes: {', '.join(map(str, value.dims))})")
         if new in value.dims and new not in names:
             raise ctx.error(f"rename_axes(): {node.args[0].text()} already has an axis {new}")
-    return value.rename(names)
+    return ctx.backend.rename_axes(value, names)
 
 
 def pack(items: Sequence[Any], *, along: str) -> Call:
@@ -159,22 +157,22 @@ def pack(items: Sequence[Any], *, along: str) -> Call:
     return Call("pack", tuple(as_expr(item) for item in items), {"along": along})
 
 
-def _pack(node: Call, ctx: Context) -> xr.DataArray:
+def _pack(node: Call, ctx: Context) -> Any:
+    backend = ctx.backend
     along = node.options["along"]
     values = [evaluate(arg, ctx) for arg in node.args]
     labels = [arg.name if isinstance(arg, Ref) else arg.text() for arg in node.args]
     arrays = []
     for value, arg in zip(values, node.args):
-        if not isinstance(value, xr.DataArray):
-            value = xr.DataArray(value)
+        if not backend.is_array(value):
+            value = backend.array(value)
         if along in value.dims:
             raise ctx.error(f"pack(): {arg.text()} already has an axis {along}")
         arrays.append(value)
-    arrays = align_many(arrays, [arg.text() for arg in node.args], ctx.notes)
+    arrays = align_many(arrays, [arg.text() for arg in node.args], ctx.notes, backend=backend)
     if len(set(map(str, labels))) != len(labels):
         raise ctx.error(f"pack(): the labels {labels} repeat; each packed value needs its own name")
-    with xr.set_options(arithmetic_join="exact"):
-        return xr.concat(arrays, dim=label_index(labels, along), join="exact")
+    return backend.concat(arrays, along, labels, exact=True)
 
 
 FUNCTIONS.update({

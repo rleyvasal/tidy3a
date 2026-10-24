@@ -4,7 +4,8 @@ An expression is built eagerly from Python operators (``x > 10``,
 ``mean(intensity)``) and evaluated later against a ``TidyArray`` by a verb.
 Names resolve by plan §5.1–5.2: a variable, then a field-axis label, then an
 observation axis's labels. Arithmetic between arrays follows the alignment
-rules in ``tidy3a.align``.
+rules in ``tidy3a.align``; stored data is reached through the frame's backend
+(``tidy3a.backend``).
 """
 
 from __future__ import annotations
@@ -18,12 +19,10 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-import xarray as xr
 
 from tidy3a.align import align_many, align_pair
+from tidy3a.backend import XARRAY, is_xarray, label_index
 from tidy3a.errors import GroupError, RefError, TidyError
-
-_EXACT = {"arithmetic_join": "exact"}
 
 
 # ── Nodes ───────────────────────────────────────────────────────────────────
@@ -116,11 +115,11 @@ MISSING = object()
 
 
 def is_data_name(name: Hashable, ctx: Context) -> bool:
-    data = ctx.data
+    data, backend = ctx.data, ctx.backend
     return (
-        name in data.data_vars
-        or name in data.dims
-        or (ctx.field_axis is not None and name in data.indexes[ctx.field_axis])
+        backend.has_variable(data, name)
+        or backend.has_axis(data, name)
+        or (ctx.field_axis is not None and backend.has_label(data, ctx.field_axis, name))
     )
 
 
@@ -149,7 +148,7 @@ class Literal(Expr):
         if self.label is not None:
             return self.label
         value = self.value
-        if isinstance(value, xr.DataArray):
+        if is_xarray(value):
             return f"<array {value.name}>" if value.name is not None else "<array>"
         if isinstance(value, np.ndarray) and value.ndim:
             return "<numpy array>"
@@ -237,14 +236,6 @@ class Reduce(Expr):
         if self.min_count is not None:
             parts.append(f"min_count={self.min_count}")
         return f"{self.op}({', '.join(parts)})"
-
-
-def label_index(labels: Sequence[Any], name: Hashable) -> pd.Index:
-    """A pandas index for new labels; text stays object dtype, which older xarray needs."""
-    values = np.asarray(labels)
-    if values.dtype.kind in "UO":
-        values = values.astype(object)
-    return pd.Index(values, name=name, dtype=values.dtype)
 
 
 def _wrap(node: Expr) -> str:
@@ -344,7 +335,7 @@ def _reduction(op: str, builtin: Callable | None = None) -> Callable:
 
 
 def _is_data(value: Any) -> bool:
-    if isinstance(value, (Expr, xr.DataArray)):
+    if isinstance(value, Expr) or is_xarray(value):
         return True
     if isinstance(value, (list, tuple)):
         return builtins.any(isinstance(item, Expr) for item in value)
@@ -392,7 +383,7 @@ class ValueKey:
 class Groups:
     """A value key resolved against current data: one code per position on ``axis``."""
 
-    def __init__(self, name: Hashable, axis: Hashable, codes: xr.DataArray, labels: Sequence[Any]):
+    def __init__(self, name: Hashable, axis: Hashable, codes: Any, labels: Sequence[Any]):
         self.name = name
         self.axis = axis
         self.codes = codes
@@ -417,12 +408,15 @@ class Groups:
 class Context:
     """What an expression is evaluated against, and how reductions behave."""
 
+    backend: Any = XARRAY
+
     def __init__(self, frame: Any, *, verb: str, error: type[TidyError] = TidyError,
                  mode: str = "rows", grouped: bool = True):
         self.frame = frame
-        self.data: xr.Dataset = frame._data
+        self.backend = frame._backend
+        self.data = frame._data
         field_axis = frame._field_axis
-        self.field_axis = field_axis if field_axis in self.data.dims else None
+        self.field_axis = field_axis if self.backend.has_axis(self.data, field_axis) else None
         self.origins = frame._origins
         self.verb = verb
         self.error = error
@@ -446,18 +440,18 @@ class Context:
             self._groups = resolve_value_key(key, self.frame, self.group_axes)
         return self._groups
 
-    def observation_axes(self, array: xr.DataArray) -> list[Hashable]:
+    def observation_axes(self, array: Any) -> list[Hashable]:
         return [dim for dim in array.dims if dim != self.field_axis]
 
     # Formula compilation asks the context about arrays, so it can share the
     # parser and binding rules with an experimental evaluator.
     @property
     def variables(self):
-        return self.data.data_vars
+        return self.backend.variables(self.data)
 
     @property
     def axes(self):
-        return self.data.dims
+        return self.backend.axes(self.data)
 
     def is_data_name(self, name):
         return is_data_name(name, self)
@@ -466,23 +460,23 @@ class Context:
         return evaluate(node, self)
 
     def is_array(self, value):
-        return isinstance(value, xr.DataArray)
+        return self.backend.is_array(value)
 
     def coords_for(self, value):
-        return value.indexes
+        return self.backend.label_map(value)
 
     def pick_label(self, value, axis, label):
-        return value.sel({axis: label}, drop=True)
+        return self.backend.sel(value, {axis: label}, drop=True)
 
     def pick_position(self, value, axis, position):
-        return value.isel({axis: position}, drop=True)
+        return self.backend.isel(value, {axis: position}, drop=True)
 
     def inventory(self):
         return _inventory(self)
 
 
 def evaluate(node: Expr, ctx: Context) -> Any:
-    """Evaluate *node*; arrays come back as ``xr.DataArray``, constants as Python values."""
+    """Evaluate *node*; arrays come back as the backend's arrays, constants as Python values."""
     if isinstance(node, Ref):
         return resolve(node, ctx)
     if isinstance(node, Literal):
@@ -535,10 +529,10 @@ def combine(op: Callable, left: Any, right: Any, left_text: str, right_text: str
                 f"{text} is a NumPy array without axis names; pairing it by position could "
                 'misalign it. Name its axes: xr.DataArray(values, dims=["point"])'
             )
-    if isinstance(left, xr.DataArray) and isinstance(right, xr.DataArray):
-        left, right = align_pair(left, right, left_text, right_text, ctx.notes)
-    with xr.set_options(**_EXACT):
-        return op(left, right)
+    backend = ctx.backend
+    if backend.is_array(left) and backend.is_array(right):
+        left, right = align_pair(left, right, left_text, right_text, ctx.notes, backend=backend)
+    return backend.apply(op, left, right)
 
 
 def resolve(ref: Ref, ctx: Context) -> Any:
@@ -548,19 +542,19 @@ def resolve(ref: Ref, ctx: Context) -> Any:
     """
     if isinstance(ref, NameRef) and not check_name(ref, ctx) and ref.python is not MISSING:
         return ref.python
-    data = ctx.data
+    data, backend = ctx.data, ctx.backend
     name = ref.name
     field_axis = ctx.field_axis
-    is_variable = name in data.data_vars
+    is_variable = backend.has_variable(data, name)
     holders = []
-    if field_axis is not None and name in data.indexes[field_axis]:
-        holders = [v for v in data.data_vars if field_axis in data[v].dims]
+    if field_axis is not None and backend.has_label(data, field_axis, name):
+        holders = [v for v, value in backend.variables(data).items() if field_axis in value.dims]
     is_label = bool(holders)
 
     if ref.kind == "var":
         if not is_variable:
             raise ctx.error(f'variable("{name}"): there is no variable {name}. {_inventory(ctx)}')
-        return data[name]
+        return backend.variable(data, name)
     if ref.kind == "label":
         if not is_label:
             raise ctx.error(f'label("{name}"): there is no field label {name}. {_inventory(ctx)}')
@@ -572,59 +566,57 @@ def resolve(ref: Ref, ctx: Context) -> Any:
             f'  label:     label("{name}")'
         )
     if is_variable:
-        return data[name]
+        return backend.variable(data, name)
     if is_label:
         return _field_view(data, holders, name, field_axis, ctx)
-    if name in data.dims:
-        return axis_labels(data, name)
+    if backend.has_axis(data, name):
+        return backend.axis_labels(data, name)
     raise ctx.error(f'"{name}" is not a variable, field label, or axis of this data. {_inventory(ctx)}'
-                    + _observation_hint(data, name, field_axis))
+                    + _observation_hint(data, name, field_axis, backend))
 
 
-def _field_view(data: xr.Dataset, holders: list, name: Hashable, field_axis: Hashable, ctx: Context):
+def _field_view(data: Any, holders: list, name: Hashable, field_axis: Hashable, ctx: Context):
     if len(holders) > 1:
         listed = ", ".join(str(v) for v in holders)
         raise ctx.error(
             f'"{name}" is a field label on {len(holders)} variables ({listed}); '
             f"select one first, e.g. select({holders[0]})"
         )
-    return data[holders[0]].sel({field_axis: name}, drop=True).rename(name)
+    return ctx.backend.field(data, holders[0], field_axis, name)
 
 
-def axis_labels(data: xr.Dataset, axis: Hashable) -> xr.DataArray:
+def axis_labels(data: Any, axis: Hashable, backend: Any = XARRAY) -> Any:
     """An axis's labels as data along it; unlabelled axes give 1-based positions."""
-    if axis in data.indexes:
-        return data[axis].reset_coords(drop=True)
-    return xr.DataArray(np.arange(1, data.sizes[axis] + 1), dims=axis, name=axis)
+    return backend.axis_labels(data, axis)
 
 
 def _inventory(ctx: Context) -> str:
-    data = ctx.data
-    parts = ["variables: " + (", ".join(str(v) for v in data.data_vars) or "none")]
+    data, backend = ctx.data, ctx.backend
+    parts = ["variables: " + (", ".join(str(v) for v in backend.variable_names(data)) or "none")]
     if ctx.field_axis is not None:
-        labels = "  ".join(str(v) for v in data.indexes[ctx.field_axis])
+        labels = "  ".join(str(v) for v in backend.label_list(data, ctx.field_axis))
         parts.append(f"labels on {ctx.field_axis}: {labels}")
     return "\n  " + "\n  ".join(parts)
 
 
-def _observation_hint(data: xr.Dataset, name: Hashable, field_axis: Hashable) -> str:
-    for dim, index in data.indexes.items():
-        if dim != field_axis and name in index:
+def _observation_hint(data: Any, name: Hashable, field_axis: Hashable, backend: Any = XARRAY) -> str:
+    for dim in backend.labelled_axes(data):
+        if dim != field_axis and backend.has_label(data, dim, name):
             return f'\n  "{name}" is a value on the {dim} axis; to keep it use filter({dim} == {name!r})'
     return ""
 
 
-def resolve_vector(node: Vector, ctx: Context) -> xr.DataArray:
+def resolve_vector(node: Vector, ctx: Context) -> Any:
     """``[x, y, z]``: field labels on one variable, or variables from one recorded axis."""
-    data = ctx.data
+    data, backend = ctx.data, ctx.backend
     names = [item.name for item in node.items]
     field_axis = ctx.field_axis
     kinds = []
     for item in node.items:
         check_name(item, ctx)
-        value_is_var = item.name in data.data_vars and item.kind != "label"
+        value_is_var = backend.has_variable(data, item.name) and item.kind != "label"
         value_is_label = (
-            field_axis is not None and item.name in data.indexes[field_axis] and item.kind != "var"
+            field_axis is not None and backend.has_label(data, field_axis, item.name) and item.kind != "var"
         )
         if value_is_var and value_is_label:
             resolve(item, ctx)  # raises the collision error
@@ -632,19 +624,19 @@ def resolve_vector(node: Vector, ctx: Context) -> xr.DataArray:
     if None in kinds:
         resolve(node.items[kinds.index(None)], ctx)  # raises the unknown-name error
     if builtins.all(kind == "label" for kind in kinds):
-        holders = [v for v in data.data_vars if field_axis in data[v].dims]
+        holders = [v for v, value in backend.variables(data).items() if field_axis in value.dims]
         if len(holders) > 1:
             raise ctx.error(
                 f"{node.text()} are field labels on several variables "
                 f"({', '.join(str(v) for v in holders)}); select one first"
             )
-        return data[holders[0]].sel({field_axis: names})
+        return backend.sel(backend.variable(data, holders[0]), {field_axis: names})
     if builtins.all(kind == "var" for kind in kinds):
         origins = [ctx.origins.get(name) for name in names]
         axes = {origin[0] for origin in origins if origin is not None}
         if None not in origins and len(axes) == 1:
             axis = axes.pop()
-            return xr.concat([data[name] for name in names], dim=label_index(names, axis))
+            return backend.concat([backend.variable(data, name) for name in names], axis, names)
         raise ctx.error(
             f"{node.text()} are variables without a shared origin axis; "
             f'pack them explicitly: pack({node.text()}, along="…")'
@@ -658,45 +650,20 @@ _FLOAT_REDUCERS = {"mean", "sum", "min", "max", "median", "std", "var"}
 
 
 def reduce_array(
-    array: xr.DataArray, op: str, axes: Sequence[Hashable], na_rm: bool = False,
-    min_count: int | None = None,
-) -> xr.DataArray:
+    array: Any, op: str, axes: Sequence[Hashable], na_rm: bool = False,
+    min_count: int | None = None, backend: Any = XARRAY,
+) -> Any:
     """One reduction over *axes*, with missing values propagated unless *na_rm*."""
-    axes = list(axes)
-    if not axes:
-        return array
-    if op == "median" and na_rm and array.chunks is not None and set(axes) == set(array.dims):
-        raise TidyError(
-            "median(..., na_rm=True) over every axis of a chunked array requires gathering "
-            "the whole array into memory. Select the required data and collect() it first, "
-            "then wrap the result with tidy() to compute the median."
-        )
-    if op in ("min", "max") and builtins.any(array.sizes[axis] == 0 for axis in axes):
-        # NumPy cannot take min or max of nothing; the result is missing.
-        return xr.full_like(array.astype(float).sum(dim=axes), np.nan)
-    with warnings.catch_warnings(), np.errstate(all="ignore"):
-        warnings.simplefilter("ignore", RuntimeWarning)
-        if op in ("any", "all"):
-            result = getattr(array.fillna(op == "all"), op)(dim=axes)
-            if na_rm or array.dtype.kind in "biu":
-                return result
-            return result.where(array.notnull().all(dim=axes))
-        if op == "count":
-            return array.notnull().sum(dim=axes)
-        options = {"skipna": na_rm} if array.dtype.kind in "fcmM" else {}
-        result = getattr(array, op)(dim=axes, **options)
-        if op == "sum" and min_count is not None:
-            present = array.notnull().sum(dim=axes)
-            result = result.where(present >= min_count)
-        return result
+    return backend.reduce(array, op, axes, na_rm, min_count)
 
 
 def _evaluate_reduce(node: Reduce, ctx: Context) -> Any:
     error = ctx.error
+    backend = ctx.backend
     if node.op == "n":
         return _count(ctx)
     array = evaluate(node.arg, ctx)
-    if not isinstance(array, xr.DataArray):
+    if not backend.is_array(array):
         raise error(f"{node.text()} reduces a constant; reductions need data, e.g. {node.op}(intensity)")
     if ctx.keys:
         _check_has_group_axes(node, array, ctx)
@@ -714,18 +681,18 @@ def _evaluate_reduce(node: Reduce, ctx: Context) -> Any:
         clash = [axis for axis in axes if axis in ctx.group_axes]
         if clash:
             raise error(f"{node.text()}: over= includes {clash[0]}, which group_by keeps")
-        return reduce_array(array, node.op, axes, node.na_rm, node.min_count)
+        return backend.reduce(array, node.op, axes, node.na_rm, node.min_count)
 
     axes = [axis for axis in ctx.observation_axes(array) if axis not in ctx.group_axes]
     if ctx.value_key is None:
-        return reduce_array(array, node.op, axes, node.na_rm, node.min_count)
+        return backend.reduce(array, node.op, axes, node.na_rm, node.min_count)
     groups = ctx.groups()
     others = [axis for axis in axes if axis != groups.axis]
-    stats = _group_reduce(array, node.op, groups, others, node.na_rm, node.min_count)
-    return stats if ctx.mode == "summarise" else _broadcast_back(stats, groups)
+    stats = backend.group_reduce(array, node.op, groups, others, node.na_rm, node.min_count)
+    return stats if ctx.mode == "summarise" else backend.broadcast(stats, groups)
 
 
-def _check_has_group_axes(node: Reduce, array: xr.DataArray, ctx: Context) -> None:
+def _check_has_group_axes(node: Reduce, array: Any, ctx: Context) -> None:
     needed = list(ctx.group_axes)
     if ctx.value_key is not None:
         needed.append(ctx.groups().axis)
@@ -742,69 +709,25 @@ def _check_has_group_axes(node: Reduce, array: xr.DataArray, ctx: Context) -> No
             )
 
 
-def _group_reduce(array, op, groups: Groups, others, na_rm, min_count) -> xr.DataArray:
-    stats = [
-        reduce_array(part, op, [groups.axis, *others], na_rm, min_count)
-        for part in _group_parts(array, groups)
-    ]
-    index = label_index(groups.labels, groups.name)
-    if stats:
-        return xr.concat(stats, dim=index)
-    empty = reduce_array(array.isel({groups.axis: slice(0, 0)}), op, [groups.axis, *others], na_rm, min_count)
-    return empty.expand_dims({groups.name: 0}).assign_coords({groups.name: index})
-
-
-# Up to this many groups, scanning the axis once per group is cheaper than sorting it.
-_FEW_GROUPS = 8
-
-
-def _group_parts(array: xr.DataArray, groups: Groups) -> list[xr.DataArray]:
-    """Each group's positions, in their original order.
-
-    With many groups, in-memory arrays are reordered once so groups sit in
-    contiguous blocks, instead of scanning the whole axis once per group.
-    Each block holds the same values in the same order and layout as a
-    per-group mask would, so reductions give bit-identical results. Chunked
-    arrays keep per-group masks, which stay lazy.
-    """
-    codes = groups.codes.values
-    count = len(groups.labels)
-    if array.chunks is not None or count <= _FEW_GROUPS:
-        return [array.isel({groups.axis: codes == code}) for code in range(count)]
-    order, starts, ends = groups.blocks()
-    ordered = array.isel({groups.axis: order})
-    first = array.get_axis_num(groups.axis) == 0
-    parts = []
-    for start, end in zip(starts, ends):
-        part = ordered.isel({groups.axis: builtins.slice(int(start), int(end))})
-        parts.append(part if first else part.copy())  # a contiguous copy, as a mask would give
-    return parts
-
-
-def _broadcast_back(stats: xr.DataArray, groups: Groups) -> xr.DataArray:
-    picked = stats.isel({groups.name: groups.codes})
-    return picked.drop_vars(groups.name, errors="ignore")
-
-
 def _count(ctx: Context) -> Any:
     """``n()``: positions on observation axes shared by non-scalar variables.
 
     Scalars do not change the count. Axes only some non-scalar variables have,
     such as a rotation's component axis, are not observations.
     """
-    data = ctx.data
-    shared = set(data.dims)
-    for variable in data.data_vars.values():
+    data, backend = ctx.data, ctx.backend
+    axes, sizes = backend.axes(data), backend.sizes(data)
+    shared = set(axes)
+    for variable in backend.variables(data).values():
         if variable.ndim:
             shared &= set(variable.dims)
-    observation = [d for d in data.dims if d in shared and d != ctx.field_axis and d not in ctx.group_axes]
+    observation = [d for d in axes if d in shared and d != ctx.field_axis and d not in ctx.group_axes]
     if ctx.value_key is None:
-        return int(np.prod([data.sizes[d] for d in observation], dtype=np.int64))
+        return int(np.prod([sizes[d] for d in observation], dtype=np.int64))
     groups = ctx.groups()
-    per_position = int(np.prod([data.sizes[d] for d in observation if d != groups.axis], dtype=np.int64))
-    counts = np.bincount(groups.codes.values, minlength=len(groups.labels)) * per_position
-    stats = xr.DataArray(counts, dims=groups.name, coords={groups.name: groups.labels})
-    return stats if ctx.mode == "summarise" else _broadcast_back(stats, groups)
+    per_position = int(np.prod([sizes[d] for d in observation if d != groups.axis], dtype=np.int64))
+    stats = backend.group_counts(groups, per_position)
+    return stats if ctx.mode == "summarise" else backend.broadcast(stats, groups)
 
 
 # ── Value keys ──────────────────────────────────────────────────────────────
@@ -814,7 +737,7 @@ def resolve_value_key(key: ValueKey, frame: Any, group_axes: Sequence[Hashable])
     """Evaluate a value key on current data and give each position a group code."""
     ctx = Context(frame, verb="group_by", error=GroupError, grouped=False)
     values = evaluate(key.expr, ctx)
-    if not isinstance(values, xr.DataArray) or values.ndim != 1:
+    if not ctx.backend.is_array(values) or values.ndim != 1:
         dims = ", ".join(str(d) for d in getattr(values, "dims", ())) or "no axes"
         raise GroupError(
             f"group_by({key.label}) needs a field that varies along one axis; "
@@ -826,11 +749,11 @@ def resolve_value_key(key: ValueKey, frame: Any, group_axes: Sequence[Hashable])
     if axis == ctx.field_axis:
         raise GroupError(f"group_by({key.label}) would group the field axis {axis}; fields are columns")
     if key.edges is None:
-        return _value_groups(key, axis, values)
-    return _bin_groups(key, axis, values)
+        return _value_groups(key, axis, values, ctx.backend)
+    return _bin_groups(key, axis, values, ctx.backend)
 
 
-def _value_groups(key: ValueKey, axis: Hashable, values: xr.DataArray) -> Groups:
+def _value_groups(key: ValueKey, axis: Hashable, values: Any, backend: Any) -> Groups:
     raw = values.values
     if raw.dtype.kind in "fc" and np.isnan(raw).any():
         raise GroupError(
@@ -838,8 +761,7 @@ def _value_groups(key: ValueKey, axis: Hashable, values: xr.DataArray) -> Groups
             f"{key.label}; filter them out first"
         )
     labels, codes = _factorize(raw)
-    codes_da = xr.DataArray(codes, dims=axis, coords=values.coords)
-    return Groups(key.name, axis, codes_da, [_plain(label) for label in labels])
+    return Groups(key.name, axis, backend.codes_like(codes, values), [_plain(label) for label in labels])
 
 
 def _factorize(raw: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -859,7 +781,7 @@ def _factorize(raw: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return np.asarray(labels), codes
 
 
-def _bin_groups(key: ValueKey, axis: Hashable, values: xr.DataArray) -> Groups:
+def _bin_groups(key: ValueKey, axis: Hashable, values: Any, backend: Any) -> Groups:
     raw = values.values
     edges = _bin_edges(key, raw)
     codes = np.searchsorted(edges, raw, side="right") - 1
@@ -874,8 +796,7 @@ def _bin_groups(key: ValueKey, axis: Hashable, values: xr.DataArray) -> Groups:
             "  Widen the edges, or filter those positions out first."
         )
     labels = [f"[{_format_edge(a)}, {_format_edge(b)})" for a, b in zip(edges[:-1], edges[1:])]
-    codes_da = xr.DataArray(codes, dims=axis, coords=values.coords)
-    return Groups(key.name, axis, codes_da, labels)
+    return Groups(key.name, axis, backend.codes_like(codes, values), labels)
 
 
 def _bin_edges(key: ValueKey, raw: np.ndarray) -> np.ndarray:
@@ -920,15 +841,14 @@ def bins(field: Any, edges: Any) -> ValueKey:
 def _is_in(node: Call, ctx: Context) -> Any:
     value = evaluate(node.args[0], ctx)
     choices = evaluate(node.args[1], ctx)
-    return value.isin(list(choices)) if isinstance(value, xr.DataArray) else value in list(choices)
+    return ctx.backend.isin(value, list(choices)) if ctx.backend.is_array(value) else value in list(choices)
 
 
 def _if_else(node: Call, ctx: Context) -> Any:
     values = [evaluate(arg, ctx) for arg in node.args]
     texts = [arg.text() for arg in node.args]
-    values = align_many(values, texts, ctx.notes)
-    with xr.set_options(**_EXACT):
-        return xr.where(*values)
+    values = align_many(values, texts, ctx.notes, backend=ctx.backend)
+    return ctx.backend.where(*values)
 
 
 def _abs(node: Call, ctx: Context) -> Any:
