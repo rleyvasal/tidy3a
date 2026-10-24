@@ -157,9 +157,8 @@ def close_both(shell):
 
 @pytest.mark.parametrize("first", ["tidy3", "tidy3a"])
 def test_tidy3_and_tidy3a_share_a_notebook(first):
-    import tidy3.masking
-
-    if not hasattr(tidy3.masking, "_owned_by_tidy3"):
+    masking = pytest.importorskip("tidy3.masking")  # tidy3 is not a tidy3A dependency
+    if not hasattr(masking, "_owned_by_tidy3"):
         pytest.skip("needs the tidy3 version whose notebook layer rewrites only tidy3-owned calls")
     shell = both_shell()
     try:
