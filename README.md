@@ -38,7 +38,10 @@ The example shows the planned interface. Implemented so far: `read_array`,
 `infer`, `tidy()`, and the tidy-layer verbs (`select`, `filter`, `slice`,
 `mutate`, `group_by`, `summarise`, joins, `pull`, `bind_cols`) in script
 syntax, where names are written with `col("x")` or declared with
-`x, y, z = fields("x", "y", "z")`.
+`x, y, z = fields("x", "y", "z")`, and the array layer (`dot`, numeric
+functions, `conj`, `rename_axes`, `pack`). Not yet: `formula()` and
+notebook bare names, so the example's distance line is written
+`sqrt(sum(p ** 2, over="i"))` today.
 
 ## License
 

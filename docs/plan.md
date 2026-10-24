@@ -1041,6 +1041,16 @@ Implement dot, reductions, elementary numeric functions, comparisons, explicit c
 
 Exit: the point-cloud rotation works against an independent NumPy calculation, and the complex-array example works through the same evaluator. No spatial verb is necessary.
 
+Status (2026-10-24): complete. `linalg.py` adds `dot` (sums over `over=`, keeps other axes, requires exactly one shared axis when `over=` is omitted, never conjugates), elementwise functions (`sqrt`, `exp`, `log`, `log2`, `log10`, trigonometric and hyperbolic functions, `arctan2`, `floor`, `ceil`, `sign`, `conj`, `real`, `imag`, `angle`), `rename_axes`, and `pack`, all evaluated by the same expression system as the verbs. 22 new tests, 195 in total, pass on the minimum and latest versions. They cover:
+
+- the rotation and offset of a random cloud against `points @ R.T + t` in NumPy, and the same result from `field_axis=` and `variables_from=` imports;
+- the 49/50/51 m distance boundary, with intensities kept for the retained points;
+- in-place vector write-back computed from the original vector;
+- `dot` against `np.einsum` with shuffled axis orders, batch axes kept, label reordering, mismatched labels, and no pairing by length;
+- the gate example, a genuinely complex unitary preserving the norm, explicit `conj` for inner products, a gate on one axis of a two-qubit state, and chained gates with `rename_axes`.
+
+The reference example of §7 now runs in script form, with `sqrt(sum(p ** 2, over="i"))` in place of the formula until milestone 4.
+
 ### Milestone 4 — Mathematical notation
 
 Implement plain mathematical text first, then the scoped LaTeX subset. Extend supported index expressions and sums incrementally. Add readable mathematical representations while retaining the actual parsed/bound operation for inspection.

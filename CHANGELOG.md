@@ -15,3 +15,5 @@
   `if_else`, and reductions `mean`, `sum`, `min`, `max`, `median`, `std`,
   `any`, `all`, `n` with `over=` and `na_rm=`.
 - Exact label alignment, with reordering by label and explicit joins.
+- Array layer: `dot` with `over=`, elementwise numeric functions, `conj`,
+  `real`, `imag`, `angle`, `arctan2`, `rename_axes`, and `pack`.
