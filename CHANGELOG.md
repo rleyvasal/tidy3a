@@ -2,7 +2,7 @@
 
 ## 0.1.0 — 2026-10-24
 
-Prepared for publication; this version has not been published.
+First release.
 
 - `read_array` reads raw numeric files, `.npy` files, and in-memory NumPy
   arrays, with `infer`, labels, `field_axis=`, `variables_from=`, byte

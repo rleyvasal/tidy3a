@@ -1,6 +1,6 @@
 # First-release scope and limitations
 
-Version `0.1.0` is prepared for the first release and has not been published.
+Version `0.1.0` is the first release.
 The release notes are in [the changelog](../CHANGELOG.md). Progress and verification
 are recorded in [milestone 7](plan.md#milestone-7--independent-first-release).
 
