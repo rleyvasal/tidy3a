@@ -35,7 +35,10 @@ nearby = (
 ```
 
 The example shows the planned interface. Implemented so far: `read_array`,
-`infer`, and `tidy()`, with inspection output.
+`infer`, `tidy()`, and the tidy-layer verbs (`select`, `filter`, `slice`,
+`mutate`, `group_by`, `summarise`, joins, `pull`, `bind_cols`) in script
+syntax, where names are written with `col("x")` or declared with
+`x, y, z = fields("x", "y", "z")`.
 
 ## License
 

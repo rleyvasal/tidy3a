@@ -59,7 +59,7 @@ Array-layer helpers are used inside tidy-layer verbs, for example `mutate(p = do
 | Intentional joins | `left_join`, `inner_join`, `full_join` align on shared axes via `xr.merge`; expressions stay exact |
 | Join name clashes | Suffix like tidy3, `suffix=("_x", "_y")` by default; renamed before `xr.merge` |
 | Labeled vs unlabeled | One side labeled and the other not is an error, even at equal length; both unlabeled pair by position |
-| Outside arrays and labels | `bind_cols(scores, along="point")` attaches by position; `pull(point)` returns an axis's labels; no accessor method |
+| Outside arrays and labels | `bind_cols(scores=scores, along="point")` attaches by position; `pull(point)` returns an axis's labels; no accessor method |
 | Label tolerance | None by default; rounding mismatches are an error that suggests `tolerance=` on join verbs |
 | Label order | Same labels in a different order are matched by label, reordered to the first operand, and reported |
 | Axis renaming | `rename_axes(expr, output="input")` inside expressions; distinct from tidy3's variable `rename` |
@@ -300,7 +300,7 @@ Decided: `select` accepts tidy3's selection helpers (`tidyselect.py`), applied t
 
 ```python
 cloud >> select(~intensity)              # values with feature narrowed to x y z ring
-cloud >> select(~[intensity, ring])      # x y z only
+cloud >> select(~intensity, ~ring)       # x y z only (Python cannot apply ~ to a list)
 data  >> select(starts_with("temp"))     # variables or field labels starting with "temp"
 ```
 
@@ -643,13 +643,13 @@ Decided: when one operand's axis has labels and the other's does not, the expres
 ```text
 AlignError: point is labelled on intensity (original positions) but unlabelled on scores.
   Pairing by length could match the wrong points.
-  If scores follows nearby's order, attach it by position:  nearby >> bind_cols(scores, along="point")
+  If scores follows nearby's order, attach it by position:  nearby >> bind_cols(scores=scores, along="point")
 ```
 
 Decided: outside arrays are attached by position with `bind_cols`, and an axis's labels are read with `pull`; there is no accessor method, which would break tidy3A's verbs-and-pipes style.
 
 ```python
-nearby >> bind_cols(scores, along="point")   # scores becomes a variable on point, taking nearby's labels
+nearby >> bind_cols(scores=scores, along="point")   # scores becomes a variable on point, taking nearby's labels
 nearby >> pull(point)                        # labels on the point axis, as a NumPy array
 nearby >> pull(intensity)                    # a variable's values, as in tidy3
 ```
@@ -1017,6 +1017,23 @@ Status (2026-10-24): complete. `src/tidy3a/` has `read_array` and `infer` (`io.p
 Implement selection, expression references, filtering a single observation axis, mutation, simple grouping, summaries, and ungrouping. Start with script syntax. Implement named-coordinate alignment and broadcasting without converting full arrays into tables.
 
 Exit: the XYZ selection and time-series mean examples work; filtering preserves point-associated values; grouping identifies what remains separate; ambiguous references fail clearly.
+
+Status (2026-10-24): complete in script syntax. `expr.py` (references, operators, reductions, grouped evaluation), `align.py` (exact matching, reorder by label, labelled-versus-unlabelled errors), `selectors.py` (tidy3's selection helpers), and `verbs.py` (`select`, `filter`, `slice`, `slice_head`, `slice_tail`, `mutate`, `assign`, `group_by`, `bins`, `ungroup`, `summarise`, `pull`, `bind_cols`, `left_join`, `inner_join`, `full_join`). 173 tests pass on the minimum and latest versions.
+
+Decided or corrected while implementing:
+
+- `bind_cols` names each array with a keyword, `bind_cols(scores=scores, along="point")`: a script cannot see a positional argument's variable name. A named `xr.DataArray` may be passed positionally.
+- `select(~[intensity, ring])` is not valid Python, since `~` cannot apply to a list; the form is `select(~intensity, ~ring)`.
+- Storing a vector view next to its source, `mutate(v = [x, y, z])`, is an error: variables in one dataset share one `feature` axis, so `v` with 3 of its 5 labels cannot be stored. The error suggests `rename_axes` (milestone 3). Vector views are used inside expressions, such as `dot` or `sum([x, y, z], over="feature")`.
+- `slice` drops positions past the end, as tidy3 does.
+- `n()` counts observations per group: positions on the grouped axis times the sizes of the other reduced observation axes.
+
+Known limitations, to address later:
+
+- An xarray object on the left of an operator with a tidy3A expression (`R * x`) fails inside xarray, which does not defer to other types' reflected operators. Write the expression first (`x * R`) or use `dot()`. NumPy values on the left work.
+- Grouping by more than one value field; `slice` on grouped data; `over=` inside reductions when grouped by a value field; summaries that refer to earlier summaries in the same `summarise`; `tolerance=` on `inner_join` and `full_join`; `case_when`.
+
+Open decision found while implementing: tidy3's `var()` is variance, as in dplyr, but tidy3A's `var("x")` names a variable (§5.1). Variance is not exported until this is settled; `std` is.
 
 ### Milestone 3 — Generalized array mathematics
 

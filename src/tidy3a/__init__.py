@@ -1,16 +1,79 @@
 """tidy3A: tidy-style verbs for named multidimensional arrays."""
 
 from tidy3a.__version__ import __version__
-from tidy3a.errors import ReadError, TidyError
+from tidy3a.errors import (
+    AlignError,
+    FilterError,
+    GroupError,
+    MutateError,
+    ReadError,
+    RefError,
+    SelectError,
+    SliceError,
+    SummariseError,
+    TidyError,
+)
+from tidy3a.expr import (
+    all,
+    any,
+    bins,
+    col,
+    env,
+    fields,
+    if_else,
+    label,
+    max,
+    mean,
+    median,
+    min,
+    n,
+    std,
+    sum,
+    var,
+)
 from tidy3a.frame import TidyArray, tidy
 from tidy3a.io import infer, read_array
+from tidy3a.selectors import (
+    all_of,
+    any_of,
+    contains,
+    ends_with,
+    everything,
+    is_numeric,
+    last_col,
+    matches,
+    num_range,
+    starts_with,
+    where,
+)
+from tidy3a.verbs import (
+    assign,
+    bind_cols,
+    filter,
+    full_join,
+    group_by,
+    inner_join,
+    left_join,
+    mutate,
+    pull,
+    select,
+    slice,
+    slice_head,
+    slice_tail,
+    summarise,
+    summarize,
+    ungroup,
+)
+
+nan = float("nan")
 
 __all__ = [
-    "ReadError",
-    "TidyArray",
-    "TidyError",
-    "__version__",
-    "infer",
-    "read_array",
-    "tidy",
+    "AlignError", "FilterError", "GroupError", "MutateError", "ReadError", "RefError",
+    "SelectError", "SliceError", "SummariseError", "TidyArray", "TidyError", "__version__",
+    "all", "all_of", "any", "any_of", "assign", "bind_cols", "bins", "col", "contains",
+    "ends_with", "env", "everything", "fields", "filter", "full_join", "group_by", "if_else",
+    "infer", "inner_join", "is_numeric", "label", "last_col", "left_join", "matches", "max",
+    "mean", "median", "min", "mutate", "n", "nan", "num_range", "pull", "read_array", "select",
+    "slice", "slice_head", "slice_tail", "starts_with", "std", "sum", "summarise", "summarize",
+    "tidy", "ungroup", "var", "where",
 ]

@@ -24,7 +24,7 @@ _ANNOTATION_COLUMN = 40
 class TidyArray:
     """Named arrays with tidy3A's axis roles; build one with ``tidy()`` or ``read_array()``."""
 
-    __slots__ = ("_data", "_field_axis", "_origins", "_source", "_notes")
+    __slots__ = ("_data", "_field_axis", "_origins", "_source", "_notes", "_groups")
 
     def __init__(
         self,
@@ -34,6 +34,7 @@ class TidyArray:
         origins: Mapping[Hashable, tuple[str, tuple[Any, ...]]] | None = None,
         source: str | None = None,
         notes: Sequence[str] = (),
+        groups: Sequence[Any] = (),
     ):
         self._data = data
         self._field_axis = field_axis
@@ -41,6 +42,28 @@ class TidyArray:
         self._origins = dict(origins or {})
         self._source = source
         self._notes = tuple(notes)
+        # group_by keys, in order (tidy3a.verbs.AxisKey / ValueKey)
+        self._groups = tuple(groups)
+
+    def _evolve(self, data: xr.Dataset | None = None, *, notes: Sequence[str] = (), **changes: Any) -> TidyArray:
+        """A copy with *data* and other parts replaced; *notes* are appended."""
+        data = self._data if data is None else data
+        origins = changes.pop(
+            "origins",
+            {name: origin for name, origin in self._origins.items() if name in data.data_vars},
+        )
+        new_notes = list(self._notes)
+        for note in notes:
+            if note not in new_notes:
+                new_notes.append(note)
+        return TidyArray(
+            data,
+            field_axis=changes.pop("field_axis", self._field_axis),
+            origins=origins,
+            source=changes.pop("source", self._source),
+            notes=new_notes,
+            groups=changes.pop("groups", self._groups),
+        )
 
     def to_xarray(self) -> xr.Dataset:
         """The underlying xarray Dataset (a shallow copy sharing the same values)."""
@@ -78,13 +101,7 @@ def tidy(data: Any, *, field_axis: str | None = None) -> TidyArray:
                 f'it cannot also use field_axis="{field_axis}"'
             )
         check_field_axis(data._data, field_axis, TidyError)
-        return TidyArray(
-            data._data,
-            field_axis=field_axis,
-            origins=data._origins,
-            source=data._source,
-            notes=data._notes,
-        )
+        return data._evolve(field_axis=field_axis)
     if isinstance(data, xr.DataArray):
         name = data.name if data.name is not None else "values"
         dataset = data.to_dataset(name=name)
@@ -162,6 +179,8 @@ def _inspect(frame: TidyArray) -> str:
                 'tidy(da, field_axis="variable")'
             )
 
+    if frame._groups:
+        lines.append("groups: " + ", ".join(key.label for key in frame._groups))
     lines.extend(frame._notes)
     return "\n".join(lines)
 
