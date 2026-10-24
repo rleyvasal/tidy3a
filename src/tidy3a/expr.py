@@ -449,6 +449,37 @@ class Context:
     def observation_axes(self, array: xr.DataArray) -> list[Hashable]:
         return [dim for dim in array.dims if dim != self.field_axis]
 
+    # Formula compilation asks the context about arrays, so it can share the
+    # parser and binding rules with an experimental evaluator.
+    @property
+    def variables(self):
+        return self.data.data_vars
+
+    @property
+    def axes(self):
+        return self.data.dims
+
+    def is_data_name(self, name):
+        return is_data_name(name, self)
+
+    def evaluate(self, node):
+        return evaluate(node, self)
+
+    def is_array(self, value):
+        return isinstance(value, xr.DataArray)
+
+    def coords_for(self, value):
+        return value.indexes
+
+    def pick_label(self, value, axis, label):
+        return value.sel({axis: label}, drop=True)
+
+    def pick_position(self, value, axis, position):
+        return value.isel({axis: position}, drop=True)
+
+    def inventory(self):
+        return _inventory(self)
+
 
 def evaluate(node: Expr, ctx: Context) -> Any:
     """Evaluate *node*; arrays come back as ``xr.DataArray``, constants as Python values."""

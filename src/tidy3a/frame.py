@@ -92,6 +92,10 @@ class TidyArray:
             )
         return verb(self)
 
+    def _apply_verb(self, verb: Any) -> Any:
+        """Execute a verb; experimental frames may override this private boundary."""
+        return verb._apply(self)
+
     def __repr__(self) -> str:
         return _inspect(self)
 

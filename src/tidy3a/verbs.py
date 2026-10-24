@@ -51,9 +51,12 @@ from tidy3a.selectors import Column, Exclude, Selector
 class Verb:
     """A step in a ``>>`` pipeline."""
 
-    def __init__(self, text: str, apply: Callable[[TidyArray], Any]):
+    def __init__(self, text: str, apply: Callable[[TidyArray], Any], *,
+                 operation: str | None = None, arguments: Any = None):
         self.text = text
         self._apply = apply
+        self._operation = operation
+        self._arguments = arguments
 
     def __call__(self, frame: Any) -> Any:
         if not isinstance(frame, TidyArray):
@@ -61,7 +64,7 @@ class Verb:
                 f"{self.text} works on tidy3A data; wrap xarray objects with tidy() "
                 "or read files with read_array()"
             )
-        return self._apply(frame)
+        return frame._apply_verb(self)
 
     def __repr__(self) -> str:
         return f"<verb {self.text}>"
@@ -144,7 +147,7 @@ def select(*items: Any) -> Verb:
             result = result.sel({ctx.field_axis: labels})
         return frame._evolve(result, notes=notes)
 
-    return Verb(_call_text("select", items), apply)
+    return Verb(_call_text("select", items), apply, operation="select", arguments=items)
 
 
 def _holders(data: xr.Dataset, field_axis: Hashable | None) -> list[Hashable]:
@@ -269,7 +272,7 @@ def filter(*predicates: Any) -> Verb:  # noqa: A001
                 notes.append(f"changed: {axis}: 0 (all removed by {text})")
         return frame._evolve(data, notes=notes)
 
-    return Verb(text, apply)
+    return Verb(text, apply, operation="filter", arguments=predicates)
 
 
 def _conjuncts(node: Expr) -> list[Expr]:
@@ -311,7 +314,7 @@ def slice(*, drop: bool = False, **axes: Any) -> Verb:  # noqa: A001
         return frame._evolve(data)
 
     named = {**axes, **({"drop": True} if drop else {})}
-    return Verb(_call_text("slice", (), named), apply)
+    return Verb(_call_text("slice", (), named), apply, operation="slice", arguments=(drop, axes))
 
 
 def slice_head(**axes: int) -> Verb:
@@ -340,7 +343,7 @@ def _slice_end(axes: dict[str, int], *, head: bool) -> Verb:
             data = _with_positions(data, axis).isel({axis: _position_indexer(index)})
         return frame._evolve(data)
 
-    return Verb(_call_text(name, (), axes), apply)
+    return Verb(_call_text(name, (), axes), apply, operation=name, arguments=axes)
 
 
 def _position_indexer(index: list[int]) -> builtins.slice | list[int]:
@@ -448,7 +451,7 @@ def mutate(*assignments: Any, **named: Any) -> Verb:
             frame = frame._evolve(data, notes=notes, origins=origins)
         return frame
 
-    return Verb(_call_text("mutate", positional, named), apply)
+    return Verb(_call_text("mutate", positional, named), apply, operation="mutate", arguments=steps)
 
 
 def _result_metadata(value: Any, node: Expr) -> Any:
@@ -597,12 +600,12 @@ def group_by(*keys: Any, **named: Any) -> Verb:
             resolve_value_key(values[0], frame, [k.axis for k in resolved if isinstance(k, AxisKey)])
         return frame._evolve(groups=resolved)
 
-    return Verb(_call_text("group_by", keys, named), apply)
+    return Verb(_call_text("group_by", keys, named), apply, operation="group_by", arguments=(keys, named))
 
 
 def ungroup() -> Verb:
     """Remove grouping."""
-    return Verb("ungroup()", lambda frame: frame._evolve(groups=()))
+    return Verb("ungroup()", lambda frame: frame._evolve(groups=()), operation="ungroup")
 
 
 def summarise(*, groups: str | None = None, **named: Any) -> Verb:
@@ -639,7 +642,7 @@ def summarise(*, groups: str | None = None, **named: Any) -> Verb:
         kept = [AxisKey(key.name) if isinstance(key, ValueKey) else key for key in kept]
         return frame._evolve(data, notes=ctx.notes, groups=kept, origins={})
 
-    return Verb(_call_text("summarise", (), named), apply)
+    return Verb(_call_text("summarise", (), named), apply, operation="summarise", arguments=(groups, named))
 
 
 summarize = summarise
@@ -681,7 +684,7 @@ def pull(item: Any) -> Verb:
             return axis_labels(ctx.data, ref.name).values
         return resolve(ref, ctx).values
 
-    return Verb(_call_text("pull", (item,)), apply)
+    return Verb(_call_text("pull", (item,)), apply, operation="pull", arguments=item)
 
 
 def bind_cols(*arrays: Any, along: str, **named: Any) -> Verb:

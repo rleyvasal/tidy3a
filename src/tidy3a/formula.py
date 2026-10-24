@@ -666,13 +666,7 @@ class _Compiler:
         return Literal(value, label={"pi": "π", "e": "e", "i": "1j"}[name])
 
     def is_data(self, name: str) -> bool:
-        data = self.ctx.data
-        field_axis = self.ctx.field_axis
-        return (
-            name in data.data_vars
-            or name in data.dims
-            or (field_axis is not None and name in data.indexes[field_axis])
-        )
+        return self.ctx.is_data_name(name)
 
     def lookup(self, name: str) -> Expr | None:
         """Resolve a name to data, a bound value, or a Python value; None if unknown."""
@@ -717,10 +711,10 @@ class _Compiler:
     def describe_name(self, name: str, expr: Expr) -> None:
         if isinstance(expr, Ref):
             try:
-                value = evaluate(expr, self.ctx)
+                value = self.ctx.evaluate(expr)
             except TidyError:
                 return
-            if isinstance(value, xr.DataArray):
+            if self.ctx.is_array(value):
                 self.note(f"{name} → data {name} ({', '.join(map(str, value.dims))})")
         elif name in self.bind:
             self.note(f"{name} → bound value")
@@ -766,8 +760,8 @@ class _Compiler:
             raise FormulaError("formula: only names can take subscripts, e.g. p_i")
         base_name = node.base.name
         expr = self.name(node.base)
-        value = evaluate(expr, self.ctx)
-        if not isinstance(value, xr.DataArray):
+        value = self.ctx.evaluate(expr)
+        if not self.ctx.is_array(value):
             raise FormulaError(f"formula: {base_name}_… needs an array; {base_name} has no axes")
         dims = value.dims
         for sub in node.subs:
@@ -788,8 +782,9 @@ class _Compiler:
 
     def describe_index(self, letter: str, axis: Hashable, base: str, value: xr.DataArray) -> None:
         labels = ""
-        if axis in value.indexes:
-            shown = "  ".join(str(v) for v in list(value.indexes[axis])[:6])
+        coords = self.ctx.coords_for(value)
+        if axis in coords:
+            shown = "  ".join(str(v) for v in list(coords[axis])[:6])
             labels = f" (labels {shown})"
         how = "summed" if letter in self.formula.parsed.sum_letters else "free"
         bound = " (bound)" if letter in self.bind else ""
@@ -799,7 +794,8 @@ class _Compiler:
         self.note(f'{letter} → axis "{axis}" of {base}{labels}{bound}, {how}')
 
     def label(self, expr: Expr, value: xr.DataArray, name: str, base: str) -> tuple[Expr, xr.DataArray]:
-        axes = [d for d in value.dims if d in value.indexes and name in value.indexes[d]]
+        coords = self.ctx.coords_for(value)
+        axes = [d for d in value.dims if d in coords and name in coords[d]]
         if len(axes) != 1:
             listed = ", ".join(map(str, value.dims))
             where = "no axis" if not axes else f"several axes ({', '.join(map(str, axes))})"
@@ -809,7 +805,7 @@ class _Compiler:
             )
         axis = axes[0]
         self.note(f'{name} → label "{name}" on axis "{axis}" of {base}')
-        return Call("pick", (expr,), {"axis": axis, "label": name}), value.sel({axis: name}, drop=True)
+        return Call("pick", (expr,), {"axis": axis, "label": name}), self.ctx.pick_label(value, axis, name)
 
     def position(self, expr: Expr, value: xr.DataArray, position: int, base: str) -> tuple[Expr, xr.DataArray]:
         axis = self.component_axis(value, base)
@@ -818,19 +814,19 @@ class _Compiler:
         self.note(f'{position} → position {position} on axis "{axis}" of {base}')
         return (
             Call("position", (expr,), {"axis": axis, "position": position}),
-            value.isel({axis: position - 1}, drop=True),
+            self.ctx.pick_position(value, axis, position - 1),
         )
 
     def component_axis(self, value: xr.DataArray, base: str) -> Hashable:
         """The one axis a numeric subscript can mean: the field axis, or an axis no other variable has."""
-        data = self.ctx.data
+        variables, axes = self.ctx.variables, self.ctx.axes
         candidates = []
         for dim in value.dims:
             if dim == self.ctx.field_axis:
                 candidates.append(dim)
                 continue
-            others = [v for v in data.data_vars if v != base and dim in data[v].dims]
-            if dim not in data.dims or not others:
+            others = [v for v in variables if v != base and dim in variables[v].dims]
+            if dim not in axes or not others:
                 candidates.append(dim)
         if len(candidates) != 1 and value.ndim == 1:
             candidates = list(value.dims)
@@ -888,11 +884,7 @@ def _short(value: Any) -> str:
 
 
 def _inventory(ctx: Context) -> str:
-    data = ctx.data
-    text = "\n  variables: " + (", ".join(map(str, data.data_vars)) or "none")
-    if ctx.field_axis is not None:
-        text += f"\n  labels on {ctx.field_axis}: " + "  ".join(map(str, data.indexes[ctx.field_axis]))
-    return text + "\n  Supply other names with bind={...}."
+    return ctx.inventory() + "\n  Supply other names with bind={...}."
 
 
 # ── Evaluation helpers registered with the expression system ────────────────
