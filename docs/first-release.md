@@ -6,7 +6,8 @@ are recorded in [milestone 7](plan.md#milestone-7--independent-first-release).
 
 ## Supported scope
 
-- Python 3.11 or newer, NumPy 2.0 or newer, and xarray 2024.6 or newer.
+- Python 3.11 or newer, NumPy 2.0 or newer, pandas 2.2.2 or newer, and
+  xarray 2024.6 or newer.
 - Homogeneous raw numeric files, `.npy` files, and in-memory NumPy arrays
   through `read_array`; xarray objects through `tidy()`.
 - Mixed fixed-width numeric/text records through `read_binary`, with
@@ -25,12 +26,17 @@ allocate arrays, filtering evaluates its predicate mask, and field-label
 updates copy the whole containing array, even when changing one field.
 `pull()` returns NumPy values and materializes the requested data.
 
-`tidy()` does not itself compute a lazy xarray input. Grouping by field
-values or bins reads the grouping values, filtering reads the mask, and
-field-label write-back reads and copies the containing array. `collect()`
-computes the resulting Dataset. `to_xarray()` makes a shallow copy without
-computing it. Dask-backed execution and performance guarantees are deferred
-to milestone 6; memory-mapping alone does not promise bounded memory use.
+`tidy()` does not itself compute a lazy xarray input. Selection, regular
+positional slicing, arithmetic, and reductions on Dask-backed or file-backed
+xarray data stay lazy and are checked in the test suite
+([metadata and lazy input](m6-metadata-lazy.md)). Grouping by field values
+or bins reads the grouping values, filtering reads the mask, and field-label
+write-back reads and copies the containing array. `median(..., na_rm=True)`
+over every axis of a chunked array is an error that asks you to collect
+first. `collect()` computes the resulting Dataset. `to_xarray()` makes a
+shallow copy without computing it. Dask-backed grouping and performance
+guarantees are not part of this release; memory-mapping alone does not
+promise bounded memory use.
 
 ## Known limitations
 
@@ -55,7 +61,9 @@ to milestone 6; memory-mapping alone does not promise bounded memory use.
   check (`_owned_by_tidy3`); the prerequisite change is recorded in the
   implementation plan. The coexistence tests skip when it is unavailable.
 
-Mixed-record reading was brought forward from milestone 6 before publication.
-Dedicated NetCDF/Zarr readers and Dask-focused execution remain planned. Existing
+Mixed-record reading, metadata handling, and the lazy-input checks were
+brought forward from milestone 6 before publication. Dedicated NetCDF/Zarr
+readers, Dask-backed grouping, text encodings beyond UTF-8/ASCII, and
+variable-length records remain planned. Existing
 xarray readers can already be used with `tidy()`; their optional dependencies
 are installed separately.

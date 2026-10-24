@@ -44,7 +44,7 @@ done
 
 if [[ $# -eq 0 ]]; then
   run "pytest (minimum NumPy and xarray)" \
-    pytest_job 3.11 "numpy==2.0.*" "xarray==2024.6.0" "dask[array]" pytest -e .
+    pytest_job 3.11 "numpy==2.0.*" "pandas==2.2.2" "xarray==2024.6.0" "dask[array]" pytest -e .
 
   distribution_job() {
     uv build -q --out-dir "$work/dist" &&

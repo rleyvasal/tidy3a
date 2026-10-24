@@ -21,6 +21,14 @@ Prepared for publication; this version has not been published.
   `std`, `var` (variance, as in tidy3 and dplyr), `any`, and `all` with
   `over=` and `na_rm=`, plus `n()` for observation counts.
 - Exact label alignment, with reordering by label and explicit joins.
+- Metadata: wrapping keeps attributes and encodings; new and computed
+  results clear stale serialization encoding and inherited attributes,
+  direct aliases keep theirs, and joins report dropped conflicting
+  attributes.
+- Lazy input: NetCDF and Dask-backed data stay lazy through inspection,
+  selection, regular positional slicing, arithmetic, and reductions until
+  `collect()`; grouping, filtering, and field write-back read the values
+  they need, as documented.
 - Array layer: `dot` with `over=`, elementwise numeric functions, `conj`,
   `real`, `imag`, `angle`, `arctan2`, `rename_axes`, and `pack`.
 - `formula()`: plain mathematical text and a strict LaTeX dialect with
@@ -41,5 +49,7 @@ Prepared for publication; this version has not been published.
   tests. Packaging checks build a wheel from the source archive and
   validate both distributions' metadata. The build requires setuptools
   77.0.3 or newer for the license metadata.
+- Requires Python 3.11+, NumPy 2.0+, pandas 2.2.2+ (now declared, as
+  tidy3A imports it directly), and xarray 2024.6+.
 - Publishing a GitHub Release runs the version check and reusable CI gate,
   then uploads the validated distributions to PyPI through trusted publishing.

@@ -52,7 +52,15 @@ class TidyArray:
             "origins",
             {name: origin for name, origin in self._origins.items() if name in data.data_vars},
         )
-        new_notes = list(self._notes)
+        # What the reader inferred about an axis is stale once a verb resizes or removes it.
+        resized = [
+            dim for dim, size in self._data.sizes.items()
+            if dim not in data.dims or data.sizes[dim] != size
+        ]
+        new_notes = [
+            note for note in self._notes
+            if not any(note.startswith(f"inferred: {dim} =") for dim in resized)
+        ]
         for note in notes:
             if note not in new_notes:
                 new_notes.append(note)

@@ -20,8 +20,11 @@ classifiers = [
 ]
 # NumPy 2's promotion rules (x * 2 on float32 stays float32) are assumed by
 # the write-back rules in docs/plan.md §5.4.
+# pandas is imported directly (label indexes, time bins). 2.2.2 is the first
+# pandas built for NumPy 2; older wheels fail to import alongside numpy>=2.0.
 dependencies = [
   "numpy>=2.0",
+  "pandas>=2.2.2",
   "xarray>=2024.6",
 ]
 

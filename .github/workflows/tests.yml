@@ -42,7 +42,7 @@ jobs:
           python-version: "3.11"
           cache: pip
       - name: Install tidy3a with its oldest supported dependencies
-        run: python -m pip install "numpy==2.0.*" "xarray==2024.6.0" "dask[array]" pytest -e .
+        run: python -m pip install "numpy==2.0.*" "pandas==2.2.2" "xarray==2024.6.0" "dask[array]" pytest -e .
       - name: Run tests
         run: python -m pytest -q --tb=short
 

@@ -104,12 +104,19 @@ def select(*items: Any) -> Verb:
         columns = _columns(ctx)
         flat = list(_flatten(items))
         chosen: list[Column] = list(columns) if flat and _is_exclusion(flat[0]) else []
+        excluded: set[Hashable] = set()  # variables removed by ~, so labels do not bring them back
+        named_labels: list[Hashable] = []
         for item in flat:
             if _is_exclusion(item):
                 removed = {(c.kind, c.name) for c in _match(_excluded(item), columns, ctx)}
                 chosen = [c for c in chosen if (c.kind, c.name) not in removed]
+                excluded |= {name for kind, name in removed if kind == "var"}
             else:
                 for column in _match(item, columns, ctx):
+                    if column.kind == "var":
+                        excluded.discard(column.name)
+                    else:
+                        named_labels.append(column.name)
                     if not any(c.kind == column.kind and c.name == column.name for c in chosen):
                         chosen.append(column)
 
@@ -125,9 +132,15 @@ def select(*items: Any) -> Verb:
         labels = [c.name for c in chosen if c.kind == "label"]
         names = [c.name for c in chosen if c.kind == "var"]
         if labels:
-            names = [h for h in _holders(data, ctx.field_axis) if h not in names] + names
+            holders = [h for h in _holders(data, ctx.field_axis) if h not in excluded]
+            if not holders and named_labels:
+                raise SelectError(
+                    f'"{named_labels[0]}" is a label on {ctx.field_axis}, but every variable with that '
+                    "axis was excluded; keep one of them to select its labels"
+                )
+            names = [h for h in holders if h not in names] + names
         result = data[names] if names else data.drop_vars(list(data.data_vars))
-        if labels:
+        if labels and ctx.field_axis in result.dims:
             result = result.sel({ctx.field_axis: labels})
         return frame._evolve(result, notes=notes)
 

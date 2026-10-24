@@ -133,6 +133,14 @@ def test_select_exclusions_and_helpers():
     assert list((field_cloud() >> select(everything())).collect().data_vars) == ["values"]
 
 
+def test_select_excluding_the_field_array_drops_it():
+    frame = field_cloud() >> mutate(w=x * 2)
+    assert list((frame >> select(~col("values"))).collect().data_vars) == ["w"]
+    assert list((frame >> select(~col("values"), col("values"))).collect().data_vars) == ["w", "values"]
+    with pytest.raises(SelectError, match="every variable with that axis was excluded"):
+        frame >> select(~col("values"), x)
+
+
 def test_select_variables_after_variables_from():
     frame = cloud(variables_from="feature") >> select(x, y, z)
     assert list(frame.collect().data_vars) == ["x", "y", "z"]
@@ -290,6 +298,14 @@ def test_filter_empty_result_is_returned_and_flagged():
     out = field_cloud() >> filter(intensity > 999)
     assert data(out).sizes["point"] == 0
     assert "changed: point: 0 (all removed by filter(intensity > 999))" in repr(out)
+
+
+def test_inferred_size_note_is_dropped_once_the_axis_changes():
+    source = field_cloud()
+    assert "inferred: point = 4 from the stored shape" in repr(source)
+    assert "inferred: point" in repr(source >> select(x, y))
+    assert "inferred: point" not in repr(source >> filter(intensity > 15))
+    assert "inferred: point" not in repr(source >> slice(point=1))
 
 
 def test_filter_needs_a_condition():
