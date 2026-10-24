@@ -66,11 +66,14 @@ class TidyArray:
         )
 
     def to_xarray(self) -> xr.Dataset:
-        """The underlying xarray Dataset (a shallow copy sharing the same values)."""
+        """A shallow Dataset copy sharing values, without computing lazy arrays."""
         return self._data.copy(deep=False)
 
     def collect(self) -> xr.Dataset:
-        """A computed xarray Dataset; eager and memory-mapped values are not copied."""
+        """Compute lazy variables into memory; the wrapped Dataset stays lazy.
+
+        Eager and memory-mapped values are not copied.
+        """
         return self._data.compute()
 
     def __rshift__(self, verb: Callable[[TidyArray], Any]) -> Any:
@@ -91,6 +94,9 @@ def tidy(data: Any, *, field_axis: str | None = None) -> TidyArray:
     An unnamed DataArray becomes the variable ``values``. ``field_axis=``
     declares the axis whose labels act as column names, as in
     ``read_array``. A ``TidyArray`` is returned unchanged.
+
+    Wrapping preserves metadata and backing storage without reading
+    measurement values. Keep file-backed sources open until collection.
     """
     if isinstance(data, TidyArray):
         if field_axis is None or field_axis == data._field_axis:

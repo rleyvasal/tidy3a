@@ -1,4 +1,4 @@
-"""``read_array``: name, shape, and label homogeneous numeric arrays.
+"""Read homogeneous arrays and mixed numeric/text records with named axes.
 
 Raw files store only bytes, so the caller describes everything; ``.npy``
 files store their type and shape, so the caller only names axes. Nothing
@@ -7,9 +7,11 @@ is guessed from the values, and values are never truncated or padded.
 
 from __future__ import annotations
 
+import codecs
 import math
 import os
 from collections.abc import Hashable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +43,154 @@ class _Infer:
 
 
 infer = _Infer()
+
+
+@dataclass(frozen=True)
+class _FixedText:
+    width: int
+    encoding: str
+    padding: bytes | None
+
+    def __repr__(self) -> str:
+        return f"fixed_text({self.width}, encoding={self.encoding!r}, padding={self.padding!r})"
+
+
+def fixed_text(width: int, *, encoding: str, padding: bytes | None = b"\0") -> _FixedText:
+    """Describe a fixed byte width of strict UTF-8/ASCII text for ``read_binary``."""
+    if isinstance(width, bool) or not isinstance(width, (int, np.integer)) or width <= 0:
+        raise ReadError("fixed_text width must be a positive integer number of bytes")
+    try:
+        encoding = codecs.lookup(encoding).name
+    except LookupError as exc:
+        raise ReadError(f"unknown text encoding {encoding!r}") from exc
+    if encoding not in ("utf-8", "ascii"):
+        raise ReadError("fixed_text supports UTF-8 and ASCII encodings")
+    if padding is not None and (not isinstance(padding, bytes) or padding not in (b"\0", b" ")):
+        raise ReadError('fixed_text padding must be b"\\0", b" ", or None')
+    return _FixedText(int(width), encoding, padding)
+
+
+def _decode_fixed_text(values: np.ndarray, spec: _FixedText, name: str) -> np.ndarray:
+    decoded = []
+    for position, value in enumerate(values, start=1):
+        raw = value.tobytes()
+        if spec.padding is not None:
+            raw = raw.rstrip(spec.padding)
+        try:
+            decoded.append(raw.decode(spec.encoding))
+        except UnicodeDecodeError as exc:
+            raise ReadError(
+                f"field {name!r}, record {position}: invalid {spec.encoding} text ({exc.reason})"
+            ) from exc
+    return np.asarray(decoded, dtype=object)
+
+
+def read_binary(
+    source: str | os.PathLike[str], *, value_types: Mapping[str, Any],
+    dim: str = "record", labels: Mapping[str, Sequence[Any]] | None = None,
+    byte_order: str = "little", offset: int = 0,
+    field_offsets: Mapping[str, int] | None = None, record_size: int | None = None,
+    lazy: bool = False,
+) -> TidyArray:
+    """Read fixed-width numeric and text fields into separate typed variables.
+
+    Fields are packed in mapping order unless ``field_offsets`` specifies
+    byte positions. ``offset`` skips a file header; ``labels`` labels the
+    observation axis. ``record_size`` can add trailing padding. ``lazy=True``
+    memory-maps numeric fields read-only, retaining their stored byte order.
+    Text uses ``fixed_text`` and is decoded eagerly even when memory-mapped.
+    """
+    if not isinstance(dim, str) or not dim:
+        raise ReadError("dim must be a non-empty axis name")
+    if not isinstance(value_types, Mapping) or not value_types:
+        raise ReadError("value_types must be a non-empty mapping of field names to types")
+    if byte_order not in ("little", "big"):
+        raise ReadError(f'byte_order must be "little" or "big", not {byte_order!r}')
+    layout = []
+    for name, value_type in value_types.items():
+        if not isinstance(name, str) or not name or name == dim:
+            raise ReadError(f"field name {name!r} must be non-empty text different from dim={dim!r}")
+        kind = (
+            np.dtype(f"V{value_type.width}") if isinstance(value_type, _FixedText)
+            else _raw_dtype(value_type, byte_order)
+        )
+        layout.append((name, kind))
+    dtype = _record_dtype(layout, field_offsets, record_size)
+    if isinstance(offset, bool) or not isinstance(offset, (int, np.integer)) or offset < 0:
+        raise ReadError(f"offset must be a non-negative number of bytes, not {offset!r}")
+    offset = int(offset)
+    path = Path(source)
+    file_bytes = path.stat().st_size
+    if offset > file_bytes:
+        raise ReadError(f"offset={offset:,} is past the end of the file ({file_bytes:,} bytes)")
+    nbytes = file_bytes - offset
+    if nbytes % dtype.itemsize:
+        raise ReadError(
+            f"{nbytes:,} bytes is not a whole number of records of {dtype.itemsize:,} bytes; "
+            "check value_types, offset, field_offsets, and record_size. Partial records are never truncated."
+        )
+    count = nbytes // dtype.itemsize
+    coords = _parse_labels(labels, [dim], (count,))
+    if lazy and nbytes:
+        records = np.memmap(path, dtype=dtype, mode="r", offset=offset, shape=(count,))
+    else:
+        records = np.fromfile(path, dtype=dtype, offset=offset, count=count)
+    if not lazy and not records.dtype.isnative:
+        records = records.astype(records.dtype.newbyteorder("="))
+    variables = {}
+    text_notes = []
+    for name, value_type in value_types.items():
+        if isinstance(value_type, _FixedText):
+            values = _decode_fixed_text(records[name], value_type, name)
+            text_notes.append(
+                f"materialized: {name} decoded as {value_type.encoding} text "
+                f"({value_type.width} bytes per record)"
+            )
+        else:
+            values = records[name]
+        variables[name] = (dim, values)
+    data = xr.Dataset(variables, coords=coords)
+    fields = ", ".join(
+        f"{name}: {value_types[name] if isinstance(value_types[name], _FixedText) else kind.name} at byte {position}"
+        for name, (kind, position) in dtype.fields.items()
+    )
+    storage = "packed" if field_offsets is None and record_size is None else "explicit layout"
+    if lazy:
+        storage += ", memory-mapped" if nbytes else ", empty (no mapping)"
+    if offset:
+        storage += f", {offset:,}-byte header skipped"
+    return TidyArray(
+        data, source=f'raw record file "{path.name}", {byte_order}-endian, {storage}',
+        notes=(f"record: {dtype.itemsize} bytes; {fields}",
+               f"inferred: {dim} = {nbytes:,} bytes / {dtype.itemsize} bytes = {len(records):,}",
+               *text_notes),
+    )
+
+
+def _record_dtype(layout, field_offsets, record_size) -> np.dtype:
+    packed = np.dtype(layout, align=False)
+    if field_offsets is None:
+        field_offsets = {name: spec[1] for name, spec in packed.fields.items()}
+    elif not isinstance(field_offsets, Mapping) or set(field_offsets) != set(packed.names):
+        raise ReadError("field_offsets must name every field exactly once, without extra fields")
+    ranges = []
+    for name, kind in layout:
+        start = field_offsets[name]
+        if isinstance(start, bool) or not isinstance(start, (int, np.integer)) or start < 0:
+            raise ReadError(f"field_offsets[{name!r}] must be a non-negative integer")
+        ranges.append((int(start), int(start) + kind.itemsize, name))
+    ranges.sort()
+    for previous, current in zip(ranges, ranges[1:]):
+        if previous[1] > current[0]:
+            raise ReadError(f"fields {previous[2]!r} and {current[2]!r} overlap")
+    minimum = max(end for _, end, _ in ranges)
+    size = minimum if record_size is None else record_size
+    if isinstance(size, bool) or not isinstance(size, (int, np.integer)) or size < minimum:
+        raise ReadError(f"record_size must be a positive integer covering all fields (at least {minimum} bytes)")
+    return np.dtype({
+        "names": list(packed.names), "formats": [kind for _, kind in layout],
+        "offsets": [int(field_offsets[name]) for name in packed.names], "itemsize": int(size),
+    })
 
 
 def read_array(
@@ -246,10 +396,11 @@ def _raw_dtype(value_type: Any, byte_order: str) -> np.dtype:
         raise ReadError(f"value_type={value_type!r} is not a NumPy type") from exc
     _check_numeric(dtype, value_type)
     code = "<" if byte_order == "little" else ">"
-    if dtype.itemsize > 1 and isinstance(value_type, str) and value_type[:1] in "<>":
-        if value_type[0] != code:
+    marker = value_type[:1] if isinstance(value_type, str) else dtype.byteorder
+    if dtype.itemsize > 1 and marker in ("<", ">"):
+        if marker != code:
             raise ReadError(
-                f'value_type={value_type!r} says {"little" if value_type[0] == "<" else "big"}-endian, '
+                f'value_type={value_type!r} says {"little" if marker == "<" else "big"}-endian, '
                 f'but byte_order="{byte_order}"; state the byte order once'
             )
     return dtype.newbyteorder(code)
@@ -258,8 +409,8 @@ def _raw_dtype(value_type: Any, byte_order: str) -> np.dtype:
 def _check_numeric(dtype: np.dtype, value_type: Any) -> None:
     if dtype.kind not in _NUMERIC_KINDS:
         raise ReadError(
-            f"read_array reads homogeneous numeric values; {value_type!r} is not numeric. "
-            "Records with mixed field types need a record reader (planned: read_binary)."
+            f"{value_type!r} is not numeric. read_array expects homogeneous numeric values; "
+            "read_binary accepts scalar numeric fields or fixed_text descriptors."
         )
 
 

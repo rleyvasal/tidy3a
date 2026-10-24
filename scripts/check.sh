@@ -44,16 +44,17 @@ done
 
 if [[ $# -eq 0 ]]; then
   run "pytest (minimum NumPy and xarray)" \
-    pytest_job 3.11 "numpy==2.0.*" "xarray==2024.6.0" pytest -e .
+    pytest_job 3.11 "numpy==2.0.*" "xarray==2024.6.0" "dask[array]" pytest -e .
 
-  wheel_job() {
-    uv build -q --wheel --out-dir "$work/dist" &&
+  distribution_job() {
+    uv build -q --out-dir "$work/dist" &&
+      uvx twine check --strict "$work"/dist/* &&
       uv venv -q --python 3.12 "$work/clean" &&
       uv pip install -q --python "$work/clean/bin/python" "$work"/dist/*.whl &&
       (cd "$work" && "$work/clean/bin/python" -c \
         "import tidy3a, numpy as np; print(tidy3a.read_array(np.zeros(3), dims=['t']))")
   }
-  run "installed wheel imports without optional packages" wheel_job
+  run "source distribution, metadata, and installed wheel" distribution_job
 fi
 
 printf '\n'

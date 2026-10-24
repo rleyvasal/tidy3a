@@ -14,7 +14,7 @@ from typing import Any
 import numpy as np
 import xarray as xr
 
-from tidy3a.align import align_pair
+from tidy3a.align import align_many, align_pair
 from tidy3a.expr import (
     FUNCTIONS,
     Call,
@@ -170,9 +170,7 @@ def _pack(node: Call, ctx: Context) -> xr.DataArray:
         if along in value.dims:
             raise ctx.error(f"pack(): {arg.text()} already has an axis {along}")
         arrays.append(value)
-    first = arrays[0]
-    for value, arg in zip(arrays[1:], node.args[1:]):
-        align_pair(first, value, node.args[0].text(), arg.text(), ctx.notes)
+    arrays = align_many(arrays, [arg.text() for arg in node.args], ctx.notes)
     if len(set(map(str, labels))) != len(labels):
         raise ctx.error(f"pack(): the labels {labels} repeat; each packed value needs its own name")
     with xr.set_options(arithmetic_join="exact"):

@@ -247,3 +247,12 @@ def test_memmap_wrapped_in_dataarray_is_not_copied(tmp_path):
     mm = np.memmap(path, dtype="<f4", mode="r").reshape(5, 2)
     da = xr.DataArray(mm, dims=("point", "feature"))
     assert np.shares_memory(da.data, mm)
+
+
+def test_mixed_records_keep_each_variables_numeric_type():
+    # §4.3: two packed records, each a little-endian float32 and uint16.
+    raw = bytes.fromhex("0000c03f0700000020c00c00")
+    records = np.frombuffer(raw, dtype=[("x", "<f4"), ("ring", "<u2")])
+    data = xr.Dataset({name: ("point", records[name]) for name in records.dtype.names})
+    assert data.x.dtype == np.dtype("float32") and data.x.values.tolist() == [1.5, -2.5]
+    assert data.ring.dtype == np.dtype("uint16") and data.ring.values.tolist() == [7, 12]

@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pypi-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Check release version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Require a matching release tag and non-development version
+        run: |
+          python - <<'PY'
+          import os
+          import runpy
+          version = runpy.run_path("src/tidy3a/__version__.py")["__version__"]
+          if ".dev" in version or os.environ["GITHUB_REF"] != f"refs/tags/v{version}":
+              raise SystemExit(f"Release tag must be v{version}, with a non-development version")
+          PY
+
+  checks:
+    name: Release checks
+    needs: version
+    uses: ./.github/workflows/tests.yml
+
+  publish:
+    name: Publish validated distributions to PyPI
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/tidy3a/
+    permissions:
+      id-token: write
+    steps:
+      - name: Retrieve validated distributions
+        uses: actions/download-artifact@v8
+        with:
+          name: python-distributions
+          path: dist/
+      - name: Publish through trusted publishing
+        uses: pypa/gh-action-pypi-publish@release/v1

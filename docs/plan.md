@@ -1,8 +1,8 @@
 # tidy3A: repository and implementation plan
 
-Status: design handoff for review, not an implemented API.
+Status: milestones 0–5 implemented; milestone 6 is in progress; milestone 7 (first-release preparation) is on hold at the user's request.
 
-This document collects the decisions made in the discussion and identifies the remaining decisions explicitly. All tidy3A imports, readers, wrappers, and expressions below are proposed interfaces. NumPy, xarray, and nuScenes calls are existing APIs. No new repository or remote has been created by this plan.
+This document collects the design decisions and records implementation progress in §10. Interfaces described for later milestones remain planned; the completed milestones describe the current implementation.
 
 ## 1. Purpose and package boundary
 
@@ -83,9 +83,10 @@ Array-layer helpers are used inside tidy-layer verbs, for example `mutate(p = do
 | Selection helpers | tidy3's tidyselect helpers (`~`, `starts_with`, …) on variables and field labels |
 | Masking function | `if_else(cond, x, y)` as in dplyr/tidy3; three-argument `where` is an error pointing to `if_else` |
 | Slice and axes | `slice(time = 1)` keeps `time: 1`, like dplyr; `drop=True` removes the axis explicitly |
-| First release | Raw and `.npy` via `read_array`, `tidy()` for xarray objects, `lazy=True` memory-mapping, eager NumPy; Dask and `read_binary` later |
+| First release | Raw and `.npy` via `read_array`, mixed numeric/text records via `read_binary`, `tidy()` for xarray objects, `read_array(..., lazy=True)` memory-mapping, eager NumPy; Dask later |
 | Mutate order | Sequential like dplyr/tidy3; vector updates use one assignment, `[x, y, z] = …` (notebook) or `assign([x, y, z], …)` (script) |
 | Write-back value type | A different type promotes the whole array to the common type, never casts down, and is reported in inspection output |
+| Integer overflow | Follows NumPy: results outside an integer type's range wrap around, as in xarray and tidy3; documented, convert first when needed |
 | Data vs notebook names | Data-only names are data, namespace-only names are Python values, names in both are an error (`col()`/`env()`); deliberately differs from tidy3, where data wins |
 | Select across variables | Field-axis label selection applies to every variable with that axis; others are unchanged |
 | Mathematical helpers | Provide `dot` for generalized multiplication and summation, and `formula` for mathematical notation |
@@ -208,11 +209,13 @@ NetCDF and Zarr are wrapped through `tidy(xr.open_dataset(...))` in the first re
 
 Do not require users to repeat information already present in the source. Avoid a registry of dataset-specific profiles in the core package.
 
+Milestone 6 import and lazy-input checks are recorded in [metadata and lazy input](m6-metadata-lazy.md). They cover Dataset/DataArray attributes and encodings, serialization metadata versus numeric casts, and a real NetCDF backend that is not asked for measurement values until collection after selection and regular positional slicing. Regular ranges use basic indexing, including reversed and strided ranges, avoiding a reproduced xarray 2024.6 SciPy/CF advanced-indexing issue. Irregular gathers on that older backend retain the upstream limitation, documented with explicit-loading guidance. Transformation rules now clear stale result encoding and computed-variable attributes, preserve direct-alias attributes, and report dropped join conflicts. Dask-backed wrapping, selection, positional slicing, arithmetic, reductions, and collection now have task-execution and source-chunk checks; grouping and other materialization boundaries remain separate steps.
+
 ### 4.3 Mixed binary records
 
 Include this in the roadmap, but do not overload a homogeneous numeric reader with an unclear record interpretation.
 
-Working proposal: a generic `read_binary` reader accepting an ordered `value_types` mapping. A different name or one-reader design is a review decision, not an additional committed API.
+The milestone 6 implementation uses a generic `read_binary` reader accepting an ordered `value_types` mapping. The [implemented reader contract](m6-read-binary.md) covers packed and explicitly padded numeric/text records, numeric memory-mapping, axis labels, and header offsets.
 
 ```python
 records = read_binary(
@@ -1026,7 +1029,7 @@ Decided or corrected while implementing:
 - `select(~[intensity, ring])` is not valid Python, since `~` cannot apply to a list; the form is `select(~intensity, ~ring)`.
 - Storing a vector view next to its source, `mutate(v = [x, y, z])`, is an error: variables in one dataset share one `feature` axis, so `v` with 3 of its 5 labels cannot be stored. The error suggests `rename_axes` (milestone 3). Vector views are used inside expressions, such as `dot` or `sum([x, y, z], over="feature")`.
 - `slice` drops positions past the end, as tidy3 does.
-- `n()` counts observations per group: positions on the grouped axis times the sizes of the other reduced observation axes, where observation axes are those every variable shares (corrected in milestone 5).
+- `n()` counts observations per group: positions on the grouped axis times the sizes of the other reduced observation axes, where observation axes are those every non-scalar variable shares. Scalar variables do not change the count (corrected in milestone 5 and the scalar regression fix).
 
 Known limitations, to address later:
 
@@ -1089,7 +1092,7 @@ Findings from real data:
 
 - Inspection output now shows time labels to the second, or as dates alone when every label is at midnight, and floats to 10 significant digits. A gap always separates labels from the axis role. Map coordinates such as `9120746.500028737` print as `9120746.5`; stored labels are unchanged.
 - `group_by(bins(time, "30 days"))` reduces every observation axis that is not a key, as the grouping rule says and as dplyr does. A window per grid point, like xarray's `resample`, is `group_by(bins(time, "30 days"), lat, lon)`. The example documents both.
-- Open: integer arithmetic follows NumPy, so `nir - red` on uint8 bands wraps around instead of going negative. stars avoids this because R reads such rasters as doubles. The example converts first (`nir * 1.0 - red`). A rule, such as promoting integer subtraction or warning when it wraps, is a candidate decision for a later milestone; NumPy and xarray behave the same way today.
+- Decided: integer arithmetic follows NumPy, so results outside an integer type's range wrap around: on uint8, `30 - 50` is 236 and `200 + 100` is 44. NumPy, xarray, pandas, Polars (and therefore tidy3), and Julia all wrap; MATLAB saturates; R and stars avoid it by reading such rasters as doubles. tidy3A keeps NumPy's behavior for consistency with xarray and tidy3, and documents it in the README and `docs/first-release.md`: convert before arithmetic that can leave the type's range, as the Landsat example does (`nir * 1.0 - red`). Rejected: an error for `+`/`-` between unsigned-integer arrays (it also blocks safe uses and departs from tidy3), checking values for wraparound (it needs computation, so breaks laziness, and makes results depend on the data), and automatic widening (it changes types silently, against the write-back promotion rule).
 
 - tidy3 change, on the tidy3 branch `notebook-ownership` (commit `6adec50`, not merged or released): `Tidy3MaskTransformer` rewrites a call only when the function is tidy3's, decided by the cell's own imports and then the live namespace. Two new tests fail on the previous code and pass now; the full tidy3 suite passes (1,531 passed, 49 skipped).
 - `src/tidy3a/jupyter.py`, loaded with `%load_ext tidy3a.jupyter`. It is copied and adapted from tidy3's notebook layer, with credit, and imports no tidy3 code. 13 IPython tests run real cells, covering:
@@ -1108,13 +1111,17 @@ Details decided from precedents while implementing:
 - Rewritten verbs: `select`, `filter`, `mutate`, `summarise`, `group_by`, `pull`. Verbs whose arguments are positions, counts, outside arrays, or other datasets (`slice`, `bind_cols`, joins) are left alone. Names are not rewritten where they are a function being called, the object of an attribute (`np.pi`), the object of a subscript (`R[0]`), or bound inside a lambda or comprehension.
 - Calls through a module prefix (`ta.select(...)`) are rewritten when the prefix is tidy3A. This goes beyond tidy3, which rewrites only plain names.
 - `[x, y, z] = …` inside `mutate(…)` is rewritten in the source to `__tidy3a_assign__([x, y, z], …)` before Python parses the cell, after tidy3's backtick precedent. The rewrite skips strings and comments and leaves `[x] == y` alone.
-- Fixed while writing the workflow test: `n()` counted every axis in the dataset, including a rotation's component axis `i`. It now counts positions on the observation axes that every variable shares, as dplyr counts rows.
+- Fixed while writing the workflow test: `n()` counted every axis in the dataset, including a rotation's component axis `i`. It now counts positions on the observation axes that every non-scalar variable shares, as dplyr counts rows; scalar variables do not change the count.
 
 Known limitations: multi-line pipes must be wrapped in parentheses (tidy3's input transformer for lines starting with `>>` handles tidy3 pipes only); tidy3's backtick names are not supported in tidy3A verbs.
 
-### Milestone 6 — Additional readers and lazy execution (after the first release)
+### Milestone 6 — Additional readers and lazy execution
 
-Decided: this milestone follows the first release (milestone 7), which ships after milestone 5. Add generic mixed fixed-width records and optional self-describing formats. Define metadata/casting conflict policies. Add Dask-focused tests and performance checks only for behavior the package actually promises. Discuss rolling, transforms, and other helpers after concrete examples demonstrate the need.
+Originally scheduled after the first release; brought forward at the user's request while release work is on hold. Add generic mixed fixed-width records and optional self-describing formats. Define metadata/casting conflict policies. Add Dask-focused tests and performance checks only for behavior the package actually promises. Discuss rolling, transforms, and other helpers after concrete examples demonstrate the need.
+
+Status (2026-10-24): `read_binary` in §4.3 is implemented and exported, returning separate typed variables along one named observation axis. Independent byte fixtures verify both byte orders, numeric type preservation, empty files, rejection of partial records and invalid schemas, and composition with existing verbs. Explicit `field_offsets` and `record_size` support leading/internal/trailing padding, preserve mapping order, and reject overlaps or records too small for their fields. Exported `fixed_text` descriptors support strict UTF-8/ASCII decoding, explicit NUL/space/no-padding modes, and field/1-based-record context on decoding errors. `lazy=True` preserves read-only file-backed numeric views in stored byte order, including padded layouts; text is still decoded eagerly and its materialization is reported. Empty files do not create a mapping, and mutation preserves the source file. Axis labels and header offsets are now implemented, with payload-based record counting, bounds/label validation, and empty header-only payloads. The shared numeric-type validator also rejects conflicting endian markers supplied as NumPy dtype objects. The reader contract in `docs/m6-read-binary.md` is implemented. The subsequent metadata policy and lazy-input checks are recorded below; dedicated format readers follow only if existing xarray readers prove insufficient.
+
+Metadata import checks now verify Dataset/DataArray attributes, encodings, and decoded numeric types through wrapping and conversion. A real packed NetCDF source stays lazy through inspection, selection, regular positional slicing, and `to_xarray()`; only the selected measurement variable is requested at `collect()`. The tests cover current and minimum dependencies. The basic-slicing change preserves descending order, repetitions, empty selections, and existing 1-based rules. Transformation metadata policy is implemented: new results clear serialization encoding, computed variables clear inherited attributes, direct aliases retain attributes, shared-array field updates clear holder metadata, summaries retain Dataset attributes, and joins report conflicting attribute keys while clearing serialization encoding. A NetCDF round trip verifies fractional field updates are not rounded by stale integer encoding. All 21 metadata checks pass on current and minimum dependencies; the full local suite reports 382 passed and 2 skipped. Dask-backed selection and collection now have 7 execution checks on current and minimum NumPy/xarray versions. Wrapping and selection preserve chunks, inspection and slicing run no tasks, collection leaves the source lazy, and unused variables and unneeded chunks are not read for nonempty selections. Empty basic slices can still evaluate the first source chunk with the tested Dask version; this limitation is documented. Dask remains optional and is included in development/CI tests. The full local suite now reports 389 passed and 2 skipped. Dask arithmetic and reduction checks now cover sequential mutation, reduction broadcasting, numeric missing-value rules, sum minimum counts, boolean reductions, and shape-only counting. Full-array median with na_rm=True retains xarray's memory safeguard with a clear error and explicit-collection guidance; partial-axis median stays lazy. All 29 Dask checks pass on current and minimum dependencies, and the full local suite reports 411 passed and 2 skipped. Remaining: Dask-backed grouping and materialization boundaries for other verbs.
 
 Exit: the reader handles metadata-rich input without redundant declarations and mixed typed records without coercing everything into one numeric array. Lazy operations avoid unintended full-data computation; unavoidable materialization is documented.
 
@@ -1122,11 +1129,19 @@ Exit: the reader handles metadata-rich input without redundant declarations and 
 
 Build distributions, test installation in clean environments, validate public examples, document limitations, and publish through tidy3A's own workflow. Release only capabilities completed by the earlier milestones; remaining readers or lazy features can ship later.
 
+Status (2026-10-24): in progress. At the numeric-reader checkpoint, the local release baseline (`scripts/check.sh`) passed in fresh environments: Python 3.11–3.14 each reported 298 passed and 4 skipped; minimum NumPy/xarray reported 287 passed and 3 skipped; an installed wheel imports without optional packages. The skips cover optional notebook integrations and external datasets. The README now has a self-contained quick start verified in scripts and IPython, including the 50 m boundary; `docs/first-release.md` records scope, memory behavior, and known limitations. Publication preparation is described below; nothing has been published.
+
+Source-distribution validation was completed at the earlier 239-test checkpoint: `MANIFEST.in` includes documentation, examples, prototype tests, and the local check script. Both the source archive and its wheel build with the corrected minimum setuptools version (77.0.3), and both pass `twine check --strict`. The installed wheel runs the README quick start without optional packages; all 239 applicable tests pass (4 skipped) from the extracted source archive against the installed wheel, with the source-path pytest setting disabled. The local and CI packaging checks now build the source archive and its wheel and validate metadata.
+
+The publication workflow is prepared in `.github/workflows/release.yml`: a published GitHub Release must have a tag matching a non-development package version, then passes through the reusable CI workflow. The publishing job downloads the validated distributions and uses PyPI trusted publishing in the `pypi` environment without rebuilding. `actionlint` passes, and local execution of the version-gate code covers matching tags, mismatches, branch refs, development versions, and release candidates. `docs/releasing.md` records setup and release steps. Version `0.1.0` and its dated changelog are prepared for publication; the version gate accepts `v0.1.0` and rejects mismatched tags and branch refs. Remaining: configure or verify the external GitHub environment and PyPI trusted publisher, and run the actual release on GitHub. Local checks do not verify those external settings or perform publication.
+
+The complete local release checks were rerun against a fixed snapshot containing the correctness fixes and packed/padded numeric reader. All four Python versions and minimum dependencies passed with the updated counts above, as did strict source/wheel metadata checks and a clean-wheel import for the prepared `0.1.0` version. Independent Python `struct` fixtures also verified boolean, int64, uint64, and complex128 values and types in both byte orders, with packed and padded layouts, including integers beyond floating-point precision. Fixed-width text support arrived after that snapshot and is outside these matrix totals. The subsequent local Python 3.12 suite, including text support, reported 326 passed and 2 skipped.
+
 Decided first-release scope:
 
 | In the first release | Later releases (milestone 6) |
 |---|---|
-| `read_array` for raw bytes and `.npy` | `read_binary` for mixed fixed-width records (§4.3) |
+| `read_array` for homogeneous raw bytes and `.npy`; `read_binary` for mixed numeric/text records (§4.3), brought forward from milestone 6 | Remaining record-reader options in the [contract](m6-read-binary.md) |
 | `lazy=True` memory-mapping for large raw files | Dask-backed lazy operations, tested for what is promised |
 | `tidy()` wrapping xarray objects, including lazy NetCDF/Zarr datasets, which stay lazy until an operation needs values | Dedicated NetCDF/Zarr readers, if `tidy(xr.open_dataset(...))` proves insufficient |
 | All verbs and the array layer, running eagerly on NumPy | Performance benchmarks beyond the acceptance examples |

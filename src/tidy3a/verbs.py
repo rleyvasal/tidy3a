@@ -7,6 +7,7 @@ for use with ``>>``. Verbs never change the shape of the data on their own
 
 from __future__ import annotations
 
+import builtins
 from collections.abc import Callable, Hashable, Sequence
 from typing import Any
 
@@ -31,6 +32,7 @@ from tidy3a.expr import (
     BinOp,
     Context,
     Expr,
+    Literal,
     Ref,
     UnaryOp,
     ValueKey,
@@ -285,7 +287,7 @@ def slice(*, drop: bool = False, **axes: Any) -> Verb:  # noqa: A001
         data = frame._data
         for axis, spec in axes.items():
             index = _positions(data, axis, spec, frame)
-            data = _with_positions(data, axis).isel({axis: index})
+            data = _with_positions(data, axis).isel({axis: _position_indexer(index)})
             if drop:
                 if data.sizes[axis] != 1:
                     raise SliceError(
@@ -322,10 +324,21 @@ def _slice_end(axes: dict[str, int], *, head: bool) -> Verb:
             size = data.sizes[axis]
             count = min(int(count), size)
             index = list(range(count)) if head else list(range(size - count, size))
-            data = _with_positions(data, axis).isel({axis: index})
+            data = _with_positions(data, axis).isel({axis: _position_indexer(index)})
         return frame._evolve(data)
 
     return Verb(_call_text(name, (), axes), apply)
+
+
+def _position_indexer(index: list[int]) -> builtins.slice | list[int]:
+    """Use basic indexing for regular ranges so file backends stay lazy."""
+    if not index:
+        return builtins.slice(0, 0)
+    step = index[1] - index[0] if len(index) > 1 else 1
+    if step and all(b - a == step for a, b in zip(index, index[1:])):
+        stop = index[-1] + (1 if step > 0 else -1)
+        return builtins.slice(index[0], None if stop < 0 else stop, step)
+    return index
 
 
 def _check_slice_axis(data: xr.Dataset, axis: str, frame: TidyArray) -> None:
@@ -410,7 +423,7 @@ def mutate(*assignments: Any, **named: Any) -> Verb:
         for step in steps:
             ctx = Context(frame, verb="mutate", error=MutateError)
             value_expr = as_expr(step.value)
-            value = evaluate(value_expr, ctx)
+            value = _result_metadata(evaluate(value_expr, ctx), value_expr)
             notes = list(ctx.notes)
             if isinstance(step.target, Vector):
                 data = _store_vector(frame, step.target, value, step.text(), notes)
@@ -423,6 +436,16 @@ def mutate(*assignments: Any, **named: Any) -> Verb:
         return frame
 
     return Verb(_call_text("mutate", positional, named), apply)
+
+
+def _result_metadata(value: Any, node: Expr) -> Any:
+    """New values need fresh storage encoding; computed values also need fresh attributes."""
+    if isinstance(value, xr.DataArray):
+        value = value.copy(deep=False)
+        value.encoding = {}
+        if not isinstance(node, (Ref, Literal)):
+            value.attrs = {}
+    return value
 
 
 def _store(frame: TidyArray, name: Hashable, value: Any, text: str, notes: list[str]) -> xr.Dataset:
@@ -498,7 +521,12 @@ def _write_label(data, holders, field_axis, name, value, text, notes) -> xr.Data
     axis_number = target.dims.index(field_axis)
     index = (np.s_[:],) * axis_number + (position,)
     values[index] = raw_value
-    return data.assign({holder: target.copy(data=values)})
+    updated = target.copy(data=values)
+    updated.encoding = {}
+    updated.attrs = {}
+    if target.attrs or target.encoding:
+        notes.append(f"metadata: cleared attributes and encoding for {holder} after field write-back")
+    return data.assign({holder: updated})
 
 
 def _store_vector(frame: TidyArray, target: Vector, value: Any, text: str, notes: list[str]) -> xr.Dataset:
@@ -580,7 +608,7 @@ def summarise(*, groups: str | None = None, **named: Any) -> Verb:
         for name, expr in named.items():
             node = as_expr(expr)
             value = evaluate(node, ctx)
-            value = _per_group(value, ctx)
+            value = _result_metadata(_per_group(value, ctx), node)
             extra = [d for d in value.dims if d not in allowed]
             if extra:
                 raise SummariseError(
@@ -589,7 +617,7 @@ def summarise(*, groups: str | None = None, **named: Any) -> Verb:
                 )
             results[name] = value
         coords = {axis: ctx.data[axis] for axis in ctx.group_axes if axis in ctx.data.indexes}
-        data = xr.Dataset(results).assign_coords(
+        data = xr.Dataset(results, attrs=dict(ctx.data.attrs)).assign_coords(
             {axis: values for axis, values in coords.items() if any(axis in v.dims for v in results.values())}
         )
         keys = list(frame._groups)
@@ -725,9 +753,17 @@ def _join(how: str, other: Any, suffix: Any, tolerance: Any) -> Verb:
                 if dim in right.dims and dim in left.indexes and dim in right.indexes:
                     right = right.reindex({dim: left.indexes[dim]}, method="nearest", tolerance=tolerance)
         join = {"left": "left", "inner": "inner", "full": "outer"}[how]
-        merged = xr.merge([left, right], join=join, compat="no_conflicts", combine_attrs="drop_conflicts")
+        merged = xr.merge([left, right], join=join, compat="no_conflicts", combine_attrs="drop_conflicts").drop_encoding()
+        attributes = [("dataset", left.attrs, right.attrs, merged.attrs)]
+        for axis in left.coords.keys() & right.coords.keys() & merged.coords.keys():
+            attributes.append((f"coordinate {axis}", left[axis].attrs, right[axis].attrs, merged[axis].attrs))
+        notes = []
+        for subject, first, second, kept in attributes:
+            dropped = sorted((set(first) | set(second)) - set(kept), key=str)
+            if dropped:
+                notes.append(f"metadata: dropped conflicting attributes for {subject}: {', '.join(map(str, dropped))}")
         origins = {**right_frame._origins, **frame._origins}
         field_axis = frame._field_axis or right_frame._field_axis
-        return frame._evolve(merged, origins=origins, field_axis=field_axis)
+        return frame._evolve(merged, notes=notes, origins=origins, field_axis=field_axis)
 
     return Verb(f"{name}(…)", apply)

@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from tidy3a.align import align_pair
+from tidy3a.align import align_many, align_pair
 from tidy3a.errors import GroupError, RefError, TidyError
 
 _EXACT = {"arithmetic_join": "exact"}
@@ -622,13 +622,22 @@ def reduce_array(
     axes = list(axes)
     if not axes:
         return array
+    if op == "median" and na_rm and array.chunks is not None and set(axes) == set(array.dims):
+        raise TidyError(
+            "median(..., na_rm=True) over every axis of a chunked array requires gathering "
+            "the whole array into memory. Select the required data and collect() it first, "
+            "then wrap the result with tidy() to compute the median."
+        )
     if op in ("min", "max") and builtins.any(array.sizes[axis] == 0 for axis in axes):
         # NumPy cannot take min or max of nothing; the result is missing.
         return xr.full_like(array.astype(float).sum(dim=axes), np.nan)
     with warnings.catch_warnings(), np.errstate(all="ignore"):
         warnings.simplefilter("ignore", RuntimeWarning)
         if op in ("any", "all"):
-            return getattr(array, op)(dim=axes)
+            result = getattr(array.fillna(op == "all"), op)(dim=axes)
+            if na_rm or array.dtype.kind in "biu":
+                return result
+            return result.where(array.notnull().all(dim=axes))
         if op == "count":
             return array.notnull().sum(dim=axes)
         options = {"skipna": na_rm} if array.dtype.kind in "fcmM" else {}
@@ -709,14 +718,16 @@ def _broadcast_back(stats: xr.DataArray, groups: Groups) -> xr.DataArray:
 
 
 def _count(ctx: Context) -> Any:
-    """``n()``: positions on the observation axes every variable shares, as dplyr counts rows.
+    """``n()``: positions on observation axes shared by non-scalar variables.
 
-    Axes only some variables have, such as a rotation's component axis, are not observations.
+    Scalars do not change the count. Axes only some non-scalar variables have,
+    such as a rotation's component axis, are not observations.
     """
     data = ctx.data
     shared = set(data.dims)
     for variable in data.data_vars.values():
-        shared &= set(variable.dims)
+        if variable.ndim:
+            shared &= set(variable.dims)
     observation = [d for d in data.dims if d in shared and d != ctx.field_axis and d not in ctx.group_axes]
     if ctx.value_key is None:
         return int(np.prod([data.sizes[d] for d in observation], dtype=np.int64))
@@ -827,13 +838,11 @@ def _is_in(node: Call, ctx: Context) -> Any:
 
 
 def _if_else(node: Call, ctx: Context) -> Any:
-    condition, true, false = (evaluate(arg, ctx) for arg in node.args)
+    values = [evaluate(arg, ctx) for arg in node.args]
     texts = [arg.text() for arg in node.args]
-    arrays = [(v, t) for v, t in zip((condition, true, false), texts) if isinstance(v, xr.DataArray)]
-    for (a, a_text), (b, b_text) in zip(arrays, arrays[1:]):
-        align_pair(a, b, a_text, b_text, ctx.notes)
+    values = align_many(values, texts, ctx.notes)
     with xr.set_options(**_EXACT):
-        return xr.where(condition, true, false)
+        return xr.where(*values)
 
 
 def _abs(node: Call, ctx: Context) -> Any:

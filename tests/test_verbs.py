@@ -324,6 +324,17 @@ def test_slice_negative_excludes_and_keeps_positions():
     assert (field_cloud() >> slice(point = range(1, 3)) >> pull(point)).tolist() == [1, 2]
 
 
+@pytest.mark.parametrize("positions, expected", [
+    ([], []), ([2], [2]), ([1, 3, 5], [1, 3, 5]), ([5, 3, 1], [5, 3, 1]),
+    ([4, 2], [4, 2]), ([3, 3, 1], [3, 3, 1]), ([1, 4, 2], [1, 4, 2]), ([10], []),
+])
+def test_slice_preserves_requested_order_and_repetitions(positions, expected):
+    frame = tidy(xr.DataArray(np.arange(5), dims="row"))
+    result = frame >> slice(row=positions)
+    assert (result >> pull("row")).tolist() == expected
+    assert data(result).values.tolist() == [position - 1 for position in expected]
+
+
 def test_slice_errors():
     with pytest.raises(SliceError, match="positions start at 1"):
         field_cloud() >> slice(point = 0)
@@ -415,6 +426,20 @@ def test_ungrouped_summary_reduces_every_observation_axis():
     assert out.dims == ("feature",)
 
 
+@pytest.mark.parametrize("size", [0, 3])
+def test_n_is_unchanged_by_adding_a_scalar(size):
+    frame = tidy(xr.Dataset({"x": ("point", np.arange(size))}))
+    out = data(frame >> mutate(constant=1) >> summarise(k=n()), "k")
+    assert out.item() == size
+
+
+def test_n_ignores_scalars_when_counting_multiple_axes_and_groups():
+    frame = sensors() >> mutate(constant=1)
+    assert data(frame >> summarise(k=n()), "k").item() == 8
+    out = data(frame >> group_by("sensor") >> summarise(k=n()), "k")
+    assert out.dims == ("sensor",) and out.values.tolist() == [4, 4]
+
+
 def test_group_by_value_field():
     out = (field_cloud() >> group_by(ring) >> summarise(m = mean(intensity), k = n())).collect()
     assert out.ring.values.tolist() == [1.0, 2.0]
@@ -472,6 +497,39 @@ def test_missing_values_propagate_unless_na_rm():
     assert out["r"].values.tolist() == [2.0, 4.0]
 
 
+@pytest.mark.parametrize("reducer, values, expected", [
+    (any, [0.0, np.nan], False), (any, [1.0, np.nan], True),
+    (all, [0.0, np.nan], False), (all, [1.0, np.nan], True),
+    (any, [np.nan, np.nan], False), (all, [np.nan, np.nan], True),
+])
+def test_logical_reductions_propagate_or_skip_missing_values(reducer, values, expected):
+    frame = tidy(xr.DataArray(values, dims="point"))
+    out = (frame >> summarise(missing=reducer(col("values")),
+                             clean=reducer(col("values"), na_rm=True))).collect()
+    assert np.isnan(out["missing"].item())
+    assert out["clean"].dtype == bool and out["clean"].item() == expected
+
+
+@pytest.mark.parametrize("reducer, values, expected", [
+    (any, [], False), (all, [], True),
+    (any, [False, False], False), (all, [True, True], True),
+    (any, [True, False], True), (all, [True, False], False),
+])
+def test_logical_reductions_keep_boolean_results_without_missing(reducer, values, expected):
+    frame = tidy(xr.DataArray(np.asarray(values, dtype=bool), dims="point"))
+    result = data(frame >> summarise(result=reducer(col("values"))), "result")
+    assert result.dtype == bool and result.item() == expected
+
+
+def test_grouped_logical_reductions_keep_axes_and_missing_values():
+    frame = tidy(xr.DataArray([[0.0, 1.0], [np.nan, np.nan]],
+                             dims=("time", "sensor"), coords={"sensor": ["a", "b"]}))
+    out = (frame >> group_by("sensor") >> summarise(
+        missing=all(col("values")), clean=any(col("values"), na_rm=True))).collect()
+    assert out["missing"].dims == ("sensor",) and np.isnan(out["missing"]).all()
+    assert out["clean"].values.tolist() == [False, True]
+
+
 def test_groups_after_summarise():
     grouped = sensors() >> group_by("time", "sensor")
     assert [k.label for k in (grouped >> summarise(m = mean(x)))._groups] == ["time"]
@@ -508,6 +566,37 @@ def test_reordered_labels_are_matched_and_reported():
     out = sensors() >> mutate(g = x * gain)
     assert data(out, "g").sel(sensor="rear").values.tolist() == [20.0, 60.0, 100.0, 140.0]
     assert "sensor reordered to match" in repr(out)
+
+
+@pytest.mark.parametrize("condition, expected", [
+    (True, [10, 20, 30]), (False, [-10, -20, -30]), (col("flag"), [10, -20, 30]),
+])
+def test_if_else_matches_reordered_branch_labels(condition, expected):
+    frame = tidy(xr.Dataset({"flag": ("point", [True, False, True])},
+                            coords={"point": ["a", "b", "c"]}))
+    true = xr.DataArray([30, 20, 10], dims="point", coords={"point": ["c", "b", "a"]})
+    false = xr.DataArray([-10, -20, -30], dims="point", coords={"point": ["a", "b", "c"]})
+    out = frame >> mutate(result=if_else(condition, true, false))
+    assert data(out, "result").values.tolist() == expected
+    assert "point reordered to match" in repr(out)
+
+
+def test_if_else_matches_axes_shared_by_nonadjacent_arguments():
+    frame = tidy(xr.Dataset({"flag": ("time", [True, False])}, coords={"time": ["a", "b"]}))
+    true = xr.DataArray([10, 20], dims="sensor", coords={"sensor": ["front", "rear"]})
+    false = xr.DataArray([[1, 2], [3, 4]], dims=("time", "sensor"),
+                         coords={"time": ["b", "a"], "sensor": ["rear", "front"]})
+    out = frame >> mutate(result=if_else(col("flag"), true, false))
+    assert data(out, "result").transpose("time", "sensor").values.tolist() == [[10, 20], [2, 1]]
+
+
+@pytest.mark.parametrize("labels, message", [(["a", "other"], "labels differ"), (None, "unlabelled")])
+def test_if_else_rejects_incompatible_branch_labels(labels, message):
+    frame = tidy(xr.Dataset({"flag": ("time", [True, False])}))
+    true = xr.DataArray([10, 20], dims="sensor", coords={"sensor": ["a", "b"]})
+    false = xr.DataArray([30, 40], dims="sensor", coords={} if labels is None else {"sensor": labels})
+    with pytest.raises(AlignError, match=message):
+        frame >> mutate(result=if_else(col("flag"), true, false))
 
 
 def test_labelled_and_unlabelled_axes_never_pair_by_length():

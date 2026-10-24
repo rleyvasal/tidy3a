@@ -7,7 +7,8 @@ verb. A labelled axis never pairs with an unlabelled one by length.
 
 from __future__ import annotations
 
-from collections.abc import Hashable
+from collections.abc import Hashable, Sequence
+from typing import Any
 
 import numpy as np
 import xarray as xr
@@ -27,6 +28,18 @@ def align_pair(
             context=f"in {left_text} and {right_text}",
         )
     return left, right
+
+
+def align_many(values: Sequence[Any], texts: Sequence[str], notes: list[str]) -> list[Any]:
+    """Align each array to earlier operands on every shared axis; keep scalars."""
+    aligned = []
+    for value, text in zip(values, texts):
+        if isinstance(value, xr.DataArray):
+            for previous, previous_text in zip(aligned, texts):
+                if isinstance(previous, xr.DataArray):
+                    _, value = align_pair(previous, value, previous_text, text, notes)
+        aligned.append(value)
+    return aligned
 
 
 def align_to(

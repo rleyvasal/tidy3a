@@ -241,6 +241,25 @@ def test_pack_names_its_axis_and_labels():
         pack([vx, vy], along="")
 
 
+@pytest.mark.parametrize("scalar_first", [False, True])
+def test_pack_matches_reordered_labels_when_first_value_can_be_scalar(scalar_first):
+    frame = tidy(xr.Dataset({"vx": ("point", [1, 2])}, coords={"point": ["a", "b"]}))
+    vy = xr.DataArray([20, 10], dims="point", coords={"point": ["b", "a"]}, name="vy")
+    items = [0, col("vx"), vy] if scalar_first else [col("vx"), vy]
+    out = frame >> mutate(v=pack(items, along="component"))
+    expected = [[0, 0], [1, 2], [10, 20]] if scalar_first else [[1, 2], [10, 20]]
+    assert out.collect()["v"].transpose("component", "point").values.tolist() == expected
+    assert "point reordered to match" in repr(out)
+
+
+@pytest.mark.parametrize("labels, message", [(["a", "other"], "labels differ"), (None, "unlabelled")])
+def test_pack_checks_axes_shared_by_later_values(labels, message):
+    frame = tidy(xr.Dataset({"vx": ("point", [1, 2])}, coords={"point": ["a", "b"]}))
+    vy = xr.DataArray([10, 20], dims="point", coords={} if labels is None else {"point": labels}, name="vy")
+    with pytest.raises(AlignError, match=message):
+        frame >> mutate(v=pack([0, col("vx"), vy], along="component"))
+
+
 def test_numeric_functions_work_on_data_and_plain_values():
     rng = np.random.default_rng(1)
     cloud, values = random_cloud(rng, 10)

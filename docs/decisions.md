@@ -12,7 +12,7 @@ The one-page rule set from plan §1.1: if the tidy layer's rules stop fitting on
 
 **Grouping.** `group_by` on an axis keeps it; on a value field, or `bins(...)` of one, it groups that field's one axis into a new axis of sorted values or intervals. `summarise` reduces every other observation axis and never the field axis. A summary using a variable without the grouping axis is an error. Grouped summaries inside `mutate` broadcast back. Missing values propagate unless `na_rm=True`. After `summarise`, the last grouping level is dropped (`groups=`). (§5.4)
 
-**Alignment.** Labels on a shared axis must match exactly; the same labels in another order are reordered and reported. Different labels need a join verb (`left_join`, `inner_join`, `full_join`, with `_x`/`_y` suffixes and optional `tolerance=`). A labeled axis never pairs with an unlabeled one by length; attach outside arrays with `bind_cols(…, along=)`, and read labels with `pull(axis)`. (§5.5)
+**Alignment.** Labels on a shared axis must match exactly; the same labels in another order are reordered and reported. Different labels need a join verb (`left_join`, `inner_join`, `full_join`, with `_x`/`_y` suffixes; `tolerance=` is currently supported only on `left_join`). A labeled axis never pairs with an unlabeled one by length; attach outside arrays with `bind_cols(…, along=)`, and read labels with `pull(axis)`. (§5.5)
 
 **Array layer.** Maths helpers name their axes: `dot(…, over=)`, `sum(…, over=)`, `rename_axes(…)`; `dot` never conjugates. `formula()` reads a strict LaTeX dialect into the same expressions, binds index letters to axes by name or `bind=`, and always shows how it was read. (§6)
 

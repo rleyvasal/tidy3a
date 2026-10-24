@@ -10,7 +10,7 @@ class TidyError(ValueError):
 
 
 class ReadError(TidyError):
-    """``read_array`` cannot read the source as described."""
+    """An array or record reader cannot read the source as described."""
 
 
 class RefError(TidyError):
