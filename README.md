@@ -15,6 +15,13 @@ python -m pip install -e ".[dev]"
 python -m pytest -q
 ```
 
+The point-cloud example runs on real nuScenes Mini data and checks itself
+against plain NumPy:
+
+```bash
+python examples/nuscenes_sweep.py /path/to/nuscenes-mini
+```
+
 Before pushing, run what CI runs, each job in a fresh environment with only
 tidy3A's declared dependencies (needs [uv](https://docs.astral.sh/uv/)):
 

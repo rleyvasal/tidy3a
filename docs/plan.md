@@ -1077,7 +1077,9 @@ Prerequisite: the tidy3 change in §5.6, so tidy3's transformer rewrites only ti
 
 Exit: the same documented examples run in scripts and notebooks, including the first cell after enabling shorthand, and in a notebook that imports both tidy3 and tidy3A in either order. A small synthetic binary fixture covers the complete cloud workflow in CI. A manually run nuScenes Mini example validates metadata lookup and calibration conventions separately.
 
-Status (2026-10-24): complete except the manual nuScenes Mini run, which needs the dataset and the nuScenes SDK and has not been done.
+Status (2026-10-24): complete, including the manual nuScenes Mini run.
+
+- nuScenes Mini, real data: `examples/nuscenes_sweep.py` runs §7 on the earliest key-frame `LIDAR_TOP` sweep. It reads the nuScenes JSON tables directly to find the file and its calibration; the SDK and its dependencies are not needed, which is a decision taken here. `read_array` infers 34,688 points from 693,760 bytes. After the calibration rotation and translation, 33,653 points lie within 50 m of the vehicle-frame origin, across 32 rings (0–31). An independent NumPy calculation agrees on the kept positions, distances, intensities, and points per ring. The rotation matrix built from nuScenes' (w, x, y, z) quaternion matches `pyquaternion`, the quaternion library the SDK uses. `tests/test_nuscenes.py` reruns this when `NUSCENES_DATAROOT` is set and is skipped otherwise.
 
 - tidy3 change, on the tidy3 branch `notebook-ownership` (commit `6adec50`, not merged or released): `Tidy3MaskTransformer` rewrites a call only when the function is tidy3's, decided by the cell's own imports and then the live namespace. Two new tests fail on the previous code and pass now; the full tidy3 suite passes (1,531 passed, 49 skipped).
 - `src/tidy3a/jupyter.py`, loaded with `%load_ext tidy3a.jupyter`. It is copied and adapted from tidy3's notebook layer, with credit, and imports no tidy3 code. 13 IPython tests run real cells, covering:
