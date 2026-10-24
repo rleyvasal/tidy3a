@@ -973,6 +973,14 @@ Write `docs/decisions.md` covering selection/field resolution, grouping/reductio
 
 Exit: the reviewer can trace the point cloud and time-series examples without wondering whether a name means a variable, axis, label, or external Python object. No large shared-framework refactor is required to begin.
 
+Status (2026-10-24), awaiting review:
+
+- `prototypes/test_xarray_assumptions.py`: 26 checks of the xarray and NumPy behavior this plan relies on, all passing on xarray 2026.9.0 and NumPy 2.5.4. No plan claim needed correcting.
+- `prototypes/test_examples.py`: the point-cloud, sensor time-series, and geospatial raster examples in plain xarray, with hand-checked answers; 13 tests passing. The geospatial example (bands, map coordinates, dates, NDVI) was added because it is the data stars is proven on.
+- `docs/m0-examples.md`: the examples in field-axis style, stars style (`variables_from=`), and strict style. Finding: scalar expressions read identically in the first two; the field axis wins for vectors and per-field summaries, splitting wins for heterogeneous fields; strict style is not viable. Recommendation: keep the field axis and present `variables_from=` as equally first-class.
+- `docs/decisions.md`: the tidy-layer rules on one page (about 480 words), within the complexity budget.
+- New open item: style B needs a helper to re-pack split variables into a vector (shown as `merge(x, y, z, along=)`), which the plan does not yet define.
+
 ### Milestone 1 — Create the repository and import foundation
 
 Create the separate repository/package scaffold, installation configuration, license, tests, and independent CI. Implement wrapping existing xarray objects, generic raw numeric/`.npy` reads, `infer`, naming/labeling, inspection, and conversion back to xarray.
