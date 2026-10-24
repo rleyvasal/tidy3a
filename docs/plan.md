@@ -1,6 +1,6 @@
 # tidy3A: repository and implementation plan
 
-Status: milestones 0–5 implemented; milestone 6 is implemented except Dask-backed grouping and the other verbs' materialization boundaries; milestone 7 is complete: `0.1.0` was published to PyPI on 2026-10-24.
+Status: milestones 0–5 implemented; milestone 6 is implemented except Dask-backed grouping and the other verbs' materialization boundaries; milestone 7 is complete: `0.1.0` was published to PyPI on 2026-10-24; milestone 8 (Polars engine and tidy3 bridge) is planned, with one open question (§12).
 
 This document collects the design decisions and records implementation progress in §10. Interfaces described for later milestones remain planned; the completed milestones describe the current implementation.
 
@@ -93,7 +93,8 @@ Array-layer helpers are used inside tidy-layer verbs, for example `mutate(p = do
 | Formula input | Support ordinary mathematical text such as `"x^2"` and a documented subset of LaTeX |
 | Notebook use | Support bare variable/field names, consistent with tidy3's notebook experience |
 | Generality | No built-in nuScenes schema or automatic interpretation of XYZ, intensity, or quantum amplitudes |
-| Array backend | Keep xarray over NumPy; reviewed against PyTorch, JAX, Scipp, Polars, DuckDB, and others in 2026 (§13.1). Speed comes from optional xarray-compatible arrays and accelerators, not a rewrite; Scipp is a possible interop target |
+| Polars | Not a backend; an optional engine for grouping by value, and a bridge to and from tidy3/Polars tables for single-axis data (milestone 8). Filters are not routed to Polars (measured, no gain) |
+| Array backend | Keep xarray over NumPy; reviewed against PyTorch, JAX, Scipp, named-arrays, xarray's NamedArray, Polars, DuckDB, and others in 2026 (§13.1). Speed comes from optional xarray-compatible arrays and accelerators, not a rewrite; Scipp is a possible interop target |
 
 These are design directions. Detailed selection, grouping, and index-binding semantics need the small prototype in milestone 0 before becoming a public contract.
 
@@ -1153,6 +1154,68 @@ Decided first-release scope:
 
 Documentation states where a lazy input is loaded into memory. Unlike tidy3, which is lazy-first through Polars, the first release is eager; the README says so. Precedents: stars reads many formats through GDAL and offers `stars_proxy` for out-of-memory data; xarray's `open_dataset` is lazy and chunks with Dask.
 
+### Milestone 8 — Polars engine and tidy3 bridge
+
+Planned (2026-10-24). Polars is not a backend (§13.1): it has no complex type, no contraction across axes, and gridded data needs one row per cell, which measured about 40 times slower than NumPy for a mean over time. It is much faster at table-shaped work along one observation axis, which is where point clouds live. This milestone uses it there in two optional ways. Polars stays an optional dependency, used only when installed, as Dask is; tidy3A never imports tidy3.
+
+Measured before planning (Apple M4, 10 threads, Polars 2.0, synthetic cloud of N × 5 float32 values, milliseconds):
+
+| | 34,688 points | 10M points |
+|---|---|---|
+| Mean intensity per ring: tidy3A after the milestone 6 speedup | 2.3 | 133 |
+| The same, handing the two columns to Polars and returning an xarray result | 0.6 | 13.6 (7.0 building the Polars table) |
+| Polars alone | 0.3 | 6.0 |
+| `filter(intensity > 128)`: tidy3A / Polars computing the mask | 0.4 / 0.2 | 72.7 / 52.2 |
+| `filter(sqrt(x² + y² + z²) <= 50)`: tidy3A / Polars computing the mask | 0.6 / 0.3 | 47.2 / 48.5 |
+| That distance mask alone: NumPy / Polars, including building the table | 0.0 / 0.2 | 16.2 / 38.1 |
+
+Polars' group means differed from NumPy's float32 means by at most 1.8 × 10⁻⁷ relative, the last digit of a float32, and were not bit-identical. Its filter masks were identical. A filter's time goes mostly to copying the kept positions (27 ms of the 10M-point distance filter), which Polars does not avoid, so filters are not routed to Polars.
+
+**Part 1: Polars as an engine for grouping by value**
+
+- Applies to `summarise` and grouped `mutate` after `group_by` on a value field or `bins()`, when the data is in memory (not chunked) and every reduction in the call is one Polars computes: `mean`, `sum` (with `min_count`), `min`, `max`, `std`, `var`, `median`, `any`, `all`, and `n()`. Anything else in the call, chunked arrays, complex values, and text other than the key keep the current NumPy path for the whole call, so one call never mixes engines.
+- tidy3A still finds the groups (`pd.factorize`, milestone 6) and passes Polars the group code and the values. Grouped axes kept by `group_by` and the field axis become columns, other reduced observation axes become extra rows, so the result keeps tidy3A's shape rules; the result comes back as xarray with the same labels, axis order, and value types as the NumPy path.
+- Missing values follow tidy3A's rules, not Polars' defaults: NaN propagates unless `na_rm=True`; empty `bins()` give missing means and zero sums and counts; integer sums stay integers. Polars null handling is mapped explicitly and tested.
+- Selection: see question 8 (§12). The inspection output records which engine ran, as it records other changes.
+- Acceptance: results equal to the NumPy path within float32 or float64 rounding (bit-identical for integers, counts, `min`, `max`, `any`, and `all`); repeated runs give identical results; the 10M-point example at least 5 times faster than the NumPy path including conversion; no change when Polars is not installed.
+
+Question 8, to decide before implementation. Since milestone 6, grouped results are bit-identical to reducing each group with NumPy. Polars adds floating-point values in a different order, so float means, sums, and spreads can differ in the last digit. The options:
+
+| Option | Result | Speed at 10M points |
+|---|---|---|
+| A. Opt-in: `engine="polars"` per call or a global option; the default stays NumPy | Bit-identical unless asked | 133 ms by default, 13.6 ms when asked |
+| B. Default when Polars is installed; documented as equal within rounding | Can differ from NumPy in the last digit, depending on what is installed | 13.6 ms |
+| C. Polars only where it is exact (counts, `min`, `max`, `any`, `all`, integer sums); NumPy for float sums and means | Always bit-identical | Mixed: float means, the common case, stay at 133 ms |
+
+Recommendation: A for the first release that includes the engine, since results that change with an optional install are hard to debug; reconsider B after users have tried it. tidy3, whose numbers already come from Polars, is the precedent for accepting rounding-level differences.
+
+**Part 2: a bridge to and from tidy3 and Polars tables**
+
+tidy3A to a table, for data with one observation axis:
+
+```python
+table = nearby >> as_table()            # a Polars DataFrame, one row per point
+import tidy3; tidy3.tidy(nearby)         # a tidy3 TidyFrame, through tidy3's __tidy__ hook
+```
+
+- One row per position on the observation axis; its labels become a column named after the axis (original positions after `filter`, 1-based, as `pull` gives). Field-axis labels become columns, as `variables_from=` would make them; other variables along the axis become columns.
+- A variable without that axis, or data with more than one observation axis, is an error that names the axes. Flattening a grid into one row per cell is allowed only when asked, `as_table(long=True)`, and the error says how many rows that makes.
+- `TidyArray.__tidy__` builds the tidy3 frame. tidy3's `tidy()` calls it for any object that defines it (the stats3 precedent) and returns its result unchanged, so the hook imports tidy3 lazily; tidy3A does not depend on tidy3. Where both packages' `tidy` are imported, `as_table()` is the unambiguous spelling.
+
+A table back to tidy3A:
+
+```python
+cloud = tidy(table, axis="point")                       # Polars DataFrame or LazyFrame, or a tidy3 frame
+cloud = tidy(table, axis="point", field_axis="feature", fields=["x", "y", "z"])
+```
+
+- Each column becomes a variable along the named axis; a column with the axis's name becomes its labels. `fields=` packs the named columns into one array with a field axis, recording them as `variables_from=` does, so `[x, y, z]` works either way.
+- A tidy3 frame is recognised by its `to_polars()` method and collected; a `LazyFrame` is collected. Collection is reported, since tidy3 is lazy and tidy3A's first release is eager.
+- Types: numbers and booleans keep their types; Polars strings and categoricals become text; dates and times become `datetime64`; nulls in float columns become NaN; nulls in integer or boolean columns promote to float with a note, as summaries do (§5.4); list and struct columns are errors; fixed-size `Array` columns are errors until a use case decides their axis name.
+- Round trip: `tidy(as_table(x), axis=…)` gives back the same variables, labels, and types for single-axis data.
+
+Order: part 2 first, since it needs no numerical decisions; part 1 after question 8 is answered. Tests run with and without Polars installed.
+
 ## 11. Verification and release strategy
 
 Prioritize meaningful checks rather than copying tidy3's entire test matrix:
@@ -1173,7 +1236,7 @@ The current approximately 20-minute tidy3 publication time is user-reported cont
 
 ## 12. Questions for the reviewer to resolve first
 
-All seven questions are resolved; the decisions are in the sections cited and summarized in §2.
+Questions 1–7 are resolved; the decisions are in the sections cited and summarized in §2. Question 8 is open.
 
 1. Resolved: selection uses the field-axis rule, with `variable()`/`label()` for collisions and tidy3's selection helpers (§5.1); milestone 0 still tests field-axis select against stars-style strict select.
 2. Resolved: `group_by` axes are kept and other observation axes reduced; grouping by values and `bins()`; a variable lacking the grouping axis is an error (§5.4).
@@ -1182,6 +1245,7 @@ All seven questions are resolved; the decisions are in the sections cited and su
 5. Resolved: plot3's conventions, subscripts as indices, `bind=`, `\sum_i` as the main form, `\mathrm{i}`, and required show-back (§6.3).
 6. Resolved: tidy3A copies and adapts tidy3's `masking.py` and owns the copy; each transformer rewrites only calls it owns, which needs a tidy3 change (§5.6).
 7. Resolved: first-release scope in milestone 7 (§10).
+8. Open: may the Polars grouping engine (milestone 8) give results that differ from NumPy in the last digit, and if so, is it on by default when Polars is installed or only when asked for?
 
 Parameter spelling, extra aliases, and additional domain helpers can wait until these examples are understood and pass their acceptance checks.
 
@@ -1211,9 +1275,11 @@ Decided: keep xarray, over NumPy, as the array backend. The original plan took x
 | **Scipp** | Coordinates, plus physical units, uncertainties, binned event data | NumPy only (C++ core) | Active, 26.9.0 (2026-09-22) | Possible interop target (below) |
 | **PyTorch** | Names only, no labels; the named tensor API is documented as experimental, and binary operations broadcast by position from the right, checking names rather than aligning by them (`align_as()` is explicit) | 526 MB installed, 0.56 s import | Array API tracker ([pytorch#58743](https://github.com/pytorch/pytorch/issues/58743)) open since 2021; 2.14.1 tensors lack `__array_namespace__`, so xarray converts them to NumPy | Not a backend; revisit when xarray can wrap tensors |
 | **JAX** (Haliax, Penzai) | Names and sizes only | About 240 MB plus SciPy | Haliax active; Penzai last released April 2025 | Not a backend; JAX arrays already work inside xarray |
+| **named-arrays** (sun-data) | Names only: strict by-name broadcasting, reductions, and indexing; no coordinate labels | xarray, astropy, SciPy, matplotlib, numexpr, and smaller packages | Active, 2.16.0 (2026-10-21) | Not a backend: no labels, no group-by, no collection of variables with different axes; depends on xarray |
+| **xarray `NamedArray`** | Names only, no labels | Inside xarray; not released separately | Unfinished as a public API | Not usable: no arithmetic operators and no indexing by name in xarray 2026.9.0 |
 | **Awkward Array** | Field names, no coordinates | NumPy plus a C++ core | Active, 2.14.0 | For ragged records, not grids |
 | **Iris** | Coordinates under strict CF conventions | Cartopy, Dask, netCDF4, SciPy, … | Active | Climate-specific; narrower than xarray |
-| **Polars, DuckDB, pandas** | Tables, not axes | About 150 MB / small / 44 MB | Active | Right for tidy3's tables; gridded data needs one row per cell |
+| **Polars, DuckDB, pandas** | Tables, not axes | About 170 MB / small / 44 MB | Active | Right for tidy3's tables; gridded data needs one row per cell. Polars becomes an optional engine and a bridge (milestone 8) |
 
 Measurements on an Apple M4 (synthetic data, best of several runs, milliseconds; ratios matter more than absolute values):
 
@@ -1225,6 +1291,7 @@ Measurements on an Apple M4 (synthetic data, best of several runs, milliseconds;
 | PyTorch CPU / MPS | 71 / 47 | 221 / 463 | 1.9 / 1.4 | 4.1 / 4.9 |
 | JAX (jit) | 23 | 1,028 | 1.1 | 3.1 |
 | Scipp | 58 (float64) | 9 with binning; 6,496 with `groupby` | 1.2 | 3.3 |
+| named-arrays | 68 (one array per component) | 219 (one mask per ring; no group-by) | 0.9 | 2.9 |
 | Polars | 72 | 7 | 161 (long table) | 212 (long table) |
 | DuckDB | 72 | 14 | 42 (long table) | 338 (long table) |
 | pandas | 133 | 50 | 242 (long table) | 539 (long table) |
@@ -1236,9 +1303,11 @@ Consequences:
 - Speed comes from optional pieces that xarray already accepts, not from changing backend: flox or numbagg for grouping, Dask or Cubed for parallel and larger-than-memory work, and JAX arrays inside xarray for compiled or GPU computation. Checked with xarray 2026.9.0 and JAX 0.12: selection, arithmetic, reductions, boolean indexing, `dot`, and groupby keep JAX arrays, and most tidy3A verbs run on them unchanged; field write-back and `dot` with a NumPy matrix return NumPy. xarray's documentation does not yet list JAX among supported array types, so this is not yet a promise.
 - PyTorch becomes an option in the same way once its tensors implement the Array API protocol; follow [pytorch#58743](https://github.com/pytorch/pytorch/issues/58743).
 - Scipp is a possible interop target rather than a replacement: `tidy()` could accept a Scipp `DataArray` or `Dataset` if physical units or binned point-cloud data become central, mapping dimensions and coordinates and carrying units into metadata. Its binning API, which grouped 10M points in 9 ms, is a reference for faster value grouping. Scipp itself describes xarray as the more mature choice for many applications, and its homepage does not cover lazy or larger-than-memory data.
+- Strict named arrays were checked separately, since the first search covered only machine-learning named-axis libraries. named-arrays, tested at 2.16.0, enforces names strictly: shapes are dictionaries, broadcasting is by name only, and mismatched lengths on one name are an error. It supports astropy units, uncertainties that propagate, 3-D vector types, complex and `uint8` values, and keeps Dask arrays lazy; JAX arrays were converted to NumPy. It has no coordinate labels, no group-by, and no container for variables with different axes, which the field axis, `filter`'s kept positions, exact alignment, joins, and grouping all need, and it depends on xarray. Its strictness matches what tidy3A's array layer already enforces with `over=` and formula indices; its units and uncertainties are ideas shared with Scipp. xarray's own `NamedArray` (2026.9.0) cannot yet add two arrays or multiply one by a number, so it is a building block inside xarray rather than an option.
+- Performance item, not yet scheduled: the rotate-and-filter example takes 198 ms in tidy3A at 10M points, while the same computation on separate contiguous float32 columns takes 44 ms in plain NumPy (named-arrays: 68 ms). The difference is tidy3A's own path, not the library underneath. Likely causes, to confirm by profiling: `dot` over a strided `[x, y, z]` view of the stored `point × feature` array, and two `mutate` steps that store intermediate variables before the filter. Profile it and reduce the overhead while keeping results unchanged.
 - No Python package offers dplyr-style verbs on labeled N-D arrays; the tidy3A gap identified in §13 remains.
 
-Sources checked: [PyTorch 2.10 named tensor operator coverage](https://docs.pytorch.org/docs/2.10/name_inference.html), [pytorch#54581](https://github.com/pytorch/pytorch/issues/54581), [pytorch#58743](https://github.com/pytorch/pytorch/issues/58743), [Reviving Named Tensors (2026)](https://dev-discuss.pytorch.org/t/reviving-named-tensors-strategy-for-addressing-the-experimental-backlog/3289), [Scipp](https://scipp.github.io/), [Scipp paper](https://arxiv.org/pdf/2010.00257), [xarray duck arrays](https://docs.xarray.dev/en/stable/user-guide/duckarrays.html), [xarray NamedArray design](https://github.com/pydata/xarray/blob/main/design_notes/named_array_design_doc.md), [array-api#698](https://github.com/data-apis/array-api/issues/698), [Penzai named axes](https://penzai.readthedocs.io/en/stable/notebooks/named_axes.html), [Levanter 1.0 and Haliax](https://levanter.readthedocs.io/en/latest/Levanter-1.0-Release/), [Awkward Array](https://awkward-array.readthedocs.io/en/main/getting-started/what-is-an-awkward-array.html), [Iris and xarray](https://scitools-iris.readthedocs.io/en/latest/community/iris_xarray.html), PyPI metadata for each package.
+Sources checked: [PyTorch 2.10 named tensor operator coverage](https://docs.pytorch.org/docs/2.10/name_inference.html), [pytorch#54581](https://github.com/pytorch/pytorch/issues/54581), [pytorch#58743](https://github.com/pytorch/pytorch/issues/58743), [Reviving Named Tensors (2026)](https://dev-discuss.pytorch.org/t/reviving-named-tensors-strategy-for-addressing-the-experimental-backlog/3289), [Scipp](https://scipp.github.io/), [Scipp paper](https://arxiv.org/pdf/2010.00257), [xarray duck arrays](https://docs.xarray.dev/en/stable/user-guide/duckarrays.html), [xarray NamedArray design](https://github.com/pydata/xarray/blob/main/design_notes/named_array_design_doc.md), [array-api#698](https://github.com/data-apis/array-api/issues/698), [Penzai named axes](https://penzai.readthedocs.io/en/stable/notebooks/named_axes.html), [Levanter 1.0 and Haliax](https://levanter.readthedocs.io/en/latest/Levanter-1.0-Release/), [Awkward Array](https://awkward-array.readthedocs.io/en/main/getting-started/what-is-an-awkward-array.html), [Iris and xarray](https://scitools-iris.readthedocs.io/en/latest/community/iris_xarray.html), [named-arrays](https://github.com/sun-data/named-arrays), PyPI metadata for each package.
 
 ## 14. Reference material
 
