@@ -15,6 +15,13 @@ python -m pip install -e ".[dev]"
 python -m pytest -q
 ```
 
+Before pushing, run what CI runs, each job in a fresh environment with only
+tidy3A's declared dependencies (needs [uv](https://docs.astral.sh/uv/)):
+
+```bash
+scripts/check.sh
+```
+
 ```python
 from tidy3a import *
 
