@@ -14,8 +14,8 @@ from typing import Any
 
 import numpy as np
 
-from tidy3a.align import align_to, check_join_axes
-from tidy3a.backend import is_xarray, xarray_backend
+from tidy3a.align import align_to, check_join_axes, check_join_labels
+from tidy3a.backend import is_xarray, memory_mapped, xarray_backend
 from tidy3a.errors import (
     AlignError,
     FilterError,
@@ -523,7 +523,7 @@ def _write_label(data, holders, field_axis, name, value, text, notes, backend=No
         new_dtype = np.result_type(target.dtype, value)
         raw_value = value
     values = target.values
-    if not values.flags.writeable:
+    if memory_mapped(values):
         notes.append(f"changed: {holder} copied into memory to write {name} (it was memory-mapped)")
     if new_dtype != target.dtype:
         notes.append(
@@ -765,6 +765,7 @@ def _join(how: str, other: Any, suffix: Any, tolerance: Any) -> Verb:
             )
         left, right = frame._data, right_frame._data
         check_join_axes(left, right, "the other data", backend=backend)
+        check_join_labels(left, right, name, backend=backend)
         clashes = [v for v in backend.variable_names(left) if backend.has_variable(right, v)]
         left = backend.rename_variables(left, {v: f"{v}{suffix[0]}" for v in clashes if suffix[0]})
         right = backend.rename_variables(right, {v: f"{v}{suffix[1]}" for v in clashes if suffix[1]})

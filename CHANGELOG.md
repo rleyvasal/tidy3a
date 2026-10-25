@@ -16,6 +16,20 @@
   steps of a pipeline about twice as slow.
 - Repeated labels on an axis that must be matched in another order are an
   `AlignError` naming the axis, instead of a pandas `InvalidIndexError`.
+- One exact rule for labels in alignment and joins, on both backends: labels match only when they are the same kind and exactly
+  equal. On the xarray backend, pandas compared integer and float labels
+  through float64, so the label `2**53 + 1` was paired with `2**53`; that is
+  now an `AlignError`. A join whose labels cannot all be held exactly in the
+  type it keeps them in, or that would match repeated labels that differ
+  between the two sides, is an `AlignError` too.
+- NumPy backend fixes: labels from the calling code are copied once, so
+  changing the caller's array later cannot change a frame; label indexes
+  are released with their labels; join gaps promote types as xarray does;
+  joining with data that has no labels on an axis works; a lazy array from
+  the calling code is an error before anything is computed; time labels
+  with a time zone stay on xarray; arrays have `.shape`.
+- Writing a field of a read-only in-memory array no longer notes that it
+  was memory-mapped.
 
 ## 0.1.0 — 2026-10-24
 

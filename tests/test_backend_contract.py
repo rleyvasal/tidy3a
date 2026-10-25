@@ -47,17 +47,6 @@ def test_other_coordinates_stay_on_xarray(coords):
         tidy(data, backend="numpy")
 
 
-def test_labels_of_different_number_types_compare_exactly_on_numpy():
-    big = 2**53 + 1
-    data = xr.Dataset({"a": ("s", [1.0, 2.0])}, coords={"s": np.array([big, 3], dtype="int64")})
-    other = xr.DataArray([20.0, 10.0], dims="s", coords={"s": np.array([3.0, float(2**53)])})
-    # pandas compares through float64, so the xarray backend pairs big with 2**53.
-    paired = (tidy(data, backend="xarray") >> mutate(c=col("a") + other)).collect()
-    assert paired["c"].values.tolist() == [11.0, 22.0]
-    with pytest.raises(AlignError, match="s labels differ"):
-        tidy(data, backend="numpy") >> mutate(c=col("a") + other)
-
-
 def test_selection_predicates_receive_the_backends_arrays():
     data = xr.Dataset({"a": ("s", [1.0, 2.0]), "b": ("s", [3, 4])})
     seen = {}
@@ -100,3 +89,29 @@ def test_wrapping_shares_in_memory_values(backend):
     values = np.arange(4.0)
     frame = tidy(xr.Dataset({"a": ("s", values)}), backend=backend)
     assert np.shares_memory(frame.collect()["a"].values, values)
+
+
+def test_lazy_outside_arrays_are_refused_by_the_numpy_backend_before_any_computation():
+    dask = pytest.importorskip("dask.array")
+    import dask as dask_module
+
+    frame = tidy(xr.Dataset({"a": ("t", [1.0, 2.0])}), backend="numpy")
+    lazy = xr.DataArray(dask.ones(2, chunks=1), dims="t")
+    computed = []
+
+    class Spy(dask_module.callbacks.Callback):
+        def _start(self, graph):
+            computed.append(graph)
+
+    with Spy(), pytest.raises(TidyError, match="outside array .* is lazy, chunked, or memory-mapped"):
+        frame >> mutate(c=col("a") + lazy)
+    assert computed == []
+
+
+def test_time_zone_labels_stay_on_xarray():
+    pd = pytest.importorskip("pandas")
+    data = xr.Dataset({"a": ("t", [1.0, 2.0])}, coords={"t": pd.date_range("2026-01-01", periods=2, tz="UTC")})
+    set_backend("numpy")  # the test fixture restores the default afterwards
+    assert tidy(data)._backend.name == "xarray"
+    with pytest.raises(TidyError, match="time labels with a time zone"):
+        tidy(data, backend="numpy")

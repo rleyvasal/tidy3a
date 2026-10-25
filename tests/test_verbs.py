@@ -714,3 +714,12 @@ def test_pull():
 def test_verbs_need_tidy_data():
     with pytest.raises(TypeError, match="wrap xarray objects with tidy"):
         select(x)(xr.Dataset())
+
+
+def test_writing_a_field_of_a_read_only_array_does_not_claim_a_memory_map():
+    values = np.arange(6.0).reshape(3, 2)
+    values.flags.writeable = False
+    frame = read_array(values, dims={"p": infer, "feature": 2}, labels={"feature": ["x", "y"]}, field_axis="feature")
+    out = frame >> mutate(x=col("x") * 2)
+    assert not any("memory-mapped" in note for note in out._notes)
+    assert values.tolist() == [[0.0, 1.0], [2.0, 3.0], [4.0, 5.0]]  # the source is never written

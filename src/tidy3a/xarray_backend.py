@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
+from tidy3a import labels as exact
 from tidy3a.errors import TidyError
 
 _EXACT = {"arithmetic_join": "exact"}
@@ -143,18 +144,20 @@ class XarrayBackend:
         return obj.indexes[dim].get_loc(label)
 
     def compare_labels(self, left: Any, right: Any, dim: Hashable) -> tuple[str, int, int]:
-        """``("same", 0, 0)``, ``("reordered", 0, 0)``, or ``("different", only in left, only in right)``."""
+        """``("same", 0, 0)``, ``("reordered", 0, 0)``, or ``("different", only in left, only in right)``.
+
+        Labels compare exactly (``tidy3a.labels``), not as pandas compares
+        them, which pairs the integer ``2**53 + 1`` with the float ``2**53``.
+        """
         left_index, right_index = left.indexes[dim], right.indexes[dim]
-        if left_index.equals(right_index):
+        if left_index is right_index:
             return "same", 0, 0
-        if len(left_index) == len(right_index) and left_index.sort_values().equals(right_index.sort_values()):
-            return "reordered", 0, 0
-        return "different", len(left_index.difference(right_index)), len(right_index.difference(left_index))
+        return exact.compare(left_index.to_numpy(), right_index.to_numpy(), "align", dim, mixed=True)
 
     def labels_strict_subset(self, part: Any, whole: Any, dim: Hashable) -> bool:
         """Whether *part*'s labels on *dim* are some, but not all, of *whole*'s."""
-        theirs, ours = part.indexes[dim], whole.indexes[dim]
-        return not ours.equals(theirs) and set(theirs) < set(ours)
+        return exact.strict_subset(part.indexes[dim].to_numpy(), whole.indexes[dim].to_numpy(), "align", dim,
+                                   mixed=True)
 
     def reorder_like(self, value: xr.DataArray, dim: Hashable, reference: Any) -> xr.DataArray:
         """*value* with its labels on *dim* put in *reference*'s order."""

@@ -181,3 +181,31 @@ def test_sorted_and_unsorted_labels_give_the_same_positions():
     wanted = rng.choice(labels, 1000)
     np.testing.assert_array_equal(labels[LabelIndex(labels).get_indexer(wanted)], wanted)
     np.testing.assert_array_equal(shuffled[LabelIndex(shuffled).get_indexer(wanted)], wanted)
+
+
+def test_a_callers_labels_cannot_change_a_frame_later():
+    labels = np.array([10, 20, 30])
+    labels.flags.writeable = False  # read-only now, but the caller owns it and can unlock it
+    a = NumpyArray([1.0, 2.0, 3.0], ("p",), {"p": labels})
+    label_index(a.coords["p"]).get_indexer([20])  # build and cache the index
+    labels.flags.writeable = True
+    labels[1] = 99
+    assert a.coords["p"].tolist() == [10, 20, 30]
+    assert label_index(a.coords["p"]).get_indexer([20]).tolist() == [1]
+
+
+def test_an_index_is_released_with_its_labels():
+    import gc
+    import weakref
+
+    data = NumpyData({"v": NumpyArray(np.zeros(5), ("p",))}, {"p": np.arange(5)})
+    labels = data.coords["p"]
+    label_index(labels).get_indexer([3])
+    alive = weakref.ref(labels)
+    del data, labels
+    gc.collect()
+    assert alive() is None
+
+
+def test_numpy_arrays_have_a_shape():
+    assert NumpyArray(np.zeros((2, 3)), ("a", "b")).shape == (2, 3)

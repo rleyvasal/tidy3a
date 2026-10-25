@@ -13,6 +13,7 @@ from typing import Any
 
 import numpy as np
 
+from tidy3a import labels
 from tidy3a.backend import xarray_backend
 from tidy3a.errors import AlignError
 
@@ -69,6 +70,36 @@ def check_join_axes(left: Any, right: Any, right_text: str, *, backend: Any = No
             raise AlignError(
                 f"{dim} is unlabelled on both sides with different lengths "
                 f"({left_sizes[dim]:,} and {right_sizes[dim]:,}); positions cannot be paired"
+            )
+
+
+def check_join_labels(left: Any, right: Any, verb: str, *, backend: Any = None) -> None:
+    """Joins match labels exactly, one to one, under the same rule as alignment.
+
+    A join holds both sides' labels in their common type, so labels that type
+    cannot hold exactly (the integer ``2**53 + 1`` as float64) would be
+    matched to other labels; repeated labels cannot be matched one to one
+    unless both sides have the very same labels.
+    """
+    backend = xarray_backend() if backend is None else backend
+    for dim in backend.axes(left):
+        if not (backend.has_axis(right, dim) and backend.has_labels(left, dim) and backend.has_labels(right, dim)):
+            continue
+        ours, theirs = backend.label_values(left, dim), backend.label_values(right, dim)
+        common = labels.lossy_join_type(ours, theirs)
+        if common is not None:
+            raise AlignError(
+                f"{verb}(): {dim} labels are {ours.dtype} in this data and {theirs.dtype} in the other data, "
+                f"and they cannot all be held exactly as {common}, the type a join keeps them in; "
+                "different labels could be matched.\n"
+                f"  Give {dim} labels of one type on both sides first"
+            )
+        if not (backend.labels_unique(left, dim) and backend.labels_unique(right, dim)) \
+                and not labels.equal(ours, theirs):
+            raise AlignError(
+                f"{verb}(): {dim} has repeated labels, and the labels differ between this data and the "
+                "other data; repeated labels cannot be matched one to one.\n"
+                f'  Give {dim} unique labels, or attach values by position: bind_cols(..., along="{dim}")'
             )
 
 

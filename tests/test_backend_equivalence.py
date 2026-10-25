@@ -3,7 +3,9 @@
 Each seed builds a random dataset (axes of random sizes, some empty; labels
 that are missing, integers, floats with NaN, text, or times; variables over
 random subsets of the axes in random order, with missing values; sometimes a
-field axis) and a random pipeline of verbs over it. Both backends must give
+field axis) and a random pipeline of verbs over it, including joins and
+arithmetic with arrays whose labels are the same, reordered, partly
+different, repeated, or of another number type. Both backends must give
 the same printout and the same collected data, types included, or the same
 error, word for word, and the same warnings.
 """
@@ -15,18 +17,24 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from tidy3a import (col, filter, group_by, max, mean, min, mutate, n, select, slice, std, sum, summarise, tidy)
+from tidy3a import (col, filter, full_join, group_by, inner_join, left_join, max, mean, min, mutate, n, select, slice,
+                    std, sum, summarise, tidy)
 
 pytestmark = pytest.mark.backends("xarray", reason="compares the backends itself")
 
 AXES = ["point", "time", "sensor"]
 FIELDS = ["x", "y", "z"]
 SEEDS = range(300)
+JOINS = [left_join, inner_join, full_join]
+BIG = 2**53 + 1  # an integer that float64 cannot represent
 
 
 def _labels(kind, size, rng):
     if kind == "int":
-        return rng.permutation(np.arange(10, 10 + 3 * size, 3))[:size]
+        labels = rng.permutation(np.arange(10, 10 + 3 * size, 3))[:size]
+        if size and rng.random() < 0.5:
+            labels[-1] = BIG
+        return labels
     if kind == "float":
         values = rng.permutation(np.arange(size) * 0.25 + 0.5)
         if size > 1 and rng.random() < 0.5:
@@ -37,6 +45,26 @@ def _labels(kind, size, rng):
     if kind == "time":
         return np.datetime64("2026-01-01", "ns") + np.sort(rng.choice(30, size, replace=False)).astype("timedelta64[D]")
     raise AssertionError(kind)
+
+
+def _other_labels(labels, rng):
+    """Labels for other data on the same axis: the same, reordered, partly new, repeated, or another type."""
+    choice = rng.integers(5)
+    if choice == 1:
+        return rng.permutation(labels)
+    if choice == 2 and len(labels):
+        return labels[rng.permutation(len(labels))[: rng.integers(len(labels) + 1)]]
+    if choice == 3 and len(labels):
+        return np.concatenate([labels[:1], labels[:-1]])  # the first label twice
+    if choice == 4 and labels.dtype.kind == "i":
+        return labels.astype("float64")  # the same values as floats, except BIG, which rounds
+    return labels
+
+
+def _other(axis, labels, rng):
+    """One variable on *axis*, as an xarray array, with labels from ``_other_labels``."""
+    other = _other_labels(labels, rng)
+    return xr.DataArray(rng.normal(size=len(other)), dims=axis, coords={axis: other}, name="j")
 
 
 def _values(dtype, shape, rng):
@@ -79,7 +107,7 @@ def random_pipeline(rng, data, axes, sizes, field_axis):
     numeric = [v for v in names if data[v].dtype != bool] or names
     steps = []
     for _ in range(int(rng.integers(3, 6))):
-        choice = rng.integers(10)
+        choice = rng.integers(12)
         a, b = rng.choice(numeric), rng.choice(numeric)
         axis = str(rng.choice(axes))
         if choice == 0:
@@ -113,6 +141,12 @@ def random_pipeline(rng, data, axes, sizes, field_axis):
         elif choice == 9:
             steps.append(summarise(s=sum(col(a), na_rm=True, min_count=2), k=n()))
             break
+        elif choice in (10, 11) and axis in data.coords:
+            other = _other(axis, data[axis].values, rng)
+            if choice == 10:
+                steps.append(JOINS[int(rng.integers(3))](other.to_dataset()))
+            else:
+                steps.append(mutate(o=col(a) + other))
     return steps
 
 

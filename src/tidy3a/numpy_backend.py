@@ -11,9 +11,12 @@ xarray and pandas are imported only where needed: xarray to convert to and
 from xarray objects, and pandas, when installed, to find groups by hashing
 and to list labels for messages exactly as the xarray backend does.
 
-Labels are frozen when stored, so each label array's index can be built once
-and cached (``LabelIndex``). Variable data is not copied or frozen: as with
-the xarray backend, wrapping in-memory data shares it.
+The backend owns its labels: labels from outside are copied once into a
+read-only ``_Labels`` array, which nothing else can unlock, so each label
+array's index (``LabelIndex``) is built on first use and kept on the array,
+released with it. Labels compare under one exact rule (``tidy3a.labels``).
+Variable data is not copied or frozen: as with the xarray backend, wrapping
+in-memory data shares it.
 """
 
 from __future__ import annotations
@@ -21,19 +24,17 @@ from __future__ import annotations
 import builtins
 import operator
 import warnings
-import weakref
 from collections.abc import Callable, Hashable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
 
-from tidy3a.backend import memory_mapped
+from tidy3a import labels as exact
+from tidy3a.backend import is_xarray, memory_mapped
 from tidy3a.errors import TidyError
-
-
-class LabelError(TidyError):
-    """Labels that cannot be ordered, compared, or looked up."""
-
+from tidy3a.labels import LabelError, exact_cast
+from tidy3a.labels import kind as _kind
+from tidy3a.labels import missing as _missing
 
 CoreError = LabelError  # the label index below raises it under this name
 
@@ -81,6 +82,10 @@ class NumpyArray:
     @property
     def sizes(self) -> dict[Hashable, int]:
         return dict(zip(self.dims, self.data.shape))
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return self.data.shape
 
     @property
     def ndim(self) -> int:
@@ -161,86 +166,49 @@ def _checked_coords(coords: Mapping[Hashable, Any], sizes: Mapping[Hashable, int
     return out
 
 
-def _frozen_labels(labels: Any) -> np.ndarray:
-    """Labels that can never change, so their index can be cached by identity.
+class _Labels(np.ndarray):
+    """Labels this backend owns: read-only, never shared writeable, with their index kept on them.
 
-    A read-only array is kept as it is only when nothing it views is
-    writeable; anything else is copied once and the copy is frozen.
+    Views and slices are labels too, each with its own index. Arithmetic on
+    labels gives plain arrays, so labels never leak into variable data.
     """
-    if isinstance(labels, np.ndarray) and _never_changes(labels):
+
+    _index: LabelIndex | None = None
+
+    def __array_finalize__(self, obj: Any) -> None:
+        self._index = None
+
+    def __array_ufunc__(self, ufunc: Any, method: str, *inputs: Any, **kwargs: Any) -> Any:
+        inputs = tuple(x.view(np.ndarray) if isinstance(x, _Labels) else x for x in inputs)
+        return getattr(ufunc, method)(*inputs, **kwargs)
+
+
+def _owned(labels: Any) -> bool:
+    return isinstance(labels, _Labels) and not labels.flags.writeable
+
+
+def _frozen_labels(labels: Any) -> _Labels:
+    """Labels that can never change: this backend's own are kept, others copied once."""
+    if _owned(labels):
         return labels
-    frozen = np.array(labels, copy=True)
-    frozen.flags.writeable = False
-    return frozen
+    return _freeze(np.array(labels, copy=True))
 
 
-def _never_changes(array: np.ndarray) -> bool:
-    base: Any = array
-    while base is not None:
-        if not isinstance(base, np.ndarray) or base.flags.writeable:
-            return False
-        base = base.base
-    return True
-
-
-def _freeze(array: np.ndarray) -> np.ndarray:
+def _freeze(array: np.ndarray) -> _Labels:
     """Freeze a label array this module just created and owns alone."""
-    array.flags.writeable = False
-    return array
+    if _owned(array):
+        return array
+    labels = array.view(_Labels)
+    labels.flags.writeable = False
+    return labels
+
+
+def _plain(labels: np.ndarray) -> np.ndarray:
+    """Labels as a plain NumPy array, for xarray and for callers."""
+    return labels.view(np.ndarray)
 
 
 # ── Label index ─────────────────────────────────────────────────────────────
-
-# Label kinds that can match each other. Booleans, numbers, times, durations,
-# text, and bytes never match across kinds, as in pandas: True is not 1.
-_KINDS = {"b": "bool", "i": "number", "u": "number", "f": "number", "c": "number",
-          "M": "time", "m": "duration", "U": "text", "S": "bytes"}
-
-
-def _kind(values: np.ndarray, op: str, dim: Hashable) -> tuple[str, np.ndarray]:
-    """The label kind, with object arrays of one Python type converted to it."""
-    if values.dtype.kind != "O":
-        return _KINDS.get(values.dtype.kind, "other"), values
-    if values.size == 0:
-        return "other", values
-    types = {type(v) for v in values.tolist()}
-    for kind, accepted, convert in (
-        ("text", (str,), str), ("bytes", (bytes,), bytes), ("bool", (bool, np.bool_), bool),
-    ):
-        if all(issubclass(t, accepted) for t in types):
-            return kind, np.array(values.tolist(), dtype=convert)
-    if all(issubclass(t, (int, float, complex, np.number)) and not issubclass(t, (bool, np.bool_)) for t in types):
-        return "number", np.array(values.tolist())
-    names = ", ".join(sorted(t.__name__ for t in types))
-    raise CoreError(f"{op}: labels on {dim!r} mix types ({names}), so they cannot be ordered or looked up; "
-                    "give the axis labels of one type")
-
-
-def _missing(values: np.ndarray) -> np.ndarray:
-    if values.dtype.kind in "fc":
-        return np.isnan(values)
-    if values.dtype.kind in "mM":
-        return np.isnat(values)
-    return np.zeros(values.shape, dtype=bool)
-
-
-def _exact_cast(wanted: np.ndarray, dtype: np.dtype) -> tuple[np.ndarray, np.ndarray]:
-    """*wanted* in the index's type, and where that conversion is exact.
-
-    A value that changes on the way, such as float64 0.1 as float32, a
-    half-second as whole seconds, or -1 as an unsigned integer, cannot equal
-    any label, so it is not found; nothing is rounded to make a match.
-    """
-    with np.errstate(all="ignore"), warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        cast = wanted.astype(dtype)
-        exact = cast.astype(wanted.dtype) == wanted
-    if dtype.kind == "u" and wanted.dtype.kind in "if":
-        exact &= wanted >= 0
-    elif dtype.kind == "i" and wanted.dtype.kind == "u":
-        exact &= wanted <= np.iinfo(dtype).max
-    return cast, exact
-
 
 class LabelIndex:
     """Positions of labels on one axis, built once per label array.
@@ -252,7 +220,7 @@ class LabelIndex:
     compares equal; one such label can still be looked up.
     """
 
-    __slots__ = ("kind", "dtype", "size", "unique", "_sorted", "_sorter", "_kept", "_missing", "__weakref__")
+    __slots__ = ("kind", "dtype", "size", "unique", "_sorted", "_sorter", "_kept", "_missing")
 
     def __init__(self, labels: np.ndarray, op: str = "index", dim: Hashable = None):
         kind, values = _kind(np.asarray(labels), op, dim)
@@ -302,7 +270,7 @@ class LabelIndex:
             result[missing] = self._missing[0]
         rest = np.flatnonzero(~missing)
         cast, exact = (wanted[rest], np.ones(len(rest), dtype=bool)) if wanted.dtype == self.dtype \
-            else _exact_cast(wanted[rest], self.dtype)
+            else exact_cast(wanted[rest], self.dtype)
         if not len(self._sorted):
             return result
         found = np.searchsorted(self._sorted, cast)
@@ -315,38 +283,16 @@ class LabelIndex:
         return result
 
 
-_INDEXES: dict[int, tuple[Any, LabelIndex]] = {}
-
-
 def label_index(labels: np.ndarray, op: str = "index", dim: Hashable = None) -> LabelIndex:
-    """The index for a label array, built on first use and reused while the array lives.
+    """The index for a label array: built on first use and kept on labels this backend owns.
 
-    Only arrays that can never change are cached; others get a fresh index.
+    Other arrays, which could change, get a fresh index each time.
     """
-    if not _never_changes(labels):
+    if not _owned(labels):
         return LabelIndex(labels, op, dim)
-    key = id(labels)
-    cached = _INDEXES.get(key)
-    if cached is not None and cached[0]() is labels:
-        return cached[1]
-    index = LabelIndex(labels, op, dim)
-    # The callback binds the cache itself: module globals are gone during interpreter shutdown.
-    _INDEXES[key] = (weakref.ref(labels, lambda _, key=key, cache=_INDEXES: cache.pop(key, None)), index)
-    return index
-
-
-def _labels_equal(a: np.ndarray, b: np.ndarray) -> bool:
-    """Same labels in the same order; NaN and NaT equal themselves here."""
-    if len(a) != len(b):
-        return False
-    if a.dtype.kind in "fcmM" and b.dtype.kind in "fcmM":
-        return bool(np.array_equal(a, b, equal_nan=True))
-    try:
-        return bool(np.array_equal(a, b))
-    except (TypeError, ValueError):
-        return False
-
-
+    if labels._index is None:
+        labels._index = LabelIndex(labels, op, dim)
+    return labels._index
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -455,7 +401,10 @@ def _reduce_data(data: np.ndarray, op: str, axes: int | tuple[int, ...], na_rm: 
 def _fill_for(dtype: np.dtype) -> tuple[np.dtype, Any]:
     """The type and missing value a reindexed variable needs, as xarray promotes them."""
     if dtype.kind in "iu":
-        return np.dtype(float), np.nan
+        # As xarray promotes: integers of up to 16 bits to float32, wider ones to float64.
+        return np.dtype(np.float32 if dtype.itemsize <= 2 else np.float64), np.nan
+    if dtype.kind == "b":
+        return np.dtype(np.float64), np.nan
     if dtype.kind == "f" or dtype.kind == "c":
         return dtype, np.nan
     if dtype.kind in "mM":
@@ -467,6 +416,13 @@ def _reindex(value: NumpyArray, dim: Hashable, positions: np.ndarray, labels: np
     """*value* on new labels for *dim*: position -1 becomes missing."""
     axis = value.axis(dim)
     missing = positions < 0
+    if not value.data.shape[axis]:  # nothing to take from: every position is missing
+        dtype, fill = _fill_for(value.data.dtype) if len(positions) else (value.data.dtype, None)
+        shape = value.data.shape[:axis] + (len(positions),) + value.data.shape[axis + 1:]
+        taken = np.full(shape, fill, dtype=dtype) if len(positions) else np.empty(shape, dtype=dtype)
+        coords = dict(value.coords)
+        coords[dim] = labels
+        return NumpyArray._make(taken, value.dims, coords, value.attrs, value.name)
     taken = np.take(value.data, np.where(missing, 0, positions), axis=axis)
     if missing.any():
         dtype, fill = _fill_for(value.data.dtype)
@@ -526,6 +482,8 @@ class NumpyBackend:
                 return f"{name} is a coordinate that is not one axis's labels"
             if type(dataset.indexes[name]).__name__ == "MultiIndex":
                 return f"{name} has multi-level labels"
+            if getattr(dataset.indexes[name], "tz", None) is not None:
+                return f"{name} has time labels with a time zone"
         return None
 
     def wrap(self, data: Any) -> tuple[NumpyData, str]:
@@ -546,7 +504,7 @@ class NumpyBackend:
     def to_xarray(self, data: NumpyData) -> Any:
         import xarray as xr
 
-        coords = {d: (d, labels, dict(data.coord_attrs.get(d, {}))) for d, labels in data.coords.items()}
+        coords = {d: (d, _plain(labels), dict(data.coord_attrs.get(d, {}))) for d, labels in data.coords.items()}
         return xr.Dataset({n: (v.dims, v.data, dict(v.attrs)) for n, v in data.variables.items()},
                           coords=coords, attrs=dict(data.attrs))
 
@@ -577,10 +535,15 @@ class NumpyBackend:
 
     def outside(self, value: Any) -> Any:
         """An array from the calling code (an xarray object) as this backend's array."""
-        from tidy3a.backend import is_xarray
-
         if not is_xarray(value):
             return value
+        if not value.variable._in_memory or not isinstance(value.data, np.ndarray) or memory_mapped(value.data):
+            name = f"on {', '.join(map(str, value.dims))}" if value.name is None else repr(value.name)
+            raise TidyError(
+                f"outside array {name} is lazy, chunked, or memory-mapped, and "
+                'backend="numpy" holds eager, in-memory data only.\n'
+                "  Load it into memory first (.load()), or use the xarray backend"
+            )
         coords = {d: value[d].values for d in value.dims if d in value.indexes}
         return NumpyArray(np.asarray(value.values), value.dims, coords, dict(value.attrs), value.name)
 
@@ -637,7 +600,7 @@ class NumpyBackend:
         return {dim: self.label_list(obj, dim) for dim in obj.coords}
 
     def label_values(self, obj: Any, dim: Hashable) -> np.ndarray:
-        return obj.coords[dim]
+        return _plain(obj.coords[dim])
 
     def label_list(self, obj: Any, dim: Hashable) -> list[Any]:
         labels = obj.coords[dim]
@@ -667,20 +630,10 @@ class NumpyBackend:
         return _positions_of(obj.coords[dim], label, dim)
 
     def compare_labels(self, left: Any, right: Any, dim: Hashable) -> tuple[str, int, int]:
-        ours, theirs = left.coords[dim], right.coords[dim]
-        if ours is theirs or _labels_equal(ours, theirs):
-            return "same", 0, 0
-        left_index, right_index = label_index(ours, "align", dim), label_index(theirs, "align", dim)
-        if len(ours) == len(theirs) and left_index.unique and right_index.unique \
-                and (right_index.get_indexer(ours) >= 0).all():
-            return "reordered", 0, 0
-        only_left = len(set(_label_keys(ours)) - set(_label_keys(theirs)))
-        only_right = len(set(_label_keys(theirs)) - set(_label_keys(ours)))
-        return "different", only_left, only_right
+        return exact.compare(left.coords[dim], right.coords[dim], "align", dim)
 
     def labels_strict_subset(self, part: Any, whole: Any, dim: Hashable) -> bool:
-        theirs, ours = part.coords[dim], whole.coords[dim]
-        return not _labels_equal(ours, theirs) and set(_label_keys(theirs)) < set(_label_keys(ours))
+        return exact.strict_subset(part.coords[dim], whole.coords[dim], "align", dim)
 
     def reorder_like(self, value: NumpyArray, dim: Hashable, reference: Any) -> NumpyArray:
         order = label_index(value.coords[dim], "align", dim).get_indexer(reference.coords[dim])
@@ -690,7 +643,7 @@ class NumpyBackend:
 
     def axis_labels(self, data: NumpyData, axis: Hashable) -> NumpyArray:
         if axis in data.coords:
-            return NumpyArray._make(data.coords[axis], (axis,), {axis: data.coords[axis]},
+            return NumpyArray._make(_plain(data.coords[axis]), (axis,), {axis: data.coords[axis]},
                                     dict(data.coord_attrs.get(axis, {})), axis)
         return NumpyArray._make(np.arange(1, data.sizes[axis] + 1), (axis,), {}, {}, axis)
 
@@ -934,7 +887,7 @@ class NumpyBackend:
     def merge(self, left: NumpyData, right: NumpyData, how: str) -> NumpyData:
         for dim in [d for d in left.coords if d in right.coords]:
             ours, theirs = left.coords[dim], right.coords[dim]
-            if _labels_equal(ours, theirs):
+            if exact.equal(ours, theirs):
                 continue
             target = _joined_labels(ours, theirs, how, dim)
             left = self._reindexed(left, dim, label_index(ours, "join", dim).get_indexer(target), target)
@@ -943,11 +896,6 @@ class NumpyBackend:
         coords = {**right.coords, **left.coords}
         coord_attrs = {d: _combine_attrs(left.coord_attrs.get(d, {}), right.coord_attrs.get(d, {})) for d in coords}
         return NumpyData(variables, coords, _combine_attrs(left.attrs, right.attrs), coord_attrs)
-
-
-def _label_keys(labels: np.ndarray) -> list:
-    """Labels as hashable Python values for set comparisons, NaN and NaT included."""
-    return [("missing",) if value != value else value for value in labels.tolist()]
 
 
 def _joined_labels(ours: np.ndarray, theirs: np.ndarray, how: str, dim: Hashable) -> np.ndarray:
