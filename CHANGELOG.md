@@ -30,6 +30,12 @@ threshold can keep or drop a point differently from 0.2.0.
   `dropna=False` keeps them as a group labelled NaN (NaT for times), last.
   `bins()` follows the same rule. NaT keys formed a group before and are
   now dropped unless `dropna=False`.
+- `rounded(field, step, origin=0)` and `cells(field, size, origin=0)` group
+  by a value rounded to a step or by the grid cell it falls in, as
+  `group_by(rounded(distance, 0.5))` or `group_by(cells(x, 0.2))`. Edges are
+  where the printed settings put them: with size 0.1, 0.3 is in
+  [0.3, 0.4). `bins()` takes `origin=` for durations; its results are
+  unchanged.
 - Label lookups on evenly spaced labels (grid latitude, longitude, time)
   are arithmetic, with no sort and no index held.
 - `NumpyArray`, the NumPy backend's array, supports NumPy's ufuncs,
