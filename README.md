@@ -8,17 +8,22 @@ and NumPy, in the spirit of [tidy3](https://github.com/rleyvasal/tidy3).
 The design decisions are in [docs/plan.md](docs/plan.md); the rules fit on one page in
 [docs/decisions.md](docs/decisions.md).
 
-Requires Python 3.11 or newer. From a checkout, install the package:
+Requires Python 3.11 or newer and NumPy. From a checkout, install the package
+with xarray, for xarray inputs and outputs and for lazy and memory-mapped data:
 
 ```bash
-python -m pip install -e .
+python -m pip install -e ".[xarray]"
 ```
+
+Without the extra, tidy3A needs NumPy alone: in-memory pipelines run on the
+experimental NumPy backend, arrays come in through `read_array` and
+`read_binary`, and results go out through `pull()` and `to_dict()`.
 
 ## Quick start
 
 ```python
 import numpy as np
-from tidy3a import fields, filter, formula, infer, mutate, read_array
+from tidy3a import fields, filter, formula, infer, mutate, pull, read_array
 
 points = np.array([[3, 4, 0], [0, 0, 50], [60, 0, 0]], dtype="float32")
 cloud = read_array(
@@ -34,7 +39,7 @@ nearby = (
     >> mutate(distance = formula(r"\sqrt{x^2 + y^2 + z^2}"))
     >> filter(distance <= 50)
 )
-print(nearby.collect()["distance"].values)  # [ 5. 50.]
+print(nearby >> pull(distance))  # [ 5. 50.]
 ```
 
 The implemented API includes `read_array`, `read_binary`, `fixed_text`,
@@ -44,7 +49,10 @@ verbs (`select`, `filter`, `slice`, `mutate`, `group_by`, `summarise`, joins,
 `rename_axes`, `pack`), and `formula()` for plain mathematical text and a
 strict LaTeX dialect. Scripts declare names with
 `fields()` or write `col("x")`. `collect()` returns a computed xarray
-Dataset; `to_xarray()` returns a shallow copy sharing the underlying values.
+Dataset; `to_xarray()` returns a shallow copy sharing the underlying values;
+`to_dict()` returns NumPy arrays in xarray's `to_dict` layout. An array from
+the calling code, such as a rotation matrix, is an xarray `DataArray` or a
+one-variable `read_array(...)` result.
 
 ## Notebooks
 

@@ -19,18 +19,19 @@ classifiers = [
   "Topic :: Scientific/Engineering",
 ]
 # NumPy 2's promotion rules (x * 2 on float32 stays float32) are assumed by
-# the write-back rules in docs/plan.md §5.4.
-# pandas is imported directly (label indexes, time bins). 2.2.2 is the first
-# pandas built for NumPy 2; older wheels fail to import alongside numpy>=2.0.
+# the write-back rules in docs/plan.md §5.4. NumPy is the only requirement:
+# eager, in-memory pipelines run on the NumPy backend without xarray.
 dependencies = [
   "numpy>=2.0",
-  "pandas>=2.2.2",
-  "xarray>=2024.6",
 ]
 
 [project.optional-dependencies]
+# The xarray backend: xarray inputs and outputs (tidy(), collect()), and lazy,
+# chunked, and memory-mapped data. 2.2.2 is the first pandas built for NumPy 2;
+# older wheels fail to import alongside numpy>=2.0.
+xarray = ["xarray>=2024.6", "pandas>=2.2.2"]
 # opt_einsum: xarray uses it for dot when installed; the tests check tidy3A's results do not change.
-dev = ["pytest>=7.0", "flox>=0.9", "ipython>=8.0", "dask[array]", "opt_einsum"]
+dev = ["xarray>=2024.6", "pandas>=2.2.2", "pytest>=7.0", "flox>=0.9", "ipython>=8.0", "dask[array]", "opt_einsum"]
 
 [project.urls]
 Homepage = "https://github.com/rleyvasal/tidy3a"

@@ -25,6 +25,7 @@ can exist only once xarray has been imported.
 
 from __future__ import annotations
 
+import importlib.util
 import mmap
 import sys
 from typing import Any
@@ -75,9 +76,31 @@ def kept_positions(index: Any, size: int) -> tuple[Any, np.ndarray]:
 
 def xarray_backend() -> Any:
     """The xarray backend, importing xarray on first use."""
-    from tidy3a.xarray_backend import XARRAY
-
+    try:
+        from tidy3a.xarray_backend import XARRAY
+    except ImportError as error:
+        if not _missing_xarray(error):
+            raise
+        raise TidyError(
+            "this needs the xarray backend (xarray inputs, lazy, chunked, or memory-mapped data, or "
+            'backend="xarray"), and xarray or pandas is not installed.\n'
+            "  Install them: pip install 'tidy3a[xarray]'"
+        ) from None
     return XARRAY
+
+
+def _missing_xarray(error: ImportError) -> bool:
+    return error.name in ("xarray", "pandas") or any(name in str(error) for name in ("xarray", "pandas"))
+
+
+def xarray_installed() -> bool:
+    """Whether xarray can be imported, without importing it."""
+    if "xarray" in sys.modules:
+        return sys.modules["xarray"] is not None
+    try:
+        return importlib.util.find_spec("xarray") is not None
+    except (ImportError, ValueError):
+        return False
 
 
 def __getattr__(name: str) -> Any:
@@ -91,11 +114,14 @@ def __getattr__(name: str) -> Any:
 
 
 _BACKENDS = ("xarray", "numpy")
-_default = "xarray"
+_default: str | None = None  # None: xarray when it is installed, else NumPy
 
 
 def set_backend(name: str) -> None:
-    """Choose the backend new data uses when none is named: ``"xarray"`` (the default) or ``"numpy"``.
+    """Choose the backend new data uses when none is named: ``"xarray"`` or ``"numpy"``.
+
+    Without a choice, the default is xarray when it is installed and NumPy
+    otherwise.
 
     The NumPy backend is experimental and holds eager, in-memory data only;
     lazy, chunked, and memory-mapped inputs stay on xarray when it is only
@@ -108,7 +134,8 @@ def set_backend(name: str) -> None:
 
 def get_backend(name: str | None = None) -> Any:
     """The backend called *name*, or the default one."""
-    name = _default if name is None else name
+    if name is None:
+        name = _default if _default is not None else "xarray" if xarray_installed() else "numpy"
     _check_name(name)
     if name == "xarray":
         return xarray_backend()

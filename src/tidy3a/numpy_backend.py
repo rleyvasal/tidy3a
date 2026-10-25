@@ -503,7 +503,14 @@ class NumpyBackend:
         return NumpyData(variables, coords, dict(dataset.attrs), coord_attrs)
 
     def to_xarray(self, data: NumpyData) -> Any:
-        import xarray as xr
+        try:
+            import xarray as xr
+        except ImportError:
+            raise TidyError(
+                "collect() and to_xarray() give an xarray Dataset, and xarray is not installed.\n"
+                "  For NumPy arrays: to_dict(), or pull(...) for one variable or axis\n"
+                "  For an xarray Dataset: pip install 'tidy3a[xarray]'"
+            ) from None
 
         coords = {d: (d, _plain(labels), dict(data.coord_attrs.get(d, {}))) for d, labels in data.coords.items()}
         return xr.Dataset({n: (v.dims, v.data, dict(v.attrs)) for n, v in data.variables.items()},
@@ -511,6 +518,16 @@ class NumpyBackend:
 
     def collect(self, data: NumpyData) -> Any:
         return self.to_xarray(data)
+
+    def to_dict(self, data: NumpyData) -> dict:
+        """As xarray's ``Dataset.to_dict(data="array")`` gives it, without xarray."""
+        return {
+            "coords": {d: {"dims": (d,), "attrs": dict(data.coord_attrs.get(d, {})), "data": _plain(labels)}
+                       for d, labels in data.coords.items()},
+            "attrs": dict(data.attrs),
+            "dims": dict(data.sizes),
+            "data_vars": {n: {"dims": v.dims, "attrs": dict(v.attrs), "data": v.data} for n, v in data.variables.items()},
+        }
 
     # ── Readers: built directly, without an xarray dataset in between ───────
 

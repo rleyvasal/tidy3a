@@ -41,6 +41,13 @@
   points take about 30 ms instead of 4.8 s on the xarray backend.
 - `group_by` keeps the groups it found, so the next verb does not find them
   again.
+- NumPy is the only requirement: `pip install 'tidy3a[xarray]'` adds xarray
+  and pandas. Without them, the default backend is NumPy, arrays from the
+  calling code can be one-variable `read_array` results, and
+  `TidyArray.to_dict()` returns NumPy arrays in xarray's `to_dict` layout.
+- Durations in `bins()` are read by tidy3A itself, the same whether or not
+  pandas is installed; `"1h30min"` and `"2 weeks"` work everywhere, and
+  months, years, and clock or ISO forms are an error.
 
 ## 0.1.0 — 2026-10-24
 

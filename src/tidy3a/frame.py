@@ -94,6 +94,16 @@ class TidyArray:
         """
         return self._backend.collect(self._data)
 
+    def to_dict(self) -> dict:
+        """The data as NumPy arrays, in the layout of xarray's ``Dataset.to_dict(data="array")``.
+
+        ``{"coords": …, "attrs": …, "dims": …, "data_vars": …}``, each variable
+        and coordinate as ``{"dims", "attrs", "data"}``; lazy values are
+        computed. Needs NumPy only; ``xr.Dataset.from_dict`` rebuilds the
+        Dataset that ``collect()`` gives.
+        """
+        return self._backend.to_dict(self._data)
+
     def __rshift__(self, verb: Callable[[TidyArray], Any]) -> Any:
         if not callable(verb):
             raise TypeError(

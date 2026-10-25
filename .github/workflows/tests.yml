@@ -64,7 +64,12 @@ jobs:
         run: |
           python -m venv /tmp/clean
           /tmp/clean/bin/pip install dist/*.whl
-          cd /tmp && /tmp/clean/bin/python -c "import tidy3a, numpy as np; print(tidy3a.read_array(np.zeros(3), dims=['t']))"
+          cd /tmp && /tmp/clean/bin/python -c "import tidy3a, numpy as np; print(tidy3a.read_array(np.zeros(3), dims=['t']).to_dict())"
+      - name: Install it with the xarray extra and use xarray
+        run: |
+          python -m venv /tmp/full
+          /tmp/full/bin/pip install "$(ls dist/*.whl)[xarray]"
+          cd /tmp && /tmp/full/bin/python -c "import tidy3a, xarray as xr; print(tidy3a.tidy(xr.Dataset({'a': ('t', [1.0])})).collect())"
       - name: Save validated distributions
         uses: actions/upload-artifact@v7
         with:

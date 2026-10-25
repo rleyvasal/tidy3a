@@ -22,6 +22,7 @@ import numpy as np
 from tidy3a.align import align_many, align_pair
 from tidy3a.backend import is_xarray, xarray_backend
 from tidy3a.errors import GroupError, RefError, TidyError
+from tidy3a.frame import TidyArray, tidy
 
 
 # ── Nodes ───────────────────────────────────────────────────────────────────
@@ -149,6 +150,9 @@ class Literal(Expr):
         value = self.value
         if is_xarray(value):
             return f"<array {value.name}>" if value.name is not None else "<array>"
+        if isinstance(value, TidyArray):
+            names = value._backend.variable_names(value._data)
+            return f"<array {names[0]}>" if len(names) == 1 else "<data>"
         if isinstance(value, np.ndarray) and value.ndim:
             return "<numpy array>"
         if isinstance(value, float) and np.isnan(value):
@@ -480,7 +484,7 @@ def evaluate(node: Expr, ctx: Context) -> Any:
     if isinstance(node, Ref):
         return resolve(node, ctx)
     if isinstance(node, Literal):
-        return ctx.backend.outside(node.value)
+        return _outside(node.value, ctx)
     if isinstance(node, Vector):
         return resolve_vector(node, ctx)
     if isinstance(node, BinOp):
@@ -527,12 +531,35 @@ def combine(op: Callable, left: Any, right: Any, left_text: str, right_text: str
         if isinstance(value, np.ndarray) and value.ndim:
             raise TidyError(
                 f"{text} is a NumPy array without axis names; pairing it by position could "
-                'misalign it. Name its axes: xr.DataArray(values, dims=["point"])'
+                'misalign it. Name its axes: read_array(values, dims={"point": infer}), '
+                'or xr.DataArray(values, dims=["point"])'
             )
     backend = ctx.backend
     if backend.is_array(left) and backend.is_array(right):
         left, right = align_pair(left, right, left_text, right_text, ctx.notes, backend=backend)
     return backend.apply(op, left, right)
+
+
+def _outside(value: Any, ctx: Context) -> Any:
+    """A value from the calling code as the frame's backend's array, where it is an array.
+
+    An xarray array is converted by the backend. A ``TidyArray`` of one
+    variable, such as a rotation matrix from ``read_array``, stands for that
+    variable, so arrays can come from outside without xarray; one on the
+    other backend is moved to this one.
+    """
+    if not isinstance(value, TidyArray):
+        return ctx.backend.outside(value)
+    names = value._backend.variable_names(value._data)
+    if len(names) != 1:
+        listed = ", ".join(map(str, names))
+        raise ctx.error(
+            f"a TidyArray in an expression stands for its one variable, but this one holds "
+            f"{len(names)} variables ({listed}); select one first, e.g. data >> select({names[0] if names else '…'})"
+        )
+    if value._backend is not ctx.backend:
+        value = tidy(value, backend=ctx.backend.name)
+    return ctx.backend.variable(value._data, names[0])
 
 
 def resolve(ref: Ref, ctx: Context) -> Any:
@@ -541,7 +568,7 @@ def resolve(ref: Ref, ctx: Context) -> Any:
     A notebook name that is not data resolves to its Python value.
     """
     if isinstance(ref, NameRef) and not check_name(ref, ctx) and ref.python is not MISSING:
-        return ctx.backend.outside(ref.python)
+        return _outside(ref.python, ctx)
     data, backend = ctx.data, ctx.backend
     name = ref.name
     field_axis = ctx.field_axis
@@ -827,32 +854,41 @@ def _bin_edges(key: ValueKey, raw: np.ndarray) -> np.ndarray:
     return edges
 
 
-# Duration units a bins() string may use without pandas, in nanoseconds.
+# Duration units a bins() string may use, in nanoseconds. Months and years are not
+# fixed lengths, and "m" could be either minutes or months, so none of them are units.
+_WEEK, _DAY, _HOUR, _MINUTE, _SECOND = 7 * 86_400 * 10**9, 86_400 * 10**9, 3_600 * 10**9, 60 * 10**9, 10**9
 _UNITS = {
-    "w": 7 * 86_400 * 10**9, "week": 7 * 86_400 * 10**9, "weeks": 7 * 86_400 * 10**9,
-    "d": 86_400 * 10**9, "day": 86_400 * 10**9, "days": 86_400 * 10**9,
-    "h": 3_600 * 10**9, "hour": 3_600 * 10**9, "hours": 3_600 * 10**9,
-    "min": 60 * 10**9, "minute": 60 * 10**9, "minutes": 60 * 10**9,
-    "s": 10**9, "second": 10**9, "seconds": 10**9,
-    "ms": 10**6, "us": 10**3, "ns": 1,
+    **dict.fromkeys(("w", "week", "weeks"), _WEEK),
+    **dict.fromkeys(("d", "day", "days"), _DAY),
+    **dict.fromkeys(("h", "hr", "hrs", "hour", "hours"), _HOUR),
+    **dict.fromkeys(("min", "mins", "minute", "minutes"), _MINUTE),
+    **dict.fromkeys(("s", "sec", "secs", "second", "seconds"), _SECOND),
+    **dict.fromkeys(("ms", "millisecond", "milliseconds"), 10**6),
+    **dict.fromkeys(("us", "microsecond", "microseconds"), 10**3),
+    **dict.fromkeys(("ns", "nanosecond", "nanoseconds"), 1),
 }
 
 
 def _duration(text: str, key: ValueKey) -> np.timedelta64:
-    """A duration such as "30 days" or "2D": pandas' reading when installed, else a number and a unit."""
-    pd = _pandas()
-    if pd is not None:
-        return pd.Timedelta(text).to_timedelta64()
-    import re
+    """A duration such as "30 days", "2D", or "1h30min": numbers with units, added exactly.
 
-    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([A-Za-z]+)\s*", text)
-    unit = match and _UNITS.get(match.group(2).lower())
-    if not unit:
+    tidy3A reads durations itself, so a duration means the same whether or
+    not pandas is installed.
+    """
+    import re
+    from fractions import Fraction
+
+    parts = re.findall(r"(\d+(?:\.\d+)?)\s*([A-Za-z]+)", text)
+    rest = re.sub(r"(\d+(?:\.\d+)?)\s*([A-Za-z]+)", "", text).strip()
+    units = [_UNITS.get(unit.lower()) for _, unit in parts]
+    total = sum((Fraction(number) * unit for (number, _), unit in zip(parts, units) if unit), Fraction(0))
+    if not parts or rest or not all(units) or total.denominator != 1 or total <= 0:
         raise GroupError(
-            f'bins({key.expr.text()}, "{text}"): cannot read the duration; write a number and a unit '
-            '(weeks, days, hours, minutes, seconds, ms, us, ns), e.g. "30 days"'
+            f'bins({key.expr.text()}, "{text}"): cannot read the duration; write numbers with units '
+            '(weeks, days, hours, minutes, seconds, ms, us, ns), e.g. "30 days" or "1h30min", '
+            "a whole number of nanoseconds; months and years have no fixed length"
         )
-    return np.timedelta64(int(round(float(match.group(1)) * unit)), "ns")
+    return np.timedelta64(int(total), "ns")
 
 
 def _format_edge(value: Any) -> str:

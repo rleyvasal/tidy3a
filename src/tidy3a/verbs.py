@@ -494,8 +494,8 @@ def _store(frame: TidyArray, name: Hashable, value: Any, text: str, notes: list[
         raise MutateError(f'"{name}" is an axis name; choose another name for the variable')
     if isinstance(value, np.ndarray) and value.ndim:
         raise MutateError(
-            f"{text} is a NumPy array without axis names; name its axes with xr.DataArray(…, dims=…) "
-            "or attach it with bind_cols(…, along=…)"
+            f"{text} is a NumPy array without axis names; name its axes with read_array(…, dims=…) "
+            "or xr.DataArray(…, dims=…), or attach it with bind_cols(…, along=…)"
         )
     if backend.is_array(value):
         for dim in value.dims:
@@ -530,7 +530,9 @@ def _write_labels(data, holders, field_axis, writes, notes, backend=None) -> Any
     raw = []
     for number, (name, value, text) in enumerate(writes):
         if isinstance(value, np.ndarray) and value.ndim:
-            raise MutateError(f"{text} is a NumPy array without axis names; name its axes with xr.DataArray")
+            raise MutateError(
+                f"{text} is a NumPy array without axis names; name its axes with read_array(…, dims=…) or xr.DataArray"
+            )
         if backend.is_array(value):
             if set(value.dims) != set(field_dims):
                 raise MutateError(

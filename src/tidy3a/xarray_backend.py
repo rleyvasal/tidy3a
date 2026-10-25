@@ -76,6 +76,9 @@ class XarrayBackend:
     def collect(self, data: xr.Dataset) -> xr.Dataset:
         return data.compute()
 
+    def to_dict(self, data: xr.Dataset) -> dict:
+        return data.to_dict(data="array")
+
     # ── Collections ─────────────────────────────────────────────────────────
 
     def variable_names(self, data: xr.Dataset) -> list[Hashable]:
