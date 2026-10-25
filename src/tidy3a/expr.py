@@ -375,12 +375,17 @@ class AxisKey:
 
 
 class ValueKey:
-    """``group_by(ring)`` or ``group_by(bins(distance, edges))``: group positions by value."""
+    """``group_by(ring)`` or ``group_by(bins(distance, edges))``: group positions by value.
 
-    def __init__(self, name: Hashable, expr: Expr, edges: Any = None):
+    ``dropna`` says whether positions whose value is missing (NaN or NaT) are
+    left out of every group, as pandas does by default, or kept as one group.
+    """
+
+    def __init__(self, name: Hashable, expr: Expr, edges: Any = None, dropna: bool = True):
         self.name = name
         self.expr = expr
         self.edges = edges
+        self.dropna = dropna
         self.label = str(name) if edges is None else f"bins({expr.text()})"
 
 
@@ -389,13 +394,26 @@ class Groups(Grouping):
 
     ``codes_array`` is the codes as the backend's array along ``axis``, with
     its labels, for broadcasting a per-group result back onto the positions.
+
+    Positions with a missing key are one group, the last. When ``dropna``
+    leaves them out, ``dropped`` counts them: the backends still reduce that
+    group like any other, so every position keeps a code, but its results
+    are never shown (``group_result``) and ``shown`` leaves out its label.
     """
 
-    def __init__(self, name: Hashable, axis: Hashable, codes_array: Any, labels: Sequence[Any]):
+    def __init__(self, name: Hashable, axis: Hashable, codes_array: Any, labels: Sequence[Any],
+                 dropped: int = 0, note: str | None = None):
         super().__init__(codes_array.values, labels)
         self.name = name
         self.axis = axis
         self.codes_array = codes_array
+        self.dropped = dropped
+        self.note = note
+
+    @property
+    def shown(self) -> list[Any]:
+        """The labels of the groups a result shows."""
+        return self.labels[:-1] if self.dropped else self.labels
 
 
 # ── Evaluation ──────────────────────────────────────────────────────────────
@@ -435,6 +453,8 @@ class Context:
             key = self.value_key
             assert key is not None
             self._groups = resolve_value_key(key, self.frame, self.group_axes)
+            if self._groups.note is not None:  # found again on changed data, which may drop other positions
+                self.notes.append(self._groups.note)
         return self._groups
 
     def observation_axes(self, array: Any) -> list[Hashable]:
@@ -710,7 +730,29 @@ def _evaluate_reduce(node: Reduce, ctx: Context) -> Any:
     groups = ctx.groups()
     others = [axis for axis in axes if axis != groups.axis]
     stats = backend.group_reduce(array, node.op, groups, others, node.na_rm, node.min_count)
+    return group_result(stats, groups, ctx)
+
+
+def group_result(stats: Any, groups: Groups, ctx: Context) -> Any:
+    """A per-group result as the verb needs it: one value per shown group, or one per position.
+
+    The group of dropped positions is reduced with the others and then left
+    out; in a grouped mutate those positions get a missing value instead, as
+    pandas' ``transform`` gives them, since they belong to no group.
+    """
+    backend = ctx.backend
+    if groups.dropped:
+        shown = len(groups) - 1
+        if ctx.mode == "summarise":
+            return backend.isel(stats, {groups.name: builtins.slice(0, shown)})
+        kept = backend.array(np.arange(len(groups)) < shown, dims=(groups.name,))
+        stats = backend.where(kept, stats, _missing_like(stats.dtype))
     return stats if ctx.mode == "summarise" else backend.broadcast(stats, groups)
+
+
+def _missing_like(dtype: np.dtype) -> Any:
+    """The missing value for results of *dtype*: NaT for times and durations, else NaN."""
+    return np.array("NaT", dtype=dtype)[()] if dtype.kind in "mM" else np.nan
 
 
 def _check_has_group_axes(node: Reduce, array: Any, ctx: Context) -> None:
@@ -748,7 +790,7 @@ def _count(ctx: Context) -> Any:
     groups = ctx.groups()
     per_position = int(np.prod([sizes[d] for d in observation if d != groups.axis], dtype=np.int64))
     stats = backend.group_counts(groups, per_position)
-    return stats if ctx.mode == "summarise" else backend.broadcast(stats, groups)
+    return group_result(stats, groups, ctx)
 
 
 # ── Value keys ──────────────────────────────────────────────────────────────
@@ -776,13 +818,39 @@ def resolve_value_key(key: ValueKey, frame: Any, group_axes: Sequence[Hashable])
 
 def _value_groups(key: ValueKey, axis: Hashable, values: Any, backend: Any) -> Groups:
     raw = values.values
-    if raw.dtype.kind in "fc" and np.isnan(raw).any():
-        raise GroupError(
-            f"group_by({key.label}): {int(np.isnan(raw).sum()):,} positions have a missing "
-            f"{key.label}; filter them out first"
-        )
-    labels, codes = _factorize(raw)
-    return Groups(key.name, axis, backend.codes_like(codes, values), _label_list(labels))
+    missing = _missing_keys(raw)
+    if missing is None:
+        labels, codes = _factorize(raw)
+        return Groups(key.name, axis, backend.codes_like(codes, values), _label_list(labels))
+    # Every NaN is one group, whatever its sign or payload, as in pandas; NaT likewise.
+    # It sorts last, where np.unique and pandas' dropna=False put it.
+    present, found = _factorize(raw[~missing])
+    codes = np.full(raw.shape, len(present), dtype=found.dtype)
+    codes[~missing] = found
+    missing_label = np.array(["NaT" if raw.dtype.kind in "mM" else "nan"], raw.dtype)
+    labels = _label_list(present) + _label_list(missing_label)
+    return _with_missing(key, axis, backend.codes_like(codes, values), labels, int(missing.sum()))
+
+
+def _missing_keys(raw: np.ndarray) -> np.ndarray | None:
+    """Which key values are missing (NaN, NaT), or None when none are."""
+    if raw.dtype.kind in "fc":
+        missing = np.isnan(raw)
+    elif raw.dtype.kind in "mM":
+        missing = np.isnat(raw)
+    else:
+        return None
+    return missing if missing.any() else None
+
+
+def _with_missing(key: ValueKey, axis: Hashable, codes: Any, labels: list, count: int) -> Groups:
+    """Groups whose last is the positions with a missing key: shown, or dropped with a note."""
+    if not key.dropna:
+        return Groups(key.name, axis, codes, labels)
+    subject = key.label if key.edges is None else key.expr.text()
+    note = (f"changed: group_by({key.label}) dropped {count:,} position{'' if count == 1 else 's'} "
+            f"with a missing {subject}; dropna=False keeps them as a group")
+    return Groups(key.name, axis, codes, labels, dropped=count, note=note)
 
 
 def _pandas() -> Any:
@@ -798,8 +866,9 @@ def _factorize(raw: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Sorted unique values and each position's code, exactly as ``np.unique`` gives them.
 
     pandas, when installed, finds the groups by hashing, which is much faster
-    than sorting every value. It gives missing values such as NaT no code,
-    and some object values cannot be sorted; those fall back to ``np.unique``.
+    than sorting every value. NaN and NaT never reach here (``_value_groups``
+    groups them itself); pandas gives other missing objects, such as None, no
+    code, and some object values cannot be sorted; those fall back to ``np.unique``.
     """
     pd = _pandas()
     try:
@@ -814,11 +883,15 @@ def _factorize(raw: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 def _bin_groups(key: ValueKey, axis: Hashable, values: Any, backend: Any) -> Groups:
     raw = values.values
-    edges = _bin_edges(key, raw)
+    # A missing value is in no bin, but it is not outside them either: it is a
+    # missing key, grouped or dropped as dropna says. Values outside every bin
+    # are still an error.
+    missing = _missing_keys(raw)
+    edges = _bin_edges(key, raw if missing is None else raw[~missing])
     codes = np.searchsorted(edges, raw, side="right") - 1
     outside = (codes < 0) | (codes >= len(edges) - 1)
-    if raw.dtype.kind in "fc":
-        outside |= np.isnan(raw)
+    if missing is not None:
+        outside &= ~missing
     if outside.any():
         low, high = _format_edge(edges[0]), _format_edge(edges[-1])
         raise GroupError(
@@ -827,7 +900,13 @@ def _bin_groups(key: ValueKey, axis: Hashable, values: Any, backend: Any) -> Gro
             "  Widen the edges, or filter those positions out first."
         )
     labels = [f"[{_format_edge(a)}, {_format_edge(b)})" for a, b in zip(edges[:-1], edges[1:])]
-    return Groups(key.name, axis, backend.codes_like(codes, values), labels)
+    if missing is None:
+        return Groups(key.name, axis, backend.codes_like(codes, values), labels)
+    # Bin labels are text, and a NaN among them would make labels of mixed types, which
+    # cannot be looked up; the missing group is labelled with the text "NaN" (or "NaT").
+    codes[missing] = len(labels)
+    label = "NaT" if raw.dtype.kind in "mM" else "NaN"
+    return _with_missing(key, axis, backend.codes_like(codes, values), [*labels, label], int(missing.sum()))
 
 
 def _bin_edges(key: ValueKey, raw: np.ndarray) -> np.ndarray:

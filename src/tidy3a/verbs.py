@@ -594,15 +594,22 @@ def _store_vector(frame: TidyArray, target: Vector, value: Any, text: str, notes
 # ── grouping ────────────────────────────────────────────────────────────────
 
 
-def group_by(*keys: Any, **named: Any) -> Verb:
-    """Group by axes (kept), a value field, or ``bins(...)`` of one."""
+def group_by(*keys: Any, dropna: bool = True, **named: Any) -> Verb:
+    """Group by axes (kept), a value field, or ``bins(...)`` of one.
+
+    Positions whose value is missing (NaN or NaT) are one group. ``dropna``
+    leaves them out of every group, with a note saying how many, as pandas
+    does by default; ``dropna=False`` keeps them as a group labelled NaN, last.
+    """
+    if not isinstance(dropna, (bool, np.bool_)):
+        raise GroupError(f"group_by(): dropna must be True or False, not {dropna!r}")
 
     def apply(frame: TidyArray) -> TidyArray:
         data, backend = frame._data, frame._backend
         resolved: list[Any] = []
         for key in keys:
             if isinstance(key, ValueKey):
-                resolved.append(key)
+                resolved.append(ValueKey(key.name, key.expr, key.edges, bool(dropna)))
                 continue
             name = key.name if isinstance(key, Ref) else key
             if not isinstance(name, Hashable) or isinstance(key, (Expr, list)) and not isinstance(key, Ref):
@@ -615,9 +622,9 @@ def group_by(*keys: Any, **named: Any) -> Verb:
                     raise GroupError(f"{name} is the field axis; fields are columns, not groups")
                 resolved.append(AxisKey(name))
             else:
-                resolved.append(ValueKey(name, Ref(name)))
+                resolved.append(ValueKey(name, Ref(name), dropna=bool(dropna)))
         for name, expr in named.items():
-            resolved.append(ValueKey(name, as_expr(expr)))
+            resolved.append(ValueKey(name, as_expr(expr), dropna=bool(dropna)))
         values = [key for key in resolved if isinstance(key, ValueKey)]
         if len(values) > 1:
             raise GroupError(
@@ -627,10 +634,12 @@ def group_by(*keys: Any, **named: Any) -> Verb:
         if values:
             found = resolve_value_key(values[0], frame, [k.axis for k in resolved if isinstance(k, AxisKey)])
             # The next verb reuses these groups while the data is unchanged.
-            return frame._evolve(groups=resolved, resolved=(frame._data, values[0], found))
+            notes = [found.note] if found.note is not None else []
+            return frame._evolve(groups=resolved, notes=notes, resolved=(frame._data, values[0], found))
         return frame._evolve(groups=resolved)
 
-    return Verb(_call_text("group_by", keys, named), apply, operation="group_by", arguments=(keys, named))
+    text = _call_text("group_by", keys, named if dropna else {**named, "dropna": False})
+    return Verb(text, apply, operation="group_by", arguments=(keys, named))
 
 
 def ungroup() -> Verb:
@@ -694,7 +703,7 @@ def _per_group(value: Any, ctx: Context) -> Any:
         shape[axis] = backend.axis_coordinate(ctx.data, axis).values if backend.has_labels(ctx.data, axis) else None
     if ctx.value_key is not None:
         groups = ctx.groups()
-        shape[groups.name] = groups.labels
+        shape[groups.name] = groups.shown
     if not shape:
         return backend.array(value)
     dims = list(shape)

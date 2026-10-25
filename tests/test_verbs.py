@@ -507,10 +507,11 @@ def test_group_by_many_values_matches_per_group_masks(key_type):
     np.testing.assert_array_equal(centred["d"].transpose("sensor", "point").values, expected)
 
 
-def test_group_by_value_with_missing_times_keeps_them_as_a_group():
+def test_group_by_value_with_missing_times_keeps_them_as_a_group_with_dropna_false():
+    # By default they are dropped (tests/test_nan_groups.py).
     times = np.array(["2026-01-02", "NaT", "2026-01-01", "NaT"], dtype="datetime64[s]")
     ds = xr.Dataset({"v": ("point", [1.0, 2.0, 3.0, 4.0]), "t": ("point", times)})
-    out = (tidy(ds) >> group_by("t") >> summarise(m=mean(col("v")))).collect()
+    out = (tidy(ds) >> group_by("t", dropna=False) >> summarise(m=mean(col("v")))).collect()
     assert out["m"].values.tolist() == [3.0, 1.0, 3.0]
     assert np.isnat(out.t.values[-1])
 
