@@ -8,6 +8,7 @@ is guessed from the values, and values are never truncated or padded.
 from __future__ import annotations
 
 import codecs
+import datetime
 import math
 import os
 from collections.abc import Hashable, Mapping, Sequence
@@ -566,7 +567,7 @@ def _parse_labels(
             raise ReadError(
                 f'labels for "{axis}" must be a list, e.g. ["x", "y", "z"], not one string'
             )
-        array = np.asarray(values)
+        array = _label_array(axis, values)
         if array.ndim != 1:
             raise ReadError(f'labels for "{axis}" must be a flat list')
         size = shape[names.index(axis)]
@@ -580,6 +581,51 @@ def _parse_labels(
             )
         coords[axis] = array
     return coords
+
+
+def _label_array(axis: str, values: Any) -> np.ndarray:
+    """Labels as one array, refusing a list that mixes kinds instead of letting NumPy convert it.
+
+    NumPy turns ``[1, "a"]`` into the text ``"1"`` and ``"a"``, and ``[True, 2]``
+    into the numbers 1 and 2; the exact label rule keeps kinds apart (1 is not
+    "1", True is not 1), so a mix is an error naming the types. Integers and
+    floats are one kind, joined only when float64 holds every label exactly.
+    """
+    if isinstance(values, np.ndarray) and values.dtype != object:
+        return values
+    items = values.tolist() if isinstance(values, np.ndarray) else list(values)
+    types = {type(item) for item in items}
+    kinds = {_label_kind(kind) for kind in types}
+    if len(kinds) > 1:
+        names = ", ".join(sorted(kind.__name__ for kind in types))
+        raise ReadError(
+            f'labels for "{axis}" mix {" and ".join(sorted(kinds))} ({names}); labels on one axis are one '
+            'kind, so give them one type'
+        )
+    array = np.asarray(values)
+    if kinds == {"numbers"} and len(types) > 1 and not all(a == b for a, b in zip(items, array.tolist())):
+        raise ReadError(
+            f'labels for "{axis}" mix integers and floats that float64 cannot hold exactly; '
+            "give them one type"
+        )
+    return array
+
+
+def _label_kind(kind: type) -> str:
+    """The kind a label's type belongs to; labels of different kinds never match."""
+    if issubclass(kind, (bool, np.bool_)):
+        return "booleans"
+    if issubclass(kind, (np.datetime64, datetime.date)):
+        return "times"
+    if issubclass(kind, (np.timedelta64, datetime.timedelta)):  # before numbers: NumPy counts it as one
+        return "durations"
+    if issubclass(kind, (int, float, complex, np.number)):
+        return "numbers"
+    if issubclass(kind, str):
+        return "text"
+    if issubclass(kind, bytes):
+        return "bytes"
+    return "None" if kind is type(None) else kind.__name__
 
 
 def _check_split(names: list[str], axis: Any, coords: Mapping[str, np.ndarray]) -> None:

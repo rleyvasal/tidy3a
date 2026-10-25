@@ -354,6 +354,7 @@ def test_record_validation_uses_only_bytes_after_the_header(tmp_path, lazy):
     ({"point": ["front"]}, 'label count for "point" is 1 but its size is 2'),
     ({"point": ["front", "front"]}, "labels must be unique"),
     ({"other": ["front", "rear"]}, 'labels for "other", which is not in dims'),
+    ({"point": [1, "rear"]}, r'labels for "point" mix numbers and text \(int, str\)'),
 ])
 def test_record_axis_labels_are_validated(tmp_path, labels, message):
     path = tmp_path / "labels.bin"

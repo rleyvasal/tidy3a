@@ -35,6 +35,12 @@ threshold can keep or drop a point differently from 0.2.0.
 - `NumpyArray`, the NumPy backend's array, supports NumPy's ufuncs,
   `np.where`, and Python's operators, broadcasting by axis name under the
   exact alignment rule. It is no longer hashable, since `==` compares values.
+- Fixed: `read_array` and `read_binary` converted labels that mix kinds:
+  `[1, "a"]` became the text labels "1" and "a", and `[True, 2]` the
+  numbers 1 and 2; others raised a raw `TypeError`. Labels mixing booleans,
+  numbers, times, durations, text, bytes, or `None` are now a `ReadError`
+  naming them, and integers and floats are joined only when float64 holds
+  every label exactly.
 - Fixed: on ARM, a float equal to `2**63` was treated as an exact int64
   label, since the cast saturates.
 - The compiled kernels run only from the sizes where they pay (100,000

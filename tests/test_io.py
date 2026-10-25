@@ -385,3 +385,43 @@ def test_variables_from_with_a_different_field_axis(tmp_path):
 def test_name_names_the_single_array(tmp_path):
     frame = read_array(cloud_path(tmp_path), value_type="float32", dims={"point": infer, "f": 5}, name="cloud")
     assert list(frame.collect().data_vars) == ["cloud"]
+
+
+# ── Labels of one kind (the exact label rule) ───────────────────────────────
+
+
+@pytest.mark.parametrize("labels, message", [
+    ([1, "a"], r"mix numbers and text \(int, str\)"),             # NumPy would make both text: "1", "a"
+    (np.array([1, "a"], dtype=object), r"mix numbers and text \(int, str\)"),
+    ([1.5, "x"], r"mix numbers and text \(float, str\)"),
+    ([True, 2], r"mix booleans and numbers \(bool, int\)"),      # NumPy would make True the number 1
+    (["a", b"b"], r"mix bytes and text \(bytes, str\)"),
+    ([1, None], r"mix None and numbers \(NoneType, int\)"),
+    ([np.datetime64("2026-01-01"), 3], r"mix numbers and times \(datetime64, int\)"),
+    ([np.timedelta64(1, "s"), 3], r"mix durations and numbers \(int, timedelta64\)"),
+])
+def test_labels_of_mixed_kinds_are_one_error_not_converted(labels, message):
+    with pytest.raises(ReadError, match=r'labels for "k" ' + message):
+        read_array(np.zeros((2, 3)), dims={"k": 2, "p": infer}, labels={"k": labels})
+
+
+def test_integers_and_floats_mix_only_when_float64_holds_every_label():
+    frame = read_array(np.zeros((2, 3)), dims={"k": 2, "p": infer}, labels={"k": [1, 2.5]})
+    assert frame.to_dict()["coords"]["k"]["data"].tolist() == [1.0, 2.5]
+    with pytest.raises(ReadError, match=r'labels for "k" mix integers and floats that float64 cannot hold exactly'):
+        read_array(np.zeros((2, 3)), dims={"k": 2, "p": infer}, labels={"k": [2**53 + 1, 0.5]})
+
+
+@pytest.mark.parametrize("labels, expected", [
+    (["x", "y"], ["x", "y"]),
+    ([3, 1], [3, 1]),
+    ([np.int64(1), 2], [1, 2]),                                    # NumPy and Python integers are one kind
+    ([0.5, np.float32(1.5)], [0.5, 1.5]),
+    ([True, False], [True, False]),
+    ([b"a", b"b"], [b"a", b"b"]),
+    ([np.datetime64("2026-01-01", "ns"), np.datetime64("2026-01-02", "ns")],
+     [np.datetime64("2026-01-01", "ns"), np.datetime64("2026-01-02", "ns")]),
+])
+def test_labels_of_one_kind_are_kept_as_before(labels, expected):
+    frame = read_array(np.zeros((2, 3)), dims={"k": 2, "p": infer}, labels={"k": labels})
+    np.testing.assert_array_equal(frame.to_dict()["coords"]["k"]["data"], np.array(expected))
