@@ -58,6 +58,21 @@ def memory_mapped(array: Any) -> bool:
     return False
 
 
+def kept_positions(index: Any, size: int) -> tuple[Any, np.ndarray]:
+    """An indexer for *index* on an axis of *size* positions (a mask, a slice, or positions),
+    and the 0-based positions it keeps, as an int64 array the caller owns and may change
+    once the indexer has been used.
+    """
+    if isinstance(index, slice):
+        return index, np.arange(size, dtype=np.int64)[index].copy()
+    index = np.asarray(index)
+    if index.dtype == bool:
+        index = np.flatnonzero(index).astype(np.int64, copy=False)
+        return index, index
+    index = index.astype(np.int64, copy=True)
+    return index, index
+
+
 def xarray_backend() -> Any:
     """The xarray backend, importing xarray on first use."""
     from tidy3a.xarray_backend import XARRAY

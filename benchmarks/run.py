@@ -2,12 +2,14 @@
 
 Run through ``scripts/bench.sh``, which builds the pinned environment. Each
 workload runs on both backends; their results are checked to be identical
-before anything is timed, and the backends alternate while timing so that a
-drift in machine speed affects both. The environment (package versions,
+before anything is timed, and the backends alternate while timing, each
+running first in every other round, so that a drift in machine speed or a
+warm cache left by the other backend affects both alike. The environment (package versions,
 Python, CPU, git commit) is recorded with the results.
 
 Workloads: the plan's §7 pipeline and grouped summaries on synthetic clouds
-of 34,688 and 10M points; the §7 pipeline on the first nuScenes Mini LIDAR
+of 34,688 and 10M points; grouped summaries over many small groups (100,000
+points in 90,000 groups, as in voxel downsampling); the §7 pipeline on the first nuScenes Mini LIDAR
 sweep (``NUSCENES_DATAROOT``); and the sample-data pipelines of
 ``examples/sample_data.py`` (``TIDY3A_SAMPLES``). Data that is opened lazily
 is loaded into memory first, so both backends hold it.
@@ -85,6 +87,26 @@ def synthetic(size: int) -> dict:
                             coords={"i": XYZ, "feature": XYZ})
     offset = xr.DataArray(np.array([1, 2, 0.5], "float32"), dims="i", coords={"i": XYZ})
     return cloud_workloads(values, rotation, offset, f"synthetic {size:,} points")
+
+
+def many_groups(size: int = 100_000, groups: int = 90_000) -> dict:
+    """Grouping where most groups hold one point, as when points are binned into voxels."""
+    rng = np.random.default_rng(0)
+    voxel = rng.permutation(np.concatenate([np.arange(groups), rng.integers(0, groups, size - groups)]))
+    data = xr.Dataset({"v": ("point", rng.uniform(0, 255, size)), "voxel": ("point", voxel)})
+    key, value = col("voxel"), col("v")
+    label = f"{size:,} points in {groups:,} groups"
+
+    def on(run):
+        def make(backend):
+            frame = tidy(data, backend=backend)
+            return lambda: run(frame)
+        return make
+
+    return {
+        f"{label}: mean per group": on(lambda f: f >> group_by(key) >> summarise(points=n(), m=mean(value))),
+        f"{label}: centred per group": on(lambda f: f >> group_by(key) >> mutate(c=value - mean(value))),
+    }
 
 
 def nuscenes(root: Path) -> dict:
@@ -170,10 +192,10 @@ def time_both(make: Callable, minimum: float = 0.4) -> dict:
         once[b] = time.perf_counter() - start
     repeats = int(min(25, max(5, minimum / max(min(once.values()), 1e-6))))
     times: dict[str, list[float]] = {b: [] for b in BACKENDS}
-    for _ in range(repeats):
-        for b, run in runs.items():
+    for round_ in range(repeats):
+        for b in BACKENDS if round_ % 2 == 0 else BACKENDS[::-1]:
             start = time.perf_counter()
-            run()
+            runs[b]()
             times[b].append((time.perf_counter() - start) * 1e3)
     return {b: {"median_ms": statistics.median(t), "best_ms": min(t), "repeats": repeats} for b, t in times.items()}
 
@@ -200,26 +222,32 @@ def environment() -> dict:
     }
 
 
+def workloads(quick: bool = False) -> dict:
+    """The workloads to time: synthetic ones always, real data when its directory is set."""
+    selected = dict(synthetic(34_688))
+    selected.update(many_groups())
+    if not quick:
+        selected.update(synthetic(10_000_000))
+    if os.environ.get("NUSCENES_DATAROOT"):
+        selected.update(nuscenes(Path(os.environ["NUSCENES_DATAROOT"])))
+    if os.environ.get("TIDY3A_SAMPLES"):
+        selected.update(samples(Path(os.environ["TIDY3A_SAMPLES"])))
+    return selected
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--out", type=Path, help="results file (default: benchmarks/results/<date>-<commit>.json)")
     parser.add_argument("--quick", action="store_true", help="skip the 10M-point workloads")
     args = parser.parse_args()
-
-    workloads = dict(synthetic(34_688))
-    if not args.quick:
-        workloads.update(synthetic(10_000_000))
-    if os.environ.get("NUSCENES_DATAROOT"):
-        workloads.update(nuscenes(Path(os.environ["NUSCENES_DATAROOT"])))
-    if os.environ.get("TIDY3A_SAMPLES"):
-        workloads.update(samples(Path(os.environ["TIDY3A_SAMPLES"])))
+    selected = workloads(args.quick)
 
     env = environment()
     print(f"tidy3A {ta.__version__}, NumPy {np.__version__}, xarray {xr.__version__}, Python {env['python']}, "
           f"{env['cpu']}; commit {(env['git_commit'] or '?')[:8]}{' (uncommitted changes)' if env['git_dirty'] else ''}")
     print(f"{'workload':58s} {'xarray':>9s} {'numpy':>9s} {'numpy/xarray':>13s}   (median ms)")
     results = {}
-    for name, make in workloads.items():
+    for name, make in selected.items():
         results[name] = timing = time_both(make)
         a, b = timing["xarray"]["median_ms"], timing["numpy"]["median_ms"]
         print(f"{name:58s} {a:9.2f} {b:9.2f} {a / b:12.2f}x")

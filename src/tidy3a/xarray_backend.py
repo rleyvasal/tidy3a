@@ -18,6 +18,7 @@ import pandas as pd
 import xarray as xr
 
 from tidy3a import labels as exact
+from tidy3a.backend import kept_positions
 from tidy3a.errors import TidyError
 
 _EXACT = {"arithmetic_join": "exact"}
@@ -172,11 +173,18 @@ class XarrayBackend:
     def axis_coordinate(self, data: xr.Dataset, axis: Hashable) -> xr.DataArray:
         return data[axis]
 
-    def with_positions(self, data: xr.Dataset, axis: Hashable) -> xr.Dataset:
-        """Attach 1-based positions as labels, so later steps keep original identities."""
+    def keep(self, data: xr.Dataset, axis: Hashable, index: Any) -> xr.Dataset:
+        """Positions on *axis* (a mask, a slice, or a list); an unlabelled axis is labelled with
+        the 1-based positions kept, so later steps keep original identities.
+
+        Only the kept positions are built, not positions for the whole axis.
+        """
         if axis in data.indexes:
-            return data
-        return data.assign_coords({axis: np.arange(1, data.sizes[axis] + 1)})
+            return data.isel({axis: index})
+        index, kept = kept_positions(index, data.sizes[axis])
+        out = data.isel({axis: index})
+        np.add(kept, 1, out=kept)  # the indexer has been used; it becomes the labels
+        return out.assign_coords({axis: kept})
 
     # ── Arrays ──────────────────────────────────────────────────────────────
 

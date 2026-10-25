@@ -89,11 +89,6 @@ def _text(value: Any) -> str:
     return repr(value) if not isinstance(value, str) else f'"{value}"'
 
 
-def _with_positions(data: Any, axis: Hashable, backend: Any = None) -> Any:
-    """Attach 1-based positions as labels, so later steps keep original identities."""
-    return (xarray_backend() if backend is None else backend).with_positions(data, axis)
-
-
 # ── select ──────────────────────────────────────────────────────────────────
 
 
@@ -268,7 +263,7 @@ def filter(*predicates: Any) -> Verb:  # noqa: A001
 
         notes = list(ctx.notes)
         for axis, mask in masks.items():
-            data = backend.isel(backend.with_positions(data, axis), {axis: mask.values})
+            data = backend.keep(data, axis, mask.values)
             if backend.sizes(data)[axis] == 0:
                 notes.append(f"changed: {axis}: 0 (all removed by {text})")
         return frame._evolve(data, notes=notes)
@@ -304,7 +299,7 @@ def slice(*, drop: bool = False, **axes: Any) -> Verb:  # noqa: A001
         data, backend = frame._data, frame._backend
         for axis, spec in axes.items():
             index = _positions(data, axis, spec, frame)
-            data = backend.isel(backend.with_positions(data, axis), {axis: _position_indexer(index)})
+            data = backend.keep(data, axis, _position_indexer(index))
             if drop:
                 remaining = backend.sizes(data)[axis]
                 if remaining != 1:
@@ -342,7 +337,7 @@ def _slice_end(axes: dict[str, int], *, head: bool) -> Verb:
             size = backend.sizes(data)[axis]
             count = min(int(count), size)
             index = list(range(count)) if head else list(range(size - count, size))
-            data = backend.isel(backend.with_positions(data, axis), {axis: _position_indexer(index)})
+            data = backend.keep(data, axis, _position_indexer(index))
         return frame._evolve(data)
 
     return Verb(_call_text(name, (), axes), apply, operation=name, arguments=axes)
@@ -499,46 +494,53 @@ def _store(frame: TidyArray, name: Hashable, value: Any, text: str, notes: list[
 
 
 def _write_label(data, holders, field_axis, name, value, text, notes, backend=None) -> Any:
+    return _write_labels(data, holders, field_axis, [(name, value, text)], notes, backend)
+
+
+def _write_labels(data, holders, field_axis, writes, notes, backend=None) -> Any:
+    """Write fields of one holder, copying it once; *writes* are ``(name, value, text)`` in order."""
     backend = xarray_backend() if backend is None else backend
     if len(holders) > 1:
         raise MutateError(
-            f'"{name}" is a field label on several variables ({", ".join(map(str, holders))}); '
+            f'"{writes[0][0]}" is a field label on several variables ({", ".join(map(str, holders))}); '
             "select one first"
         )
     holder = holders[0]
     target = backend.variable(data, holder)
     field_dims = [d for d in target.dims if d != field_axis]
-    if isinstance(value, np.ndarray) and value.ndim:
-        raise MutateError(f"{text} is a NumPy array without axis names; name its axes with xr.DataArray")
-    if backend.is_array(value):
-        if set(value.dims) != set(field_dims):
-            raise MutateError(
-                f"{name} has axes ({', '.join(map(str, field_dims))}) but {text} has "
-                f"({', '.join(map(str, value.dims)) or 'none'}); a written field must keep its shape"
+    dtype = target.dtype
+    raw = []
+    for number, (name, value, text) in enumerate(writes):
+        if isinstance(value, np.ndarray) and value.ndim:
+            raise MutateError(f"{text} is a NumPy array without axis names; name its axes with xr.DataArray")
+        if backend.is_array(value):
+            if set(value.dims) != set(field_dims):
+                raise MutateError(
+                    f"{name} has axes ({', '.join(map(str, field_dims))}) but {text} has "
+                    f"({', '.join(map(str, value.dims)) or 'none'}); a written field must keep its shape"
+                )
+            value = backend.transpose(align_to(value, data, text, notes, backend=backend), *field_dims)
+            new_dtype = np.result_type(dtype, value.dtype)
+            raw.append((name, value.values))
+        else:
+            new_dtype = np.result_type(dtype, value)
+            raw.append((name, value))
+        if number == 0 and memory_mapped(target.values):
+            notes.append(f"changed: {holder} copied into memory to write {name} (it was memory-mapped)")
+        if new_dtype != dtype:
+            notes.append(
+                f"changed: {holder} promoted {dtype} → {new_dtype} by mutate({name} = …); "
+                f"all fields on {field_axis} now {new_dtype}"
             )
-        value = backend.transpose(align_to(value, data, text, notes, backend=backend), *field_dims)
-        new_dtype = np.result_type(target.dtype, value.dtype)
-        raw_value = value.values
-    else:
-        new_dtype = np.result_type(target.dtype, value)
-        raw_value = value
-    values = target.values
-    if memory_mapped(values):
-        notes.append(f"changed: {holder} copied into memory to write {name} (it was memory-mapped)")
-    if new_dtype != target.dtype:
-        notes.append(
-            f"changed: {holder} promoted {target.dtype} → {new_dtype} by mutate({name} = …); "
-            f"all fields on {field_axis} now {new_dtype}"
-        )
-    values = values.astype(new_dtype, copy=True)
-    position = backend.label_position(data, field_axis, name)
+            dtype = new_dtype
+        if number == 0 and backend.has_metadata(target):
+            notes.append(f"metadata: cleared attributes and encoding for {holder} after field write-back")
+    values = target.values.astype(dtype, copy=True)
     axis_number = target.dims.index(field_axis)
-    index = (np.s_[:],) * axis_number + (position,)
-    values[index] = raw_value
-    updated = backend.with_values(target, values)
-    if backend.has_metadata(target):
-        notes.append(f"metadata: cleared attributes and encoding for {holder} after field write-back")
-    return backend.replace(data, holder, updated)
+    for name, value in raw:
+        position = backend.label_position(data, field_axis, name)
+        values[(np.s_[:],) * axis_number + (position,)] = value
+    return backend.replace(data, holder, backend.with_values(target, values))
 
 
 def _store_vector(frame: TidyArray, target: Vector, value: Any, text: str, notes: list[str]) -> Any:
@@ -554,6 +556,13 @@ def _store_vector(frame: TidyArray, target: Vector, value: Any, text: str, notes
         )
     component_axis = labelled[0]
     data = frame._data
+    field_axis = frame._field_axis if backend.has_axis(data, frame._field_axis) else None
+    holders = _holders(data, field_axis, backend) if field_axis is not None else []
+    if holders and all(backend.has_label(data, field_axis, name) and not backend.has_variable(data, name)
+                       for name in names):
+        # Every component is a field of the same holder: write them all with one copy of it.
+        writes = [(name, backend.sel(value, {component_axis: name}, drop=True), f"{text} [{name}]") for name in names]
+        return _write_labels(data, holders, field_axis, writes, notes, backend)
     for name in names:
         component = backend.sel(value, {component_axis: name}, drop=True)
         data = _store(frame._evolve(data), name, component, f"{text} [{name}]", notes)

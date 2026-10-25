@@ -30,6 +30,12 @@
   with a time zone stay on xarray; arrays have `.shape`.
 - Writing a field of a read-only in-memory array no longer notes that it
   was memory-mapped.
+- Printing a frame formats only the labels it shows, so frames with many
+  labels print at once.
+- A vector assignment into fields of one variable copies it once, not once
+  per component.
+- `filter` and the `slice` verbs on an unlabelled axis build only the kept
+  positions, using less than half the memory and time on large axes.
 
 ## 0.1.0 — 2026-10-24
 

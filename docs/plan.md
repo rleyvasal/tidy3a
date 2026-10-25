@@ -1225,7 +1225,7 @@ Planned (2026-10-24). The NumPy prototype (§13.1) showed that tidy3A's verbs ca
 | Operation | Covers today's use of |
 |---|---|
 | Describe: variables, each variable's axes and type, axis sizes, labels of an axis (or none), attributes | `.data_vars`, `.dims`, `.sizes`, `.indexes`, `.attrs` |
-| Select positions on axes (positions, slices, masks), attaching 1-based positions to an unlabelled axis first | `.isel`, `_with_positions` |
+| Select positions on axes (positions, slices, masks), labelling an unlabelled axis with the 1-based positions kept | `.isel`, `keep` |
 | Select labels on an axis, in the order asked | `.sel` |
 | Apply an elementwise operation under the alignment rules (exact labels, reorder by label with a note, labelled never with unlabelled) | arithmetic under `arithmetic_join="exact"`, `align_pair`, `xr.where` |
 | Reduce over named axes with `na_rm=` and `min_count=` | `reduce_array` |
@@ -1320,7 +1320,15 @@ Review fixes, priority 1: correctness (2026-10-24). An outside review found, and
 - Writing a field of a read-only in-memory array noted that it was memory-mapped; the note now appears only for memory maps.
 - The property tests now add joins and outside arrays whose labels are the same, reordered, partly different, repeated, or of another number type; they found that the NumPy backend failed to join data with no labels on an axis, now fixed.
 
-Results: the suite passes on both backends on current and minimum dependencies (NumPy 2.0.0, pandas 2.2.2, xarray 2024.6.0); the 65-case corpus is identical to the baseline on both. Matching 1M reordered labels takes 111 ms on xarray (132 ms before) and 186 ms on NumPy (157 ms before). Next: priority 2 (bounded label display, writing a vector once, positions kept by filters, benchmark order, high-cardinality grouping workloads), then priorities 3 and 4.
+Results: the suite passes on both backends on current and minimum dependencies (NumPy 2.0.0, pandas 2.2.2, xarray 2024.6.0); the 65-case corpus is identical to the baseline on both. Matching 1M reordered labels takes 111 ms on xarray (132 ms before) and 186 ms on NumPy (157 ms before). 
+Review fixes, priority 2: cheap wins (2026-10-24). Each has a test in `tests/test_costs.py` that failed first:
+
+- Printing a frame formats only the labels it shows (the first six and the last), not every label: 1M float labels printed in about 205 ms, now well under 1 ms; the output is unchanged.
+- A vector assignment whose components are fields of one holder, `mutate(assign([x, y, z], …))`, copies the holder once instead of once per component. Notes are unchanged, in the same order. On 2.5M points of four float32 fields: 12 → 10 ms, peak memory 105 → 67 MB.
+- `filter`, `slice`, `slice_head`, and `slice_tail` on an unlabelled axis build only the kept positions (backend `keep`, replacing `with_positions` followed by `isel`), not positions for the whole axis and then a copy of the kept ones. Filtering 10M unlabelled points to half: xarray 43 → 9.7 ms and peak 200 → 124 MB; NumPy 10.7 → 8.3 ms and 200 → 86 MB. Labels are the same 1-based int64 positions.
+- Benchmarks: each backend runs first in every other round, so neither always runs on a cache the other warmed; new workloads group 100,000 points into 90,000 groups (voxel-style), where xarray takes about 3.6 s and NumPy about 0.3 s, and run in `--quick` too. `benchmarks/run.py` has a `workloads()` function listing them.
+
+Results: the suite passes on both backends on current and minimum dependencies; the 65-case corpus is identical to the baseline on both; the demo agrees. The pinned benchmark has not been rerun. Next: priority 3 (grouping plans and kernels: exact `reduceat` where it stays bit-identical, groups reused within a step), then priority 4 (NumPy-only public input and output, packaging, one duration syntax).
 
 Precedents: xarray itself wraps several array libraries behind one data model; tidy3's verbs build one lazy Polars query whose execution engine is chosen when it is collected (`collect(engine=…)`); dplyr's verbs run on different backends (dbplyr, dtplyr) with one set of semantics.
 

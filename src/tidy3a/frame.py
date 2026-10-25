@@ -248,15 +248,18 @@ def _axis_row(frame: TidyArray, axis: Hashable) -> tuple[str, str]:
 def _format_labels(values: np.ndarray) -> str:
     if len(values) == 0:
         return "no labels (0 positions)"
+    # Only the labels shown are formatted: the first few and the last.
+    cut = len(values) > _LABELS_SHOWN + 2
+    picked = np.concatenate([values[:_LABELS_SHOWN], values[-1:]]) if cut else values
     if values.dtype.kind == "M":
         # Times to the second, or dates alone when every label is at midnight.
         seconds = values.astype("datetime64[s]")
         midnight = (seconds == seconds.astype("datetime64[D]")).all()
-        shown = list(np.datetime_as_string(seconds, unit="D" if midnight else "s"))
+        shown = list(np.datetime_as_string(picked.astype("datetime64[s]"), unit="D" if midnight else "s"))
     elif values.dtype.kind == "f":
-        shown = [format(value, ".10g") for value in values]  # display only; labels are unchanged
+        shown = [format(value, ".10g") for value in picked]  # display only; labels are unchanged
     else:
-        shown = [str(value) for value in values]
-    if len(shown) > _LABELS_SHOWN + 2:
+        shown = [str(value) for value in picked]
+    if cut:
         shown = [*shown[:_LABELS_SHOWN], "…", shown[-1]]
     return "  ".join(shown)

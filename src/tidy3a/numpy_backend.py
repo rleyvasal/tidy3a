@@ -30,7 +30,7 @@ from typing import Any
 import numpy as np
 
 from tidy3a import labels as exact
-from tidy3a.backend import is_xarray, memory_mapped
+from tidy3a.backend import is_xarray, kept_positions, memory_mapped
 from tidy3a.errors import TidyError
 from tidy3a.labels import LabelError, exact_cast
 from tidy3a.labels import kind as _kind
@@ -650,12 +650,16 @@ class NumpyBackend:
     def axis_coordinate(self, data: NumpyData, axis: Hashable) -> NumpyArray:
         return self.axis_labels(data, axis)
 
-    def with_positions(self, data: NumpyData, axis: Hashable) -> NumpyData:
+    def keep(self, data: NumpyData, axis: Hashable, index: Any) -> NumpyData:
+        """Positions on *axis*, as ``XarrayBackend.keep``: only the kept positions are built."""
         if axis in data.coords:
-            return data
-        coords = dict(data.coords)
-        coords[axis] = _freeze(np.arange(1, data.sizes[axis] + 1))
-        return data.evolve(coords=coords)
+            return self.isel(data, {axis: index})
+        index, kept = kept_positions(index, data.sizes[axis])
+        out = self.isel(data, {axis: index})
+        np.add(kept, 1, out=kept)  # the indexer has been used; it becomes the labels
+        coords = dict(out.coords)
+        coords[axis] = _freeze(kept)
+        return out.evolve(coords=coords)
 
     # ── Arrays ──────────────────────────────────────────────────────────────
 
