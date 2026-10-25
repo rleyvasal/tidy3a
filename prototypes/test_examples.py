@@ -1,8 +1,8 @@
 """Milestone 0: the acceptance examples, computed in plain xarray.
 
-Each test is the xarray program that the tidy3A code in
+Each test is the xarray program that the tidy3a code in
 docs/m0-examples.md would compile to, run on small synthetic data with
-answers worked out by hand. The tidy3A spellings are in the comments.
+answers worked out by hand. The tidy3a spellings are in the comments.
 """
 
 import numpy as np

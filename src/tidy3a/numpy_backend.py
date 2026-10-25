@@ -32,8 +32,8 @@ import numpy as np
 from tidy3a import grouped
 from tidy3a import labels as exact
 from tidy3a.backend import is_xarray, kept_positions, memory_mapped
-from tidy3a.core.errors import LabelError, ShapeError
 from tidy3a.errors import TidyError
+from tidy3a.labelarray.errors import LabelError, ShapeError
 from tidy3a.labels import exact_cast
 from tidy3a.labels import kind as _kind
 from tidy3a.labels import missing as _missing
@@ -370,7 +370,7 @@ _REDUCERS = {
 
 
 def _reduce_data(data: np.ndarray, op: str, axes: int | tuple[int, ...], na_rm: bool, min_count: int | None) -> Any:
-    """NumPy reductions with tidy3A's missing-value rules, as the xarray backend applies them."""
+    """NumPy reductions with tidy3a's missing-value rules, as the xarray backend applies them."""
     kind = data.dtype.kind
     numbers = (axes,) if isinstance(axes, int) else axes
     # Only some reductions need to know where values are missing; finding out reads the whole array.

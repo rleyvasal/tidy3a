@@ -1,7 +1,7 @@
-"""Array backends (plan milestone 9): where tidy3A's verbs meet an array library.
+"""Array backends (plan milestone 9): where tidy3a's verbs meet an array library.
 
 The verbs, expressions, formulas, alignment rules, and inspection output hold
-every tidy3A rule and message. They reach stored data only through a
+every tidy3a rule and message. They reach stored data only through a
 backend: a collection of variables sharing axes and labels, and the arrays
 in it. Arrays expose a small common surface (``dims``, ``sizes``, ``ndim``,
 ``dtype``, and ``values``, which computes NumPy values); everything else,
@@ -14,7 +14,7 @@ default when xarray is installed and wraps the xarray code the package used
 before the interface existed. ``NumpyBackend``
 (``tidy3a.numpy_backend``) is experimental and holds eager, in-memory data
 only. ``set_backend`` chooses the default, and ``tidy()`` and the readers take
-``backend=``. A backend raises tidy3A errors only where a limitation is its
+``backend=``. A backend raises tidy3a errors only where a limitation is its
 own (computing a median of a whole chunked array); rule errors and their
 hints come from the callers.
 
@@ -249,7 +249,7 @@ class Backend(Protocol):
     # ── Reductions and grouping ───────────────────────────────────────────────
 
     def reduce(self, array: Any, op: Any, axes: Any, na_rm: Any = False, min_count: Any = None) -> Any:
-        """*op* over *axes* with tidy3A's missing-value rules (``na_rm``, ``min_count``)."""
+        """*op* over *axes* with tidy3a's missing-value rules (``na_rm``, ``min_count``)."""
 
     def group_reduce(self, array: Any, op: Any, groups: Any, others: Any, na_rm: Any, min_count: Any) -> Any:
         """*op* per group of *groups* over its axis and *others*."""

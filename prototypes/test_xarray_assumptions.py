@@ -40,7 +40,7 @@ def test_exact_join_rejects_different_label_sets():
 
 
 def test_exact_join_rejects_same_labels_in_different_order():
-    # §5.5 says tidy3A must reorder before the exact check, because xarray's
+    # §5.5 says tidy3a must reorder before the exact check, because xarray's
     # exact join treats a different order as unequal.
     a = xr.DataArray([1.0, 2.0], dims="sensor", coords={"sensor": ["front", "rear"]})
     b = xr.DataArray([10.0, 20.0], dims="sensor", coords={"sensor": ["rear", "front"]})
@@ -60,7 +60,7 @@ def test_reorder_by_label_then_exact_join_pairs_correctly():
 
 def test_unlabeled_axis_pairs_with_labeled_axis_by_length():
     # §5.5: xarray matches an axis without labels by length alone, which is
-    # why tidy3A raises instead.
+    # why tidy3a raises instead.
     labeled = xr.DataArray([1.0, 2.0], dims="point", coords={"point": [3, 7]})
     unlabeled = xr.DataArray([10.0, 20.0], dims="point")
     with xr.set_options(arithmetic_join="exact"):
@@ -77,7 +77,7 @@ def test_dot_respects_exact_join():
 
 
 def test_merge_raises_on_same_named_variables_with_different_values():
-    # §5.5: xr.merge does not rename, so tidy3A renames clashes first.
+    # §5.5: xr.merge does not rename, so tidy3a renames clashes first.
     a = xr.Dataset({"values": ("point", [1.0, 2.0])})
     b = xr.Dataset({"values": ("point", [5.0, 6.0])})
     with pytest.raises(xr.MergeError):
@@ -188,14 +188,14 @@ def test_groupby_value_field_gives_axis_of_sorted_unique_values():
 
 
 def test_groupby_bins_drops_values_outside_every_bin():
-    # §5.4: xarray drops them silently; tidy3A raises instead.
+    # §5.4: xarray drops them silently; tidy3a raises instead.
     distance = xr.DataArray([5.0, 15.0, 80.0], dims="point", name="distance")
     out = distance.groupby_bins(distance, [0, 10, 20]).count()
     assert int(out.sum()) == 2
 
 
 def test_float_reductions_skip_missing_values_by_default():
-    # §5.4: why tidy3A passes skipna explicitly.
+    # §5.4: why tidy3a passes skipna explicitly.
     da = xr.DataArray([1.0, np.nan, 3.0], dims="time")
     assert float(da.mean()) == 2.0
     assert np.isnan(float(da.mean(skipna=False)))

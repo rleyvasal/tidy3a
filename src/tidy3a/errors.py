@@ -1,11 +1,11 @@
-"""Exceptions raised by tidy3A.
+"""Exceptions raised by tidy3a.
 
-Every tidy3A error is a ``ValueError``, so code that already catches bad
+Every tidy3a error is a ``ValueError``, so code that already catches bad
 input keeps working; the subclasses say which step rejected it. The NumPy
-modules that are becoming a library (``tidy3a.core``) raise their own
-family, ``CoreError``; tidy3A's ``LabelError`` and ``AlignError`` inherit
+modules that are becoming a library (``tidy3a.labelarray``) raise their
+own family, ``LabelArrayError``; tidy3a's ``LabelError`` and ``AlignError`` inherit
 from both, and ``translating`` raises a library error that escapes through
-a verb, a reader, ``tidy()``, or ``collect()`` again as tidy3A's class.
+a verb, a reader, ``tidy()``, or ``collect()`` again as tidy3a's class.
 """
 
 from __future__ import annotations
@@ -14,11 +14,11 @@ from collections.abc import Callable
 from functools import wraps
 from typing import Any
 
-from tidy3a.core import errors as core
+from tidy3a.labelarray import errors as labelarray
 
 
 class TidyError(ValueError):
-    """Base class for tidy3A errors."""
+    """Base class for tidy3a errors."""
 
 
 class ReadError(TidyError):
@@ -53,19 +53,19 @@ class SummariseError(TidyError):
     """``summarise`` cannot reduce a summary to one value per group."""
 
 
-class AlignError(TidyError, core.AlignError):
+class AlignError(TidyError, labelarray.AlignError):
     """Labels on a shared axis do not match."""
 
 
-class LabelError(TidyError, core.LabelError):
+class LabelError(TidyError, labelarray.LabelError):
     """Labels that cannot be ordered, compared, or looked up, or a label that is absent."""
 
 
-_FROM_CORE = {core.LabelError: LabelError, core.AlignError: AlignError}
+_FROM_LIBRARY = {labelarray.LabelError: LabelError, labelarray.AlignError: AlignError}
 
 
 def translating(function: Callable) -> Callable:
-    """Raise a library error escaping *function* again as the tidy3A class, keeping the message and traceback."""
+    """Raise a library error escaping *function* again as the tidy3a class, keeping the message and traceback."""
 
     @wraps(function)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -73,8 +73,8 @@ def translating(function: Callable) -> Callable:
             return function(*args, **kwargs)
         except TidyError:
             raise
-        except core.CoreError as error:
-            tidy = next((cls for base, cls in _FROM_CORE.items() if isinstance(error, base)), TidyError)
+        except labelarray.LabelArrayError as error:
+            tidy = next((cls for base, cls in _FROM_LIBRARY.items() if isinstance(error, base)), TidyError)
             raise tidy(*error.args).with_traceback(error.__traceback__) from None
 
     return wrapper

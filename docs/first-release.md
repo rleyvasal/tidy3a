@@ -47,7 +47,7 @@ promise bounded memory use.
   derive from summary results in a following `mutate`.
 - `tolerance=` is implemented only for `left_join`. Other joins use exact
   labels. `case_when` is not implemented; use `if_else` for binary choices.
-- xarray on the left of an arithmetic operator does not defer to a tidy3A
+- xarray on the left of an arithmetic operator does not defer to a tidy3a
   expression. Write `x * R` rather than `R * x`, or use `dot()`.
 - Integer arithmetic follows NumPy. For unsigned data, promote before a
   subtraction that may be negative: `nir * 1.0 - red`.

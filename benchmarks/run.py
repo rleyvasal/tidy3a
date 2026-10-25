@@ -1,4 +1,4 @@
-"""Reference workloads for comparing tidy3A's backends (plan milestone 9, step 5).
+"""Reference workloads for comparing tidy3a's backends (plan milestone 9, step 5).
 
 Run through ``scripts/bench.sh``, which builds the pinned environment. Each
 workload runs on both backends; their results are checked to be identical
@@ -243,7 +243,7 @@ def main() -> None:
     selected = workloads(args.quick)
 
     env = environment()
-    print(f"tidy3A {ta.__version__}, NumPy {np.__version__}, xarray {xr.__version__}, Python {env['python']}, "
+    print(f"tidy3a {ta.__version__}, NumPy {np.__version__}, xarray {xr.__version__}, Python {env['python']}, "
           f"{env['cpu']}; commit {(env['git_commit'] or '?')[:8]}{' (uncommitted changes)' if env['git_dirty'] else ''}")
     print(f"{'workload':58s} {'xarray':>9s} {'numpy':>9s} {'numpy/xarray':>13s}   (median ms)")
     results = {}

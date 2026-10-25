@@ -65,7 +65,7 @@ class Verb:
     def __call__(self, frame: Any) -> Any:
         if not isinstance(frame, TidyArray):
             raise TypeError(
-                f"{self.text} works on tidy3A data; wrap xarray objects with tidy() "
+                f"{self.text} works on tidy3a data; wrap xarray objects with tidy() "
                 "or read files with read_array()"
             )
         return frame._apply_verb(self)

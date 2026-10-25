@@ -1,6 +1,6 @@
 # Backends
 
-tidy3A's verbs, rules, and messages are the same on every backend; a backend
+tidy3a's verbs, rules, and messages are the same on every backend; a backend
 only stores the data and computes with it (plan milestone 9). The xarray
 backend is the default. The NumPy backend is experimental:
 

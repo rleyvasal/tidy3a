@@ -1,10 +1,10 @@
-"""Using tidy3A with NumPy alone (review priority 4): input, output, defaults, and durations.
+"""Using tidy3a with NumPy alone (review priority 4): input, output, defaults, and durations.
 
 Without xarray, arrays from the calling code are built with ``read_array``:
 a one-variable ``TidyArray`` stands for its variable in any expression, on
 either backend. ``TidyArray.to_dict()`` gives the data as NumPy arrays, in
 the layout of xarray's ``Dataset.to_dict(data="array")``. Durations in
-``bins()`` are read by tidy3A itself, the same whether pandas is installed.
+``bins()`` are read by tidy3a itself, the same whether pandas is installed.
 """
 
 import subprocess

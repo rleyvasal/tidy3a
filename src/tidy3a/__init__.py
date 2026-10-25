@@ -1,4 +1,4 @@
-"""tidy3A: tidy-style verbs for named multidimensional arrays."""
+"""tidy3a: tidy-style verbs for named multidimensional arrays."""
 
 from tidy3a.__version__ import __version__
 from tidy3a.backend import set_backend

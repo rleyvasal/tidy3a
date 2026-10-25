@@ -30,7 +30,7 @@ dependencies = [
 # chunked, and memory-mapped data. 2.2.2 is the first pandas built for NumPy 2;
 # older wheels fail to import alongside numpy>=2.0.
 xarray = ["xarray>=2024.6", "pandas>=2.2.2"]
-# opt_einsum: xarray uses it for dot when installed; the tests check tidy3A's results do not change.
+# opt_einsum: xarray uses it for dot when installed; the tests check tidy3a's results do not change.
 dev = ["xarray>=2024.6", "pandas>=2.2.2", "pytest>=7.0", "flox>=0.9", "ipython>=8.0", "dask[array]", "opt_einsum"]
 
 [project.urls]

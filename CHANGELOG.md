@@ -1,57 +1,80 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-10-25
+
+NumPy is now the only requirement, and labels match under one exact rule.
+Results are numerically unchanged from 0.1.0; every change below is a
+behaviour fix, a new way in or out, or a speed-up.
+
+### Installing
+
+- `pip install tidy3a` installs NumPy and tidy3a. `pip install 'tidy3a[xarray]'`
+  adds xarray and pandas, which xarray inputs and outputs and lazy, chunked,
+  or memory-mapped data need; existing installs that use xarray should add
+  the extra. Without xarray the default backend is NumPy; where xarray is
+  needed and missing, the error says so and names the extra.
+- `import tidy3a` no longer imports xarray or pandas: 41 ms instead of 218.
+
+### Backends
 
 - Verbs reach stored data through a backend interface; the xarray backend
-  is the default and behaves as before.
+  is the default when xarray is installed and behaves as before.
 - Experimental NumPy backend for eager, in-memory data:
   `set_backend("numpy")`, or `backend="numpy"` on `tidy()`, `read_array()`,
   and `read_binary()`. Lazy, chunked, and memory-mapped data stay on xarray.
-  The NumPy backend keeps attributes but not xarray storage encodings;
-  `docs/backends.md` lists the deliberate differences. It stays experimental:
-  it meets the correctness, import-time, and size criteria but not yet the
-  speed and dependency ones (plan milestone 9).
+  It keeps attributes but not xarray storage encodings; `docs/backends.md`
+  lists the deliberate differences. It stays experimental: it meets the
+  correctness, dependency, import-time, and size criteria but not yet the
+  speed one (plan milestone 9).
+- Without xarray, arrays from the calling code can be one-variable
+  `read_array` results, and `TidyArray.to_dict()` returns NumPy arrays in
+  xarray's `to_dict` layout.
+
+### Labels and alignment
+
+- One exact rule for labels in alignment and joins, on both backends:
+  labels match only when they are the same kind and exactly equal. On the
+  xarray backend, pandas compared integer and float labels through
+  float64, so the label `2**53 + 1` was paired with `2**53`; that is now an
+  `AlignError`. A join whose labels cannot all be held exactly in the type
+  it keeps them in, or that would match repeated labels that differ
+  between the two sides, is an `AlignError` too.
+- Repeated labels on an axis that must be matched in another order are an
+  `AlignError` naming the axis, instead of a pandas `InvalidIndexError`.
+- Durations in `bins()` are read by tidy3a itself, the same whether or not
+  pandas is installed; `"1h30min"` and `"2 weeks"` work everywhere, and
+  months, years, and clock or ISO forms are an error.
+
+### Fixes
+
 - `dot` always uses NumPy's `einsum`. With `opt_einsum` installed, xarray
   used it instead, which changed results in the last digits and made later
   steps of a pipeline about twice as slow.
-- Repeated labels on an axis that must be matched in another order are an
-  `AlignError` naming the axis, instead of a pandas `InvalidIndexError`.
-- One exact rule for labels in alignment and joins, on both backends: labels match only when they are the same kind and exactly
-  equal. On the xarray backend, pandas compared integer and float labels
-  through float64, so the label `2**53 + 1` was paired with `2**53`; that is
-  now an `AlignError`. A join whose labels cannot all be held exactly in the
-  type it keeps them in, or that would match repeated labels that differ
-  between the two sides, is an `AlignError` too.
-- NumPy backend fixes: labels from the calling code are copied once, so
-  changing the caller's array later cannot change a frame; label indexes
-  are released with their labels; join gaps promote types as xarray does;
+- NumPy backend: labels from the calling code are copied once, so changing
+  the caller's array later cannot change a frame; label indexes are
+  released with their labels; join gaps promote types as xarray does;
   joining with data that has no labels on an axis works; a lazy array from
   the calling code is an error before anything is computed; time labels
   with a time zone stay on xarray; arrays have `.shape`.
 - Writing a field of a read-only in-memory array no longer notes that it
   was memory-mapped.
-- Printing a frame formats only the labels it shows, so frames with many
-  labels print at once.
-- A vector assignment into fields of one variable copies it once, not once
-  per component.
-- `filter` and the `slice` verbs on an unlabelled axis build only the kept
-  positions, using less than half the memory and time on large axes.
+- The package is written `tidy3a` everywhere, in messages and documentation,
+  as it is installed and imported.
+
+### Speed
+
 - Grouped reductions over many small groups run in one pass instead of one
-  step per group, with bit-identical results: 90,000 groups of 100,000
-  points take about 30 ms instead of 4.8 s on the xarray backend.
+  step per group, with bit-identical results, and grouping with many groups
+  or many points is faster on both backends: 90,000 groups of 100,000
+  points take about 12 ms instead of 4.8 s on the xarray backend.
 - `group_by` keeps the groups it found, so the next verb does not find them
   again.
-- NumPy is the only requirement: `pip install 'tidy3a[xarray]'` adds xarray
-  and pandas. Without them, the default backend is NumPy, arrays from the
-  calling code can be one-variable `read_array` results, and
-  `TidyArray.to_dict()` returns NumPy arrays in xarray's `to_dict` layout.
-- Grouping with many groups or many points is faster on both backends:
-  group labels are converted in one call and group sizes counted once, and
-  the NumPy backend puts group results back on each point by indexing. 90,000
-  groups take about 12 ms instead of 31 ms; results are unchanged.
-- Durations in `bins()` are read by tidy3A itself, the same whether or not
-  pandas is installed; `"1h30min"` and `"2 weeks"` work everywhere, and
-  months, years, and clock or ISO forms are an error.
+- `filter` and the `slice` verbs on an unlabelled axis build only the kept
+  positions, using less than half the memory and time on large axes.
+- A vector assignment into fields of one variable copies it once, not once
+  per component.
+- Printing a frame formats only the labels it shows, so frames with many
+  labels print at once.
 
 ## 0.1.0 — 2026-10-24
 
@@ -88,10 +111,10 @@ First release.
   plot3's conventions, subscripts as axis indices, labels, and positions,
   `\sum` with optional checked bounds, `bind=` for index letters and
   values, and show-back of how each formula was read.
-- Notebook layer (`%load_ext tidy3a.jupyter`): bare names in tidy3A verbs,
+- Notebook layer (`%load_ext tidy3a.jupyter`): bare names in tidy3a verbs,
   settled when the verb runs, with an error when a name is both data and a
-  notebook variable; `[x, y, z] = …` inside `mutate`; only tidy3A's own
-  calls are rewritten, so tidy3 and tidy3A share a notebook.
+  notebook variable; `[x, y, z] = …` inside `mutate`; only tidy3a's own
+  calls are rewritten, so tidy3 and tidy3a share a notebook.
 - `n()` counts observations on the axes every non-scalar variable shares.
 - Inspection output shows time labels to the second (or as dates) and
   floats to 10 significant digits, with a gap before each axis role.
@@ -103,6 +126,6 @@ First release.
   validate both distributions' metadata. The build requires setuptools
   77.0.3 or newer for the license metadata.
 - Requires Python 3.11+, NumPy 2.0+, pandas 2.2.2+ (now declared, as
-  tidy3A imports it directly), and xarray 2024.6+.
+  tidy3a imports it directly), and xarray 2024.6+.
 - Publishing a GitHub Release runs the version check and reusable CI gate,
   then uploads the validated distributions to PyPI through trusted publishing.

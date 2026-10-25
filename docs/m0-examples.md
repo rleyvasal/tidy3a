@@ -1,8 +1,8 @@
 # Milestone 0: acceptance examples in two styles
 
-Status: prototype comparison for review. None of the tidy3A code below is implemented. Each example's plain-xarray equivalent runs in `prototypes/test_examples.py` on small synthetic data with hand-checked answers, and `prototypes/test_xarray_assumptions.py` checks the xarray and NumPy behavior the plan relies on. Both pass (39 tests, xarray 2026.9.0, NumPy 2.5.4).
+Status: prototype comparison for review. None of the tidy3a code below is implemented. Each example's plain-xarray equivalent runs in `prototypes/test_examples.py` on small synthetic data with hand-checked answers, and `prototypes/test_xarray_assumptions.py` checks the xarray and NumPy behavior the plan relies on. Both pass (39 tests, xarray 2026.9.0, NumPy 2.5.4).
 
-The question this answers (plan §5.1, milestone 0): does `select` with a declared **field axis** read better than the **stars style**, where fields become separate variables (stars' `split`, tidy3A's `variables_from=`) and `select` picks only variables?
+The question this answers (plan §5.1, milestone 0): does `select` with a declared **field axis** read better than the **stars style**, where fields become separate variables (stars' `split`, tidy3a's `variables_from=`) and `select` picks only variables?
 
 - **Style A, field axis:** `read_array(..., field_axis="feature")`. One array; field labels act as columns.
 - **Style B, stars style:** `read_array(..., variables_from="feature")`. One variable per field, as after stars' `split(x, "feature")`. This comparison was written with a re-packing helper, `merge(x, y, z, along="feature")` after stars' `merge()`; since decided: `[x, y, z]` rebuilds the recorded axis (plan §5.2), so Style B's vector line now matches Style A.

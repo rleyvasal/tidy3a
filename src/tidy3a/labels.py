@@ -21,7 +21,7 @@ from typing import Any
 
 import numpy as np
 
-from tidy3a.core.errors import LabelError
+from tidy3a.labelarray.errors import LabelError
 
 # Label kinds that can match each other. Booleans, numbers, times, durations,
 # text, and bytes never match across kinds, as in pandas: True is not 1.

@@ -30,7 +30,7 @@ from tidy3a.grouped import Grouping
 
 
 class Expr:
-    """Base class for tidy3A expressions; combine them with Python operators."""
+    """Base class for tidy3a expressions; combine them with Python operators."""
 
     __hash__ = None  # type: ignore[assignment]  # == builds an expression
     # NumPy values on the left defer to the expression's reflected operators.
@@ -135,7 +135,7 @@ def check_name(ref: Ref, ctx: Context) -> bool:
             f'"{ref.name}" is both data and a notebook variable ({ref.name} = {shown}).\n'
             f'  data:      col("{ref.name}")\n'
             f'  notebook:  env("{ref.name}")\n'
-            "  tidy3 lets data win here; tidy3A asks, because array notebooks reuse short names."
+            "  tidy3 lets data win here; tidy3a asks, because array notebooks reuse short names."
         )
     return data
 
@@ -309,7 +309,7 @@ def env(name: str) -> Literal:
 
 
 def if_else(condition: Any, true: Any, false: Any) -> Call:
-    """*true* where *condition* holds, else *false*; tidy3A's masking function."""
+    """*true* where *condition* holds, else *false*; tidy3a's masking function."""
     return Call("if_else", (as_expr(condition), as_expr(true), as_expr(false)))
 
 
@@ -489,7 +489,7 @@ def evaluate(node: Expr, ctx: Context) -> Any:
     if isinstance(node, Call):
         function = FUNCTIONS.get(node.name)
         if function is None:
-            raise TidyError(f"{node.name}() is not a tidy3A function")
+            raise TidyError(f"{node.name}() is not a tidy3a function")
         return function(node, ctx)
     if isinstance(node, Reduce):
         return _evaluate_reduce(node, ctx)
@@ -519,7 +519,7 @@ def _evaluate_binary(node: BinOp, ctx: Context) -> Any:
 
 
 def combine(op: Callable, left: Any, right: Any, left_text: str, right_text: str, ctx: Context) -> Any:
-    """Apply *op* under tidy3A's alignment rules."""
+    """Apply *op* under tidy3a's alignment rules."""
     for value, text in ((left, left_text), (right, right_text)):
         if isinstance(value, np.ndarray) and value.ndim:
             raise TidyError(
@@ -786,7 +786,7 @@ def _value_groups(key: ValueKey, axis: Hashable, values: Any, backend: Any) -> G
 
 
 def _pandas() -> Any:
-    """pandas when installed; it is optional, with NumPy fallbacks where tidy3A uses it."""
+    """pandas when installed; it is optional, with NumPy fallbacks where tidy3a uses it."""
     try:
         import pandas
     except ImportError:
@@ -865,7 +865,7 @@ _UNITS = {
 def _duration(text: str, key: ValueKey) -> np.timedelta64:
     """A duration such as "30 days", "2D", or "1h30min": numbers with units, added exactly.
 
-    tidy3A reads durations itself, so a duration means the same whether or
+    tidy3a reads durations itself, so a duration means the same whether or
     not pandas is installed.
     """
     import re

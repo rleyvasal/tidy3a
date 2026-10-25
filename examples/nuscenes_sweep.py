@@ -3,7 +3,7 @@
     python examples/nuscenes_sweep.py /path/to/nuscenes-mini
 
 The nuScenes tables are read directly as JSON to find a sweep and its
-calibration; the nuScenes SDK is not needed. tidy3A does the numerical
+calibration; the nuScenes SDK is not needed. tidy3a does the numerical
 work, and the script checks it against an independent NumPy calculation.
 """
 
@@ -102,7 +102,7 @@ def main(root: Path) -> None:
 
 
 def check(path: Path, calibration: dict, R: xr.DataArray, nearby, rings) -> None:
-    """The same calculation in plain NumPy, written independently of tidy3A."""
+    """The same calculation in plain NumPy, written independently of tidy3a."""
     points = np.fromfile(path, dtype="<f4").reshape(-1, 5)  # as the nuScenes SDK reads it
     matrix = rotation_from_wxyz(calibration["rotation"])
     vehicle = points[:, :3].astype(float) @ matrix.T + np.asarray(calibration["translation"])
@@ -126,7 +126,7 @@ def check(path: Path, calibration: dict, R: xr.DataArray, nearby, rings) -> None
     for name, ok in checks.items():
         print(f"{'ok  ' if ok else 'FAIL'} {name}")
     if not all(checks.values()):
-        raise SystemExit("tidy3A and the independent calculation disagree")
+        raise SystemExit("tidy3a and the independent calculation disagree")
 
 
 if __name__ == "__main__":

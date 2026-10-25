@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Time tidy3A's backends on the reference workloads, in a pinned environment.
+# Time tidy3a's backends on the reference workloads, in a pinned environment.
 #
 # The environment is built fresh from benchmarks/requirements.txt (exact
-# versions) plus tidy3A itself, so packages installed elsewhere on this
+# versions) plus tidy3a itself, so packages installed elsewhere on this
 # machine cannot change the results: xarray switches to opt_einsum when it is
 # installed, for example. The environment is recorded with the results.
 #

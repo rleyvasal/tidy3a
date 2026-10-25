@@ -1,10 +1,10 @@
-# tidy3A
+# tidy3a
 
 Tidy-style verbs for named multidimensional arrays: point clouds, images,
 sensor measurements, scientific and complex-valued arrays. Built on xarray
 and NumPy, in the spirit of [tidy3](https://github.com/rleyvasal/tidy3).
 
-**Status:** version `0.1.0` is prepared for the first release, not yet published.
+**Status:** version `0.2.0`; `0.1.0` is on [PyPI](https://pypi.org/project/tidy3a/).
 The design decisions are in [docs/plan.md](docs/plan.md); the rules fit on one page in
 [docs/decisions.md](docs/decisions.md).
 
@@ -15,7 +15,7 @@ with xarray, for xarray inputs and outputs and for lazy and memory-mapped data:
 python -m pip install -e ".[xarray]"
 ```
 
-Without the extra, tidy3A needs NumPy alone: in-memory pipelines run on the
+Without the extra, tidy3a needs NumPy alone: in-memory pipelines run on the
 experimental NumPy backend, arrays come in through `read_array` and
 `read_binary`, and results go out through `pull()` and `to_dict()`.
 

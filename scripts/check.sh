@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run what CI runs (.github/workflows/tests.yml), locally, before pushing.
 #
-# Each job gets a fresh environment with only tidy3A's declared
+# Each job gets a fresh environment with only tidy3a's declared
 # dependencies, so nothing installed on this machine (tidy3, plot3, a newer
 # xarray) can hide a failure that CI would see.
 #
@@ -52,9 +52,13 @@ if [[ $# -eq 0 ]]; then
       uv venv -q --python 3.12 "$work/clean" &&
       uv pip install -q --python "$work/clean/bin/python" "$work"/dist/*.whl &&
       (cd "$work" && "$work/clean/bin/python" -c \
-        "import tidy3a, numpy as np; print(tidy3a.read_array(np.zeros(3), dims=['t']))")
+        "import tidy3a, numpy as np; print(tidy3a.read_array(np.zeros(3), dims=['t']).to_dict())") &&
+      uv venv -q --python 3.12 "$work/full" &&
+      uv pip install -q --python "$work/full/bin/python" "$(ls "$work"/dist/*.whl)[xarray]" &&
+      (cd "$work" && "$work/full/bin/python" -c \
+        "import tidy3a, xarray as xr; print(tidy3a.tidy(xr.Dataset({'a': ('t', [1.0])})).collect())")
   }
-  run "source distribution, metadata, and installed wheel" distribution_job
+  run "source distribution, metadata, and installed wheel (plain and with the xarray extra)" distribution_job
 fi
 
 printf '\n'

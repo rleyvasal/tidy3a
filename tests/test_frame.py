@@ -113,7 +113,7 @@ def test_to_xarray_and_collect_share_values():
 def test_pipe_calls_the_verb():
     frame = tidy(labelled())
     assert (frame >> (lambda f: f)) is frame
-    with pytest.raises(TypeError, match="must be a tidy3A verb"):
+    with pytest.raises(TypeError, match="must be a tidy3a verb"):
         frame >> 3
 
 

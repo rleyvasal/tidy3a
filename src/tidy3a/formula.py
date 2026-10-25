@@ -55,7 +55,7 @@ _GREEK = {
     "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa",
     "lambda", "mu", "nu", "xi", "rho", "sigma", "tau", "phi", "chi", "psi", "omega",
 }
-# LaTeX command or plain-text name -> tidy3A function
+# LaTeX command or plain-text name -> tidy3a function
 _FUNCS = {
     "sin": "sin", "cos": "cos", "tan": "tan", "sinh": "sinh", "cosh": "cosh", "tanh": "tanh",
     "arcsin": "arcsin", "arccos": "arccos", "arctan": "arctan",

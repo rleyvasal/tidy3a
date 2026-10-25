@@ -1,4 +1,4 @@
-"""tidy3A on three public sample datasets, each result checked against plain xarray.
+"""tidy3a on three public sample datasets, each result checked against plain xarray.
 
     python examples/sample_data.py /path/to/samples
 
@@ -9,7 +9,7 @@ The directory holds:
 - L7_ETMs.tif: a Landsat 7 scene, band × y × x (the R stars package's example)
 
 Reading NetCDF needs scipy; reading GeoTIFF needs rioxarray. Neither is a
-tidy3A dependency: xarray opens the files, and tidy() wraps them.
+tidy3a dependency: xarray opens the files, and tidy() wraps them.
 """
 
 from __future__ import annotations
@@ -176,7 +176,7 @@ def main(root: Path) -> None:
     failed = [name for name, ok in RESULTS if not ok]
     print(f"\n{len(RESULTS) - len(failed)} of {len(RESULTS)} checks passed")
     if failed:
-        raise SystemExit("tidy3A and plain xarray disagree: " + ", ".join(failed))
+        raise SystemExit("tidy3a and plain xarray disagree: " + ", ".join(failed))
 
 
 if __name__ == "__main__":

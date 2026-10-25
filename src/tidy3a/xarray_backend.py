@@ -1,4 +1,4 @@
-"""The xarray backend (plan milestone 9): tidy3A's default storage and computation.
+"""The xarray backend (plan milestone 9): tidy3a's default storage and computation.
 
 Collections are ``xr.Dataset`` objects and arrays are ``xr.DataArray``
 objects; each method is the xarray code the package used before the backend

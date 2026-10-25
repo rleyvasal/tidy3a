@@ -1,4 +1,4 @@
-# tidy3A tidy-layer rules
+# tidy3a tidy-layer rules
 
 The one-page rule set from plan §1.1: if the tidy layer's rules stop fitting on this page, simplify the layer rather than adding rules. Details, reasons, and precedents are in `docs/plan.md`, with section references below.
 

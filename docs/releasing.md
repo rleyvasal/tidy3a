@@ -1,4 +1,4 @@
-# Releasing tidy3A
+# Releasing tidy3a
 
 The release workflow is `.github/workflows/release.yml`. Publishing a GitHub
 Release starts it. It requires a tag matching the package version, runs the

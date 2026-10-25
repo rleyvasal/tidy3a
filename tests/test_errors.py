@@ -1,12 +1,12 @@
-"""The library's errors and tidy3A's (milestone 10, step A3).
+"""The library's errors and tidy3a's (milestone 10, step A3).
 
 The NumPy modules that will become a library raise their own errors, a
-family of ``ValueError`` under ``tidy3a.core.errors.CoreError``, and know
-nothing of tidy3A. tidy3A's ``LabelError`` and ``AlignError`` inherit from
+family of ``ValueError`` under ``tidy3a.labelarray.errors.LabelArrayError``, and know
+nothing of tidy3a. tidy3a's ``LabelError`` and ``AlignError`` inherit from
 both ``TidyError`` and the library's classes, and a library error that
 escapes through a verb, a reader, ``tidy()``, or ``collect()`` is raised
-again as tidy3A's class, so ``except TidyError`` and ``except
-core.LabelError`` both keep working.
+again as tidy3a's class, so ``except TidyError`` and ``except
+labelarray.LabelError`` both keep working.
 """
 
 import ast
@@ -18,35 +18,35 @@ import xarray as xr
 
 from tidy3a import AlignError, TidyError, col, mutate, read_array, tidy
 from tidy3a import errors as tidy_errors
-from tidy3a.core import errors as core
+from tidy3a.labelarray import errors as labelarray
 from tidy3a.numpy_backend import NUMPY, NumpyArray
 
 
 def test_the_library_errors_are_value_errors_in_one_family():
     for name in ("LabelError", "AlignError", "ShapeError"):
-        assert issubclass(getattr(core, name), core.CoreError)
-    assert issubclass(core.CoreError, ValueError) and not issubclass(core.CoreError, TidyError)
+        assert issubclass(getattr(labelarray, name), labelarray.LabelArrayError)
+    assert issubclass(labelarray.LabelArrayError, ValueError) and not issubclass(labelarray.LabelArrayError, TidyError)
 
 
 def test_the_library_errors_module_knows_nothing_of_tidy3a():
-    tree = ast.parse(inspect.getsource(core))
+    tree = ast.parse(inspect.getsource(labelarray))
     names = {node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
     names |= {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
-    assert not {name for name in names if name.startswith("tidy3a") and not name.startswith("tidy3a.core")}
+    assert not {name for name in names if name.startswith("tidy3a") and not name.startswith("tidy3a.labelarray")}
 
 
 def test_tidy3as_label_and_align_errors_inherit_from_both():
-    assert issubclass(tidy_errors.LabelError, TidyError) and issubclass(tidy_errors.LabelError, core.LabelError)
-    assert issubclass(AlignError, TidyError) and issubclass(AlignError, core.AlignError)
+    assert issubclass(tidy_errors.LabelError, TidyError) and issubclass(tidy_errors.LabelError, labelarray.LabelError)
+    assert issubclass(AlignError, TidyError) and issubclass(AlignError, labelarray.AlignError)
 
 
 def test_the_numpy_modules_raise_the_library_errors():
-    with pytest.raises(core.ShapeError, match="2 axis names"):
+    with pytest.raises(labelarray.ShapeError, match="2 axis names"):
         NumpyArray(np.zeros(3), ("a", "b"))
-    with pytest.raises(core.LabelError, match="no label"):
+    with pytest.raises(labelarray.LabelError, match="no label"):
         NUMPY.sel(NumpyArray([1.0, 2.0], ("k",), {"k": [1, 2]}), {"k": 3})
     mixed = NumpyArray([1.0, 2.0], ("k",), {"k": np.array([1, "a"], dtype=object)})
-    with pytest.raises(core.LabelError, match="mix types"):
+    with pytest.raises(labelarray.LabelError, match="mix types"):
         NUMPY.compare_labels(mixed, NumpyArray([1.0, 2.0], ("k",), {"k": np.array(["a", 1], dtype=object)}), "k")
 
 
@@ -55,9 +55,9 @@ def test_a_library_error_through_a_verb_is_a_tidy3a_error_with_the_same_message(
     other = xr.DataArray([1.0, 2.0], dims="k", coords={"k": np.array(["a", 1], dtype=object)})
     with pytest.raises(TidyError, match=r"align: labels on 'k' mix types \(int, str\)") as caught:
         data >> mutate(c=col("a") + other)
-    assert isinstance(caught.value, core.LabelError) and isinstance(caught.value, tidy_errors.LabelError)
+    assert isinstance(caught.value, labelarray.LabelError) and isinstance(caught.value, tidy_errors.LabelError)
     assert caught.value.__cause__ is None  # one error, not a chain
-    with pytest.raises(core.LabelError):
+    with pytest.raises(labelarray.LabelError):
         data >> mutate(c=col("a") + other)
 
 

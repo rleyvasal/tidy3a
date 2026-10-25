@@ -134,10 +134,10 @@ def test_source_rewrites():
     assert rewrite_vector_assignments("filter([x] == y)") == "filter([x] == y)"
     text = apply_masking("cloud >> filter(x > limit)", {"filter": __import__("tidy3a").filter})
     assert "__tidy3a_name__('x', lambda: x)" in text and "__tidy3a_name__('limit'" in text
-    assert apply_masking("filter(x > 1)", {}) == "filter(x > 1)"  # not tidy3A's filter
+    assert apply_masking("filter(x > 1)", {}) == "filter(x > 1)"  # not tidy3a's filter
 
 
-# ── tidy3 and tidy3A in one notebook ────────────────────────────────────────
+# ── tidy3 and tidy3a in one notebook ────────────────────────────────────────
 
 
 def both_shell():
@@ -157,7 +157,7 @@ def close_both(shell):
 
 @pytest.mark.parametrize("first", ["tidy3", "tidy3a"])
 def test_tidy3_and_tidy3a_share_a_notebook(first):
-    masking = pytest.importorskip("tidy3.masking")  # tidy3 is not a tidy3A dependency
+    masking = pytest.importorskip("tidy3.masking")  # tidy3 is not a tidy3a dependency
     if not hasattr(masking, "_owned_by_tidy3"):
         pytest.skip("needs the tidy3 version whose notebook layer rewrites only tidy3-owned calls")
     shell = both_shell()

@@ -1,4 +1,4 @@
-"""Notebook layer: bare names in tidy3A verbs (plan §5.2, §5.6).
+"""Notebook layer: bare names in tidy3a verbs (plan §5.2, §5.6).
 
 Load it in IPython or Jupyter with ``%load_ext tidy3a.jupyter``. Then::
 
@@ -6,16 +6,16 @@ Load it in IPython or Jupyter with ``%load_ext tidy3a.jupyter``. Then::
     cloud >> filter(distance <= 50)
     cloud >> mutate([x, y, z] = dot(R, [x, y, z], over="feature"))
 
-A bare name inside a tidy3A verb becomes a deferred reference, settled when
+A bare name inside a tidy3a verb becomes a deferred reference, settled when
 the verb runs: data if only the data has it, the Python value if only the
-notebook has it, and an error if both do (tidy3 lets data win; tidy3A asks).
+notebook has it, and an error if both do (tidy3 lets data win; tidy3a asks).
 Functions, modules, and references made with ``fields()`` keep their
 Python meaning.
 
-Only calls to tidy3A's own verbs are rewritten, decided from the live
-namespace and the cell's own imports, so tidy3 and tidy3A can share a
+Only calls to tidy3a's own verbs are rewritten, decided from the live
+namespace and the cell's own imports, so tidy3 and tidy3a can share a
 notebook. Adapted from tidy3's ``masking.py`` and ``jupyter.py`` (MIT),
-which tidy3A does not import.
+which tidy3a does not import.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ def make_name(name: str, getter: Any) -> Any:
     except NameError:
         return NameRef(name, MISSING)
     if isinstance(value, Expr):
-        return value  # fields(), col(), formula(): already tidy3A expressions
+        return value  # fields(), col(), formula(): already tidy3a expressions
     if isinstance(value, (ModuleType, type)) or callable(value):
         return value  # functions such as is_numeric keep their Python meaning
     return NameRef(name, value)
@@ -142,7 +142,7 @@ class _Names(ast.NodeTransformer):
 
 
 class Tidy3aMaskTransformer(ast.NodeTransformer):
-    """Rewrite bare names in calls to tidy3A's verbs, and nowhere else."""
+    """Rewrite bare names in calls to tidy3a's verbs, and nowhere else."""
 
     def __init__(self, namespace: dict[str, Any] | None = None):
         self.namespace = namespace
@@ -291,7 +291,7 @@ def _is_ours(value: Any) -> bool:
 
 
 def load_ipython_extension(ipython: Any) -> None:
-    """``%load_ext tidy3a.jupyter``: turn on bare names in tidy3A verbs."""
+    """``%load_ext tidy3a.jupyter``: turn on bare names in tidy3a verbs."""
     from tidy3a.verbs import assign
 
     unload_ipython_extension(ipython)

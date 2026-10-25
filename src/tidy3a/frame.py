@@ -23,7 +23,7 @@ _ANNOTATION_COLUMN = 40
 
 
 class TidyArray:
-    """Named arrays with tidy3A's axis roles; build one with ``tidy()`` or ``read_array()``."""
+    """Named arrays with tidy3a's axis roles; build one with ``tidy()`` or ``read_array()``."""
 
     __slots__ = ("_data", "_backend", "_field_axis", "_origins", "_source", "_notes", "_groups", "_resolved")
 
@@ -111,7 +111,7 @@ class TidyArray:
         if not callable(verb):
             raise TypeError(
                 f"cannot pipe into {type(verb).__name__}; "
-                "the right side of >> must be a tidy3A verb"
+                "the right side of >> must be a tidy3a verb"
             )
         return verb(self)
 
@@ -126,7 +126,7 @@ class TidyArray:
 
 @translating
 def tidy(data: Any, *, field_axis: str | None = None, backend: str | None = None) -> TidyArray:
-    """Wrap an xarray ``DataArray`` or ``Dataset`` for tidy3A verbs.
+    """Wrap an xarray ``DataArray`` or ``Dataset`` for tidy3a verbs.
 
     An unnamed DataArray becomes the variable ``values``. ``field_axis=``
     declares the axis whose labels act as column names, as in

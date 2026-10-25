@@ -1,4 +1,4 @@
-"""tidy3A on public sample data; skipped unless TIDY3A_SAMPLES is set.
+"""tidy3a on public sample data; skipped unless TIDY3A_SAMPLES is set.
 
     TIDY3A_SAMPLES=/path/to/samples python -m pytest tests/test_sample_data.py
 

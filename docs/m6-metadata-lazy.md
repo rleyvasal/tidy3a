@@ -15,7 +15,7 @@ and `collect()` preserve this metadata as well.
 An encoding such as `{"dtype": "int16", "scale_factor": 0.5}` describes
 serialization. It does not cast a float32 variable when `tidy()` wraps it.
 When xarray opens a format with packed values or encoded dates, its decoder
-determines the in-memory values and type. tidy3A preserves that decoded
+determines the in-memory values and type. tidy3a preserves that decoded
 representation and its encoding metadata.
 
 For `.npy` input, `read_array(..., value_type=...)` checks the stored numeric
@@ -115,7 +115,7 @@ Median reduction can be expensive: Dask gathers the reduced axes into
 single chunks, as described in its
 [median documentation](https://docs.dask.org/en/stable/generated/dask.array.nanmedian.html).
 Reducing only some axes with `na_rm=True` is supported and stays lazy.
-For `median(..., na_rm=True)` over every axis of a chunked array, tidy3A
+For `median(..., na_rm=True)` over every axis of a chunked array, tidy3a
 preserves xarray's rejection of the full-array gather and raises a clear
 error before any tasks run. Select the required data and call `collect()`
 explicitly, then wrap that in-memory result with `tidy()` to calculate
