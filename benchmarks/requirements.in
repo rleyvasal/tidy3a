@@ -1,0 +1,8 @@
+# The benchmark environment's direct requirements; scripts/bench.sh installs the
+# exact versions locked in requirements.txt (regenerate with the command there).
+numpy
+pandas
+xarray
+# Opening the sample data: NetCDF through SciPy, the Landsat GeoTIFF through rioxarray.
+scipy
+rioxarray

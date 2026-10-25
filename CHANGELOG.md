@@ -9,6 +9,9 @@
   and `read_binary()`. Lazy, chunked, and memory-mapped data stay on xarray.
   The NumPy backend keeps attributes but not xarray storage encodings;
   `docs/backends.md` lists the deliberate differences.
+- `dot` always uses NumPy's `einsum`. With `opt_einsum` installed, xarray
+  used it instead, which changed results in the last digits and made later
+  steps of a pipeline about twice as slow.
 - Repeated labels on an axis that must be matched in another order are an
   `AlignError` naming the axis, instead of a pandas `InvalidIndexError`.
 

@@ -239,7 +239,10 @@ class XarrayBackend:
         return value.isin(choices)
 
     def dot(self, left: xr.DataArray, right: xr.DataArray, over: Sequence[Hashable]) -> xr.DataArray:
-        with xr.set_options(**_EXACT):
+        # Always NumPy's einsum. When opt_einsum is installed, xarray uses it instead, which
+        # changes results in the last digits (so they would depend on what else is installed)
+        # and returns column-major arrays that made later steps twice as slow.
+        with xr.set_options(**_EXACT, use_opt_einsum=False):
             return xr.dot(left, right, dim=over)
 
     def fresh(self, value: Any, keep_attrs: bool) -> Any:

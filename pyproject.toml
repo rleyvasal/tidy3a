@@ -29,7 +29,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "flox>=0.9", "ipython>=8.0", "dask[array]"]
+# opt_einsum: xarray uses it for dot when installed; the tests check tidy3A's results do not change.
+dev = ["pytest>=7.0", "flox>=0.9", "ipython>=8.0", "dask[array]", "opt_einsum"]
 
 [project.urls]
 Homepage = "https://github.com/rleyvasal/tidy3a"

@@ -266,3 +266,22 @@ def test_numeric_functions_work_on_data_and_plain_values():
     out = (cloud >> mutate(r = sqrt(x ** 2 + y ** 2))).collect()["r"]
     np.testing.assert_allclose(out.values, np.hypot(values[:, 0], values[:, 1]), rtol=1e-6)
     assert sqrt(16.0) == 4.0
+
+
+def test_dot_does_not_depend_on_optional_einsum_packages():
+    # xarray switches dot to opt_einsum when it is installed, which changes results in the
+    # last digits and lays them out column-major, making later steps twice as slow.
+    pytest.importorskip("opt_einsum")
+    rng = np.random.default_rng(5)
+    labels = ["x", "y", "z"]
+    cloud = tidy(xr.DataArray(rng.normal(size=(1000, 3)).astype("float32"), dims=("point", "feature"),
+                              coords={"feature": labels}), field_axis="feature")
+    rotation = xr.DataArray(rng.normal(size=(3, 3)).astype("float32"), dims=("i", "feature"),
+                            coords={"i": labels, "feature": labels})
+    x, y, z = fields("x", "y", "z")
+    results = {}
+    for allowed in (True, False):
+        with xr.set_options(use_opt_einsum=allowed):
+            results[allowed] = (cloud >> mutate(p=dot(rotation, [x, y, z], over="feature"))).collect()["p"]
+    assert results[True].values.tobytes() == results[False].values.tobytes()
+    assert results[True].values.flags.c_contiguous
