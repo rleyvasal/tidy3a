@@ -9,11 +9,12 @@ from label lookups to arithmetic under the alignment rules, is a backend
 method.
 
 ``Backend`` below is the interface, written as a protocol that both backends
-are checked against. ``XarrayBackend`` (``tidy3a.xarray_backend``) is the
-default when xarray is installed and wraps the xarray code the package used
-before the interface existed. ``NumpyBackend``
-(``tidy3a.numpy_backend``) is experimental and holds eager, in-memory data
-only. ``set_backend`` chooses the default, and ``tidy()`` and the readers take
+are checked against. ``NumpyBackend`` (``tidy3a.numpy_backend``) holds
+eager, in-memory data and is the default where it holds the data without
+loss (``backend_for``). ``XarrayBackend`` (``tidy3a.xarray_backend``) wraps
+the xarray code the package used before the interface existed and holds
+everything else: lazy, chunked, memory-mapped, and encoded data.
+``set_backend`` chooses the default, and ``tidy()`` and the readers take
 ``backend=``. A backend raises tidy3a errors only where a limitation is its
 own (computing a median of a whole chunked array); rule errors and their
 hints come from the callers.
@@ -27,7 +28,6 @@ can exist only once xarray has been imported.
 
 from __future__ import annotations
 
-import importlib.util
 import mmap
 import sys
 from collections.abc import Hashable, Mapping
@@ -317,14 +317,6 @@ def _missing_xarray(error: ImportError) -> bool:
     return error.name in ("xarray", "pandas") or any(name in str(error) for name in ("xarray", "pandas"))
 
 
-def xarray_installed() -> bool:
-    """Whether xarray can be imported, without importing it."""
-    if "xarray" in sys.modules:
-        return sys.modules["xarray"] is not None
-    try:
-        return importlib.util.find_spec("xarray") is not None
-    except (ImportError, ValueError):
-        return False
 
 
 def __getattr__(name: str) -> Any:
@@ -338,18 +330,19 @@ def __getattr__(name: str) -> Any:
 
 
 _BACKENDS = ("xarray", "numpy")
-_default: str | None = None  # None: xarray when it is installed, else NumPy
+_default: str | None = None  # None: NumPy for data it holds without loss, xarray for the rest
 
 
 def set_backend(name: str) -> None:
     """Choose the backend new data uses when none is named: ``"xarray"`` or ``"numpy"``.
 
-    Without a choice, the default is xarray when it is installed and NumPy
-    otherwise.
-
-    The NumPy backend is experimental and holds eager, in-memory data only;
-    lazy, chunked, and memory-mapped inputs stay on xarray when it is only
-    the default.
+    Without a choice, new data uses the NumPy backend where it holds the data
+    without loss, and xarray otherwise: lazy, chunked, and memory-mapped
+    values, coordinates other than an axis's labels, multi-level labels,
+    time zones, and xarray storage encodings stay on xarray.
+    ``set_backend("numpy")`` uses NumPy wherever it can hold the data,
+    dropping storage encodings; lazy and other unsupported data still stay
+    on xarray.
     """
     global _default
     _check_name(name)
@@ -357,9 +350,9 @@ def set_backend(name: str) -> None:
 
 
 def get_backend(name: str | None = None) -> Any:
-    """The backend called *name*, or the default one."""
+    """The backend called *name*, or the default one (NumPy unless ``set_backend`` chose otherwise)."""
     if name is None:
-        name = _default if _default is not None else "xarray" if xarray_installed() else "numpy"
+        name = _default if _default is not None else "numpy"
     _check_name(name)
     if name == "xarray":
         return xarray_backend()
@@ -372,10 +365,22 @@ def backend_for(data: Any, requested: str | None, error: type[TidyError] = TidyE
     """The backend that holds xarray *data*: the one asked for, or the default.
 
     Data the NumPy backend cannot hold stays on xarray, unless the NumPy
-    backend was asked for by name; then it is an error that says why.
+    backend was asked for by name; then it is an error that says why. With
+    no choice made at all, data with xarray storage encodings stays on xarray
+    too, since the NumPy backend does not keep them.
     """
+    if requested is None and _default is None and storage_encodings(data):
+        return xarray_backend()
     backend = get_backend(requested)
     return _fallback(backend, backend.unsupported(data), requested, error)
+
+
+def storage_encodings(data: Any) -> bool:
+    """Whether an xarray object, or any of its variables and coordinates, has a storage encoding."""
+    if getattr(data, "encoding", None):
+        return True
+    variables = data.variables.values() if hasattr(data, "data_vars") else (data[c].variable for c in data.coords)
+    return any(variable.encoding for variable in variables)
 
 
 def reader_backend(values: dict[str, Any], requested: str | None, error: type[TidyError]) -> Any:

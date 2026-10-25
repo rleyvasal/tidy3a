@@ -186,6 +186,7 @@ def test_the_compiled_and_numpy_kernels_give_the_same_bits(na_rm, monkeypatch):
     pytest.importorskip("numba")
     from tidy3a.labelarray import sums
 
+    monkeypatch.setattr(sums, "COMPILED_FROM", 0)  # compiled kernels at every size, to compare them
     values, keys, groups = corpus()
     rng = np.random.default_rng(4)
     table = np.stack([values, rng.permutation(values)], axis=1)  # two columns, as a field holder gives them
@@ -217,6 +218,7 @@ def test_the_compiled_few_value_path_gives_the_same_bits(seed, monkeypatch):
     pytest.importorskip("numba")
     from tidy3a.labelarray import sums
 
+    monkeypatch.setattr(sums, "IN_ORDER_COMPILED_FROM", 0)  # compiled kernels at every size, to compare them
     rng = np.random.default_rng(seed)
     count = int(rng.integers(1, sums.FEW))
     width = int(rng.integers(1, 20_000))
@@ -238,3 +240,24 @@ def test_the_compiled_few_value_path_gives_the_same_bits(seed, monkeypatch):
                         results.append(sums.reduce(data, op, axes, na_rm=na_rm, min_count=min_count))
                 assert results[0].dtype == results[1].dtype == F32
                 assert same_bits(results[0], results[1]), (op, na_rm, min_count, axes)
+
+
+@pytest.mark.backends("xarray", reason="checks which kernel runs")
+def test_compiled_kernels_run_only_from_a_size_where_they_pay(monkeypatch):
+    pytest.importorskip("numba")
+    from tidy3a.labelarray import _compiled, sums
+
+    calls = []
+    for name in ("in_order", "grouped_estimate"):
+        original = getattr(_compiled, name)
+        monkeypatch.setitem(sums._KERNELS, name, lambda *a, _original=original, _name=name: calls.append(_name)
+                            or _original(*a))
+    rng = np.random.default_rng(0)
+    small = rng.normal(size=(3, 1000)).astype(F32)
+    sums.reduce(small, "sum", (0,))
+    sums.reduce(small[0], "mean", (0,), codes=rng.integers(0, 5, 1000), groups=5)
+    assert calls == []  # below the threshold, calling compiled code costs more than it saves
+    many = rng.normal(size=(3, sums.IN_ORDER_COMPILED_FROM // 3 + 1)).astype(F32)
+    sums.reduce(many, "sum", (0,))
+    sums.reduce(many[0, :sums.COMPILED_FROM], "mean", (0,), codes=rng.integers(0, 5, sums.COMPILED_FROM), groups=5)
+    assert calls == ["in_order", "grouped_estimate"]

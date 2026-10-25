@@ -36,6 +36,11 @@ import numpy as np
 
 FEW = 8
 COMPILED = True  # use the optional compiled kernels when Numba is installed
+# From these many values; below them, calling compiled code costs more than it saves. Grouped sums: 34,688
+# values took 201 µs compiled against 155, 300,000 took 322 against 1,231. Few-value sums: 180,000 values
+# 89 against 78 µs, 300,000 103 against 118. Both paths give the same bits.
+COMPILED_FROM = 100_000
+IN_ORDER_COMPILED_FROM = 300_000
 
 _U = 2.0**-53  # float64 unit roundoff
 # Sums are made in chunks of positions, then the chunk totals added, so a result's error bound grows
@@ -64,7 +69,8 @@ def reduce(values: np.ndarray, op: str, axes: Sequence[int], *, na_rm: bool = Fa
     positions = math.prod(values.shape[a] for a in axes)
     with np.errstate(all="ignore"):
         if codes is None and positions < FEW:
-            compiled = _compiled("in_order") if COMPILED and len(axes) == 1 and values.ndim <= 2 else None
+            compiled = (_compiled("in_order") if COMPILED and len(axes) == 1 and values.ndim <= 2
+                        and values.size >= IN_ORDER_COMPILED_FROM else None)
             if compiled is not None:
                 # A view: one reduced axis, at most one kept; the width is explicit, since -1 is ambiguous when empty.
                 table = np.moveaxis(values, axes[0], 0).reshape(positions, math.prod(kept_shape))
@@ -158,7 +164,7 @@ def _estimate(table, rows, groups, sizes, na_rm):
     if sizes is None:
         sizes = np.bincount(rows, minlength=groups)
     sizes = np.asarray(sizes)
-    kernel = _compiled("grouped_estimate") if COMPILED else None
+    kernel = _compiled("grouped_estimate") if COMPILED and table.size >= COMPILED_FROM else None
     if kernel is not None:
         total, magnitude, present = kernel(table, np.ascontiguousarray(rows, dtype=np.intp), groups, na_rm)
         values = np.repeat(sizes[:, None], width, axis=1)

@@ -234,9 +234,9 @@ def read_array(
     (bytes to skip, default 0). ``lazy=True`` memory-maps the file instead
     of loading it.
 
-    ``backend=`` (experimental) is ``"xarray"`` or ``"numpy"``; without it,
-    the default from ``set_backend()`` is used. Memory-mapped data stays on
-    xarray.
+    ``backend=`` is ``"xarray"`` or ``"numpy"``; without it, the default
+    from ``set_backend()`` is used, or with none chosen, NumPy.
+    Memory-mapped data stays on xarray.
     """
     kind, path = _classify(source)
     description = _describe_source(kind, path)

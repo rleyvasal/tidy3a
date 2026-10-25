@@ -1,14 +1,21 @@
 # Backends
 
 tidy3a's verbs, rules, and messages are the same on every backend; a backend
-only stores the data and computes with it (plan milestone 9). The xarray
-backend is the default. The NumPy backend is experimental:
+only stores the data and computes with it (plan milestones 9 and 10).
+
+Without a choice, new data uses the NumPy backend wherever it holds the data
+without loss, and the xarray backend for the rest: lazy, chunked, and
+memory-mapped values, coordinates other than an axis's own labels,
+multi-level labels, time labels with a time zone, and data with xarray
+storage encodings (as `xr.open_dataset` gives them), so a file read and
+written back keeps its encodings. Choosing a backend decides:
 
 ```python
 import tidy3a
-tidy3a.set_backend("numpy")            # the default for new data
-cloud = tidy3a.read_array(..., backend="numpy")
+tidy3a.set_backend("xarray")           # the xarray backend for all new data, as before 0.3.0
+tidy3a.set_backend("numpy")            # NumPy wherever it can hold the data, encodings dropped
 frame = tidy3a.tidy(dataset, backend="numpy")
+cloud = tidy3a.read_array(..., backend="xarray")
 ```
 
 The whole test suite runs on both backends, and property tests compare them

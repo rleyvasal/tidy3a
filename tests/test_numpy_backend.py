@@ -59,7 +59,7 @@ def test_section_7_gives_the_same_printouts_values_and_types_on_both_backends():
 def test_the_default_backend_and_backend_names():
     fresh = subprocess.run([sys.executable, "-c", "import tidy3a.backend as b; print(b.get_backend().name)"],
                            capture_output=True, text=True, check=True)
-    assert fresh.stdout.strip() == "xarray"  # the package's own default, before any set_backend()
+    assert fresh.stdout.strip() == "numpy"  # the package's own default, before any set_backend()
     set_backend("numpy")
     assert get_backend() is NUMPY
     assert tidy(xr.Dataset({"a": ("t", [1.0, 2.0])}))._backend is NUMPY

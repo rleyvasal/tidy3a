@@ -16,7 +16,8 @@ python -m pip install -e ".[xarray]"
 ```
 
 Without the extra, tidy3a needs NumPy alone: in-memory pipelines run on the
-experimental NumPy backend, arrays come in through `read_array` and
+NumPy backend (the default wherever it holds the data without loss; see
+[docs/backends.md](docs/backends.md)), arrays come in through `read_array` and
 `read_binary`, and results go out through `pull()` and `to_dict()`. The `fast`
 extra (`".[xarray,fast]"`) adds Numba for compiled grouped sums and means;
 results are the same with or without it.

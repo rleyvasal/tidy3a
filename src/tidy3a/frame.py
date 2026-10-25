@@ -136,8 +136,9 @@ def tidy(data: Any, *, field_axis: str | None = None, backend: str | None = None
     Wrapping preserves metadata and backing storage without reading
     measurement values. Keep file-backed sources open until collection.
 
-    ``backend=`` (experimental) is ``"xarray"`` or ``"numpy"``; without it,
-    the default from ``set_backend()`` is used.
+    ``backend=`` is ``"xarray"`` or ``"numpy"``; without it, the default
+    from ``set_backend()`` is used, or with none chosen, NumPy where it holds
+    the data without loss (``docs/backends.md``).
     """
     if isinstance(data, TidyArray):
         if backend is not None and get_backend(backend) is not data._backend:

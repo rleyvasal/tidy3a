@@ -1,4 +1,4 @@
-"""The NumPy backend (experimental; plan milestone 9, step 3).
+"""The NumPy backend (plan milestone 9, step 3; the default since milestone 10, decision 16).
 
 Collections hold NumPy arrays with named axes and one label array per
 labelled axis, shared by every variable on that axis. Everything a verb

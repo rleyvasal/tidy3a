@@ -15,6 +15,18 @@ threshold can keep or drop a point differently from 0.2.0.
   overflows float32. Ungrouped reductions of fewer than 8 values per result,
   such as `sum(p**2, over="i")` over x, y, z, add in float64 in a fixed order.
   Float64 data is unchanged.
+- The NumPy backend is the default: without `set_backend()` or `backend=`,
+  in-memory data uses it, and data it cannot hold or would lose something of
+  stays on xarray: lazy, chunked, and memory-mapped values, other
+  coordinates, multi-level labels, time zones, and data with xarray storage
+  encodings, so a netCDF file read and written back keeps them. Results are
+  the same on both backends; what differs is that selection predicates
+  (`where(...)`) receive a `NumpyArray` (with `dims`, `sizes`, `shape`,
+  `ndim`, `dtype`, `values`, `attrs`) instead of an xarray `DataArray`.
+  `set_backend("xarray")` keeps the behaviour of 0.2.0.
+- The compiled kernels run only from the sizes where they pay (100,000
+  values for grouped sums, 300,000 for few-value sums), below which calling
+  them costs more than it saves; results are the same either way.
 - Grouped float32 sums and means take one pass instead of one step per
   group: about 2 times faster on 10M points in 32 groups with NumPy alone.
 - The `fast` extra, `pip install 'tidy3a[fast]'`, adds Numba: grouped float32
