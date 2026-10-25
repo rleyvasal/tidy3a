@@ -18,7 +18,7 @@ from typing import Any
 import numpy as np
 
 from tidy3a.backend import reader_backend
-from tidy3a.errors import ReadError
+from tidy3a.errors import ReadError, translating
 from tidy3a.frame import TidyArray, check_field_axis
 
 _NPY_MAGIC = b"\x93NUMPY"
@@ -85,6 +85,7 @@ def _decode_fixed_text(values: np.ndarray, spec: _FixedText, name: str) -> np.nd
     return np.asarray(decoded, dtype=object)
 
 
+@translating
 def read_binary(
     source: str | os.PathLike[str], *, value_types: Mapping[str, Any],
     dim: str = "record", labels: Mapping[str, Sequence[Any]] | None = None,
@@ -195,6 +196,7 @@ def _record_dtype(layout, field_offsets, record_size) -> np.dtype:
     })
 
 
+@translating
 def read_array(
     source: str | os.PathLike[str] | np.ndarray,
     value_type: Any = None,

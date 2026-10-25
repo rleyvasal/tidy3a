@@ -26,6 +26,7 @@ from tidy3a.errors import (
     SliceError,
     SummariseError,
     TidyError,
+    translating,
 )
 from tidy3a.expr import (
     MISSING,
@@ -60,6 +61,7 @@ class Verb:
         self._operation = operation
         self._arguments = arguments
 
+    @translating
     def __call__(self, frame: Any) -> Any:
         if not isinstance(frame, TidyArray):
             raise TypeError(

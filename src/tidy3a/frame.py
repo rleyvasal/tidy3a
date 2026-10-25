@@ -15,7 +15,7 @@ from typing import Any
 import numpy as np
 
 from tidy3a.backend import backend_for, get_backend, is_xarray_object, xarray_backend
-from tidy3a.errors import TidyError
+from tidy3a.errors import TidyError, translating
 
 # Long label lists are shortened in the inspection output.
 _LABELS_SHOWN = 6
@@ -83,10 +83,12 @@ class TidyArray:
             resolved=changes.pop("resolved", None),
         )
 
+    @translating
     def to_xarray(self) -> Any:
         """A shallow Dataset copy sharing values, without computing lazy arrays."""
         return self._backend.to_xarray(self._data)
 
+    @translating
     def collect(self) -> Any:
         """Compute lazy variables into memory as an xarray Dataset; the wrapped data stays lazy.
 
@@ -94,6 +96,7 @@ class TidyArray:
         """
         return self._backend.collect(self._data)
 
+    @translating
     def to_dict(self) -> dict:
         """The data as NumPy arrays, in the layout of xarray's ``Dataset.to_dict(data="array")``.
 
@@ -116,10 +119,12 @@ class TidyArray:
         """Execute a verb; experimental frames may override this private boundary."""
         return verb._apply(self)
 
+    @translating
     def __repr__(self) -> str:
         return _inspect(self)
 
 
+@translating
 def tidy(data: Any, *, field_axis: str | None = None, backend: str | None = None) -> TidyArray:
     """Wrap an xarray ``DataArray`` or ``Dataset`` for tidy3A verbs.
 

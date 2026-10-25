@@ -21,12 +21,7 @@ from typing import Any
 
 import numpy as np
 
-from tidy3a.errors import TidyError
-
-
-class LabelError(TidyError):
-    """Labels that cannot be ordered, compared, or looked up."""
-
+from tidy3a.core.errors import LabelError
 
 # Label kinds that can match each other. Booleans, numbers, times, durations,
 # text, and bytes never match across kinds, as in pandas: True is not 1.

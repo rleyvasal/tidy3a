@@ -32,12 +32,11 @@ import numpy as np
 from tidy3a import grouped
 from tidy3a import labels as exact
 from tidy3a.backend import is_xarray, kept_positions, memory_mapped
+from tidy3a.core.errors import LabelError, ShapeError
 from tidy3a.errors import TidyError
-from tidy3a.labels import LabelError, exact_cast
+from tidy3a.labels import exact_cast
 from tidy3a.labels import kind as _kind
 from tidy3a.labels import missing as _missing
-
-CoreError = LabelError  # the label index below raises it under this name
 
 # Up to this many groups, scanning the axis once per group is cheaper than sorting it.
 _FEW_GROUPS = 8
@@ -64,9 +63,9 @@ class NumpyArray:
         data = data if isinstance(data, np.ndarray) else np.asarray(data)
         dims = (dims,) if isinstance(dims, str) else tuple(dims)
         if len(dims) != data.ndim:
-            raise TidyError(f"{len(dims)} axis names {dims} for an array of rank {data.ndim}")
+            raise ShapeError(f"{len(dims)} axis names {dims} for an array of rank {data.ndim}")
         if len(set(dims)) != len(dims):
-            raise TidyError(f"axis names must be unique, got {dims}")
+            raise ShapeError(f"axis names must be unique, got {dims}")
         self.data, self.dims, self.name = data, dims, name
         self.coords = _checked_coords(coords or {}, dict(zip(dims, data.shape)))
         self.attrs = dict(attrs or {})
@@ -119,7 +118,7 @@ class NumpyData:
         for name, value in variables.items():
             for dim, size in zip(value.dims, value.data.shape):
                 if sizes.setdefault(dim, size) != size:
-                    raise TidyError(f"{name}: axis {dim} has {size} positions, other variables have {sizes[dim]}")
+                    raise ShapeError(f"{name}: axis {dim} has {size} positions, other variables have {sizes[dim]}")
         coords = dict(coords or {})
         for dim, labels in coords.items():
             sizes.setdefault(dim, len(labels))
@@ -160,9 +159,9 @@ def _checked_coords(coords: Mapping[Hashable, Any], sizes: Mapping[Hashable, int
     for dim, labels in coords.items():
         labels = _frozen_labels(labels)
         if dim not in sizes:
-            raise TidyError(f"labels for {dim}, which is not an axis; axes are {tuple(sizes)}")
+            raise ShapeError(f"labels for {dim}, which is not an axis; axes are {tuple(sizes)}")
         if labels.ndim != 1 or len(labels) != sizes[dim]:
-            raise TidyError(f"{dim} has {sizes[dim]} positions but {labels.size} labels")
+            raise ShapeError(f"{dim} has {sizes[dim]} positions but {labels.size} labels")
         out[dim] = labels
     return out
 
@@ -241,7 +240,7 @@ class LabelIndex:
                 self._sorter = np.argsort(present)
                 self._sorted = present[self._sorter]
         except TypeError:
-            raise CoreError(f"{op}: labels on {dim!r} cannot be ordered, so they cannot be looked up") from None
+            raise LabelError(f"{op}: labels on {dim!r} cannot be ordered, so they cannot be looked up") from None
         repeated = not increasing and bool(np.any(self._sorted[1:] == self._sorted[:-1]))
         self.unique = not repeated and len(self._missing) <= 1
 
@@ -249,15 +248,15 @@ class LabelIndex:
         """The position of each wanted label, or -1 where it is absent."""
         wanted = np.atleast_1d(np.asarray(wanted))
         if wanted.ndim != 1:
-            raise CoreError("look up labels as a one-dimensional list")
+            raise LabelError("look up labels as a one-dimensional list")
         result = np.full(len(wanted), -1, dtype=np.intp)
         if not len(wanted) or not self.size:
             return result
         if not self.unique:
-            raise CoreError("labels repeat, so a label does not name one position")
+            raise LabelError("labels repeat, so a label does not name one position")
         try:
             kind, wanted = _kind(wanted, "look up", None)
-        except CoreError:
+        except LabelError:
             return result  # a label of a different type is simply not present
         if self.kind == "time" and kind in ("text", "bytes"):
             try:
@@ -314,7 +313,7 @@ def _broadcast(operands: Sequence[Any]) -> tuple[list[Any], tuple[Hashable, ...]
                     dims.append(dim)
                     sizes[dim] = size
                 elif sizes[dim] != size:
-                    raise TidyError(f"{dim} has {sizes[dim]} positions on one operand and {size} on another")
+                    raise ShapeError(f"{dim} has {sizes[dim]} positions on one operand and {size} on another")
                 if dim in item.coords and dim not in coords:
                     coords[dim] = item.coords[dim]
     raw = []
