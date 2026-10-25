@@ -15,7 +15,7 @@ from typing import Any
 import numpy as np
 
 from tidy3a.align import align_to, check_join_axes
-from tidy3a.backend import XARRAY, is_xarray
+from tidy3a.backend import is_xarray, xarray_backend
 from tidy3a.errors import (
     AlignError,
     FilterError,
@@ -89,9 +89,9 @@ def _text(value: Any) -> str:
     return repr(value) if not isinstance(value, str) else f'"{value}"'
 
 
-def _with_positions(data: Any, axis: Hashable, backend: Any = XARRAY) -> Any:
+def _with_positions(data: Any, axis: Hashable, backend: Any = None) -> Any:
     """Attach 1-based positions as labels, so later steps keep original identities."""
-    return backend.with_positions(data, axis)
+    return (xarray_backend() if backend is None else backend).with_positions(data, axis)
 
 
 # ── select ──────────────────────────────────────────────────────────────────
@@ -149,9 +149,10 @@ def select(*items: Any) -> Verb:
     return Verb(_call_text("select", items), apply, operation="select", arguments=items)
 
 
-def _holders(data: Any, field_axis: Hashable | None, backend: Any = XARRAY) -> list[Hashable]:
+def _holders(data: Any, field_axis: Hashable | None, backend: Any = None) -> list[Hashable]:
     if field_axis is None:
         return []
+    backend = xarray_backend() if backend is None else backend
     return [v for v, value in backend.variables(data).items() if field_axis in value.dims]
 
 
@@ -457,8 +458,9 @@ def mutate(*assignments: Any, **named: Any) -> Verb:
     return Verb(_call_text("mutate", positional, named), apply, operation="mutate", arguments=steps)
 
 
-def _result_metadata(value: Any, node: Expr, backend: Any = XARRAY) -> Any:
+def _result_metadata(value: Any, node: Expr, backend: Any = None) -> Any:
     """New values need fresh storage encoding; computed values also need fresh attributes."""
+    backend = xarray_backend() if backend is None else backend
     return backend.fresh(value, keep_attrs=isinstance(node, (Ref, Literal)))
 
 
@@ -496,7 +498,8 @@ def _store(frame: TidyArray, name: Hashable, value: Any, text: str, notes: list[
     return backend.assign(data, name, value)
 
 
-def _write_label(data, holders, field_axis, name, value, text, notes, backend=XARRAY) -> Any:
+def _write_label(data, holders, field_axis, name, value, text, notes, backend=None) -> Any:
+    backend = xarray_backend() if backend is None else backend
     if len(holders) > 1:
         raise MutateError(
             f'"{name}" is a field label on several variables ({", ".join(map(str, holders))}); '
@@ -711,7 +714,7 @@ def bind_cols(*arrays: Any, along: str, **named: Any) -> Verb:
             if is_xarray(array):
                 if array.dims != (along,):
                     raise AlignError(f"bind_cols(): {name} must be 1-D along {along}, not ({', '.join(map(str, array.dims))})")
-                if XARRAY.has_labels(array, along):
+                if xarray_backend().has_labels(array, along):  # an outside array is an xarray one
                     raise AlignError(f"bind_cols(): {name} already has labels on {along}; combine it with left_join()")
                 values = array.values
             else:

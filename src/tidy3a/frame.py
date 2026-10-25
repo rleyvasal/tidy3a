@@ -14,7 +14,7 @@ from typing import Any
 
 import numpy as np
 
-from tidy3a.backend import XARRAY, backend_for, get_backend, is_xarray_object
+from tidy3a.backend import backend_for, get_backend, is_xarray_object, xarray_backend
 from tidy3a.errors import TidyError
 
 # Long label lists are shortened in the inspection output.
@@ -39,7 +39,7 @@ class TidyArray:
         groups: Sequence[Any] = (),
     ):
         self._data = data
-        self._backend = XARRAY if backend is None else backend
+        self._backend = xarray_backend() if backend is None else backend
         self._field_axis = field_axis
         # variable name -> (axis it came from, that axis's labels in order)
         self._origins = dict(origins or {})
@@ -150,8 +150,9 @@ def tidy(data: Any, *, field_axis: str | None = None, backend: str | None = None
     return TidyArray(dataset, backend=holder, field_axis=field_axis, source=source)
 
 
-def check_field_axis(data: Any, axis: Any, error: type[TidyError], backend: Any = XARRAY) -> None:
+def check_field_axis(data: Any, axis: Any, error: type[TidyError], backend: Any = None) -> None:
     """Raise unless *axis* can be a field axis: an existing axis with unique labels."""
+    backend = xarray_backend() if backend is None else backend
     if not isinstance(axis, str):
         raise error(f"field_axis must be an axis name, not {type(axis).__name__}")
     if not backend.has_axis(data, axis):

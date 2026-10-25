@@ -1,6 +1,9 @@
 """The backend seam (plan milestone 9): verbs reach stored data only through a backend."""
 
 import ast
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
 import numpy as np
@@ -10,35 +13,88 @@ import xarray as xr
 import tidy3a
 from tidy3a import (TidyError, col, filter, group_by, infer, left_join, mean, mutate, read_array, select,
                     slice, summarise, tidy)
-from tidy3a.backend import XARRAY, XarrayBackend, get_backend
+from tidy3a.backend import XarrayBackend, get_backend
 from tidy3a.frame import TidyArray
 
 PACKAGE = Path(tidy3a.__file__).parent
-# The xarray backend, and the readers that build xarray datasets from files.
-MAY_IMPORT_XARRAY = {"backend.py", "io.py"}
-# The NumPy backend converts to and from xarray only when asked, importing it there.
-MAY_IMPORT_XARRAY_IN_FUNCTIONS = {"numpy_backend.py"}
+OPTIONAL = ("xarray", "pandas")
+# The xarray backend is the only module that imports xarray or pandas when it is imported.
+MAY_IMPORT_AT_MODULE_LEVEL = {"xarray_backend.py"}
+# These use them only when present or asked for: conversion to and from xarray, label
+# display and fast grouping in the NumPy backend, and pandas' fast paths in expressions.
+MAY_IMPORT_IN_FUNCTIONS = {"numpy_backend.py", "expr.py"}
 
 
-def _xarray_imports(tree: ast.AST) -> list[ast.AST]:
+def _optional_imports(tree: ast.AST) -> list[ast.AST]:
     found = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Import) and any(a.name.split(".")[0] == "xarray" for a in node.names):
+        if isinstance(node, ast.Import) and any(a.name.split(".")[0] in OPTIONAL for a in node.names):
             found.append(node)
-        if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "xarray":
+        if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] in OPTIONAL:
             found.append(node)
     return found
 
 
 @pytest.mark.backends("xarray", reason="reads source files; the backend does not matter")
-def test_only_the_backends_and_readers_import_xarray():
+def test_only_the_xarray_backend_imports_xarray_or_pandas_at_import_time():
     for path in PACKAGE.glob("*.py"):
         tree = ast.parse(path.read_text())
-        if path.name in MAY_IMPORT_XARRAY or not _xarray_imports(tree):
+        found = _optional_imports(tree)
+        if path.name in MAY_IMPORT_AT_MODULE_LEVEL or not found:
             continue
-        assert path.name in MAY_IMPORT_XARRAY_IN_FUNCTIONS, f"{path.name} imports xarray"
-        top_level = [node for node in tree.body if node in _xarray_imports(tree)]
-        assert not top_level, f"{path.name} imports xarray at module level"
+        assert path.name in MAY_IMPORT_IN_FUNCTIONS, f"{path.name} imports xarray or pandas"
+        top_level = [node for node in tree.body if node in found]
+        assert not top_level, f"{path.name} imports xarray or pandas at module level"
+
+
+NO_XARRAY_OR_PANDAS = textwrap.dedent("""
+    import importlib.abc, sys
+
+    class Blocked(importlib.abc.MetaPathFinder):
+        def find_spec(self, name, path=None, target=None):
+            if name.split(".")[0] in ("xarray", "pandas"):
+                raise ImportError(f"{name} is not installed")
+
+    sys.meta_path.insert(0, Blocked())
+
+    import numpy as np
+    import tidy3a
+    from tidy3a import (bins, col, dot, fields, filter, formula, group_by, infer, mean, mutate, n, pull,
+                        read_array, select, summarise)
+    from tidy3a.numpy_backend import NumpyArray
+
+    tidy3a.set_backend("numpy")
+    records = np.array([[0, -48, 0, 10, 1], [0, -49, 0, 20, 2], [51, 1, 0, 30, 1], [0, 1, 3, 40, 2]], "float32")
+    x, y, z, intensity, ring, distance = fields("x", "y", "z", "intensity", "ring", "distance")
+    xyz = ["x", "y", "z"]
+    cloud = read_array(records, dims={"point": infer, "feature": 5},
+                       labels={"feature": ["x", "y", "z", "intensity", "ring"]}, field_axis="feature")
+    rotation = NumpyArray(np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]], "float32"), ("i", "feature"),
+                          {"i": xyz, "feature": xyz})
+    offset = NumpyArray(np.array([1, 0, 0], "float32"), ("i",), {"i": xyz})
+    nearby = (cloud >> mutate(p=dot(rotation, [x, y, z], over="feature") + offset)
+              >> mutate(distance=formula(r"\\sqrt{\\sum_i p_i^2}")) >> filter(distance <= 50))
+    per_ring = nearby >> group_by(ring) >> summarise(points=n(), m=mean(intensity))
+    assert (nearby >> pull("point")).tolist() == [1, 2, 4]
+    assert (nearby >> pull(distance)).tolist() == [49.0, 50.0, 3.0]
+    assert (per_ring >> pull("m")).tolist() == [10.0, 30.0]
+    assert (cloud >> select(x) >> mutate(x=x * 2) >> pull(x)).tolist() == [0.0, 0.0, 102.0, 0.0]
+    times = read_array(np.arange(4.0), dims=["time"],
+                       labels={"time": np.arange("2026-06-01", "2026-06-05", dtype="datetime64[D]")})
+    two_days = times >> group_by(bins(col("time"), "2 days")) >> summarise(m=mean(col("values")))
+    assert (two_days >> pull("m")).tolist() == [0.5, 2.5]
+    assert "time_bin: [2026-06-01, 2026-06-03)" in repr(two_days)
+    assert not {"xarray", "pandas"} & {name.split(".")[0] for name in sys.modules}
+    print(repr(per_ring))
+""")
+
+
+@pytest.mark.backends("xarray", reason="runs its own process on the NumPy backend")
+def test_eager_pipelines_run_without_xarray_or_pandas(tmp_path):
+    script = tmp_path / "without.py"
+    script.write_text(NO_XARRAY_OR_PANDAS)
+    result = subprocess.run([sys.executable, str(script)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
 
 
 def cloud():

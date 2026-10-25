@@ -27,6 +27,7 @@ from typing import Any
 
 import numpy as np
 
+from tidy3a.backend import memory_mapped
 from tidy3a.errors import TidyError
 
 
@@ -518,7 +519,7 @@ class NumpyBackend:
             if isinstance(data, xr.DataArray) else data
         for name, value in dataset.data_vars.items():
             if not value.variable._in_memory or not isinstance(value.data, np.ndarray) \
-                    or _memory_mapped(value.data):
+                    or memory_mapped(value.data):
                 return f"{name} is lazy, chunked, or memory-mapped"
         for name in dataset.coords:
             if name not in dataset.indexes or dataset[name].dims != (name,):
@@ -551,6 +552,28 @@ class NumpyBackend:
 
     def collect(self, data: NumpyData) -> Any:
         return self.to_xarray(data)
+
+    # ── Readers: built directly, without an xarray dataset in between ───────
+
+    def from_records(self, variables: Mapping[Hashable, tuple], coords: Mapping[Hashable, np.ndarray]) -> NumpyData:
+        arrays = {name: NumpyArray._make(np.asarray(values), (dims,) if isinstance(dims, str) else tuple(dims), {},
+                                         {}, name) for name, (dims, values) in variables.items()}
+        return NumpyData(arrays, coords)
+
+    def from_array(self, values: np.ndarray, dims: Sequence[Hashable], coords: Mapping[Hashable, np.ndarray],
+                   name: Hashable) -> NumpyData:
+        return NumpyData({name: NumpyArray._make(values, tuple(dims), {}, {}, name)}, coords)
+
+    def from_split(self, values: np.ndarray, dims: Sequence[Hashable], coords: Mapping[Hashable, np.ndarray],
+                   axis: Hashable) -> NumpyData:
+        """One variable per label on *axis*, each a view of *values*, as xarray's split gives."""
+        number = list(dims).index(axis)
+        kept = tuple(d for d in dims if d != axis)
+        arrays = {}
+        for position, label in enumerate(coords[axis].tolist()):
+            name = str(label)
+            arrays[name] = NumpyArray._make(values[(builtins.slice(None),) * number + (position,)], kept, {}, {}, name)
+        return NumpyData(arrays, {d: c for d, c in coords.items() if d != axis})
 
     def outside(self, value: Any) -> Any:
         """An array from the calling code (an xarray object) as this backend's array."""
@@ -920,21 +943,6 @@ class NumpyBackend:
         coords = {**right.coords, **left.coords}
         coord_attrs = {d: _combine_attrs(left.coord_attrs.get(d, {}), right.coord_attrs.get(d, {})) for d in coords}
         return NumpyData(variables, coords, _combine_attrs(left.attrs, right.attrs), coord_attrs)
-
-
-def _memory_mapped(array: np.ndarray) -> bool:
-    """Whether *array* views a memory-mapped file, however many views lie between.
-
-    Older xarray versions hold a plain view of the ``np.memmap``.
-    """
-    import mmap
-
-    base: Any = array
-    while base is not None:
-        if isinstance(base, (np.memmap, mmap.mmap)):
-            return True
-        base = getattr(base, "base", None)
-    return False
 
 
 def _label_keys(labels: np.ndarray) -> list:

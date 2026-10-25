@@ -16,9 +16,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import xarray as xr
 
-from tidy3a.backend import backend_for
+from tidy3a.backend import reader_backend
 from tidy3a.errors import ReadError
 from tidy3a.frame import TidyArray, check_field_axis
 
@@ -150,7 +149,8 @@ def read_binary(
         else:
             values = records[name]
         variables[name] = (dim, values)
-    data = xr.Dataset(variables, coords=coords)
+    holder = reader_backend({name: values for name, (_, values) in variables.items()}, backend, ReadError)
+    data = holder.from_records(variables, coords)
     fields = ", ".join(
         f"{name}: {value_types[name] if isinstance(value_types[name], _FixedText) else kind.name} at byte {position}"
         for name, (kind, position) in dtype.fields.items()
@@ -160,9 +160,8 @@ def read_binary(
         storage += ", memory-mapped" if nbytes else ", empty (no mapping)"
     if offset:
         storage += f", {offset:,}-byte header skipped"
-    holder = backend_for(data, backend, ReadError)
     return TidyArray(
-        holder.wrap(data)[0], backend=holder,
+        data, backend=holder,
         source=f'raw record file "{path.name}", {byte_order}-endian, {storage}',
         notes=(f"record: {dtype.itemsize} bytes; {fields}",
                f"inferred: {dim} = {nbytes:,} bytes / {dtype.itemsize} bytes = {len(records):,}",
@@ -269,7 +268,6 @@ def read_array(
 
     shape = values.shape
     coords = _parse_labels(labels, names, shape)
-    array = xr.DataArray(values, dims=names, coords=coords)
 
     if name is not None and variables_from is not None:
         raise ReadError(
@@ -279,9 +277,11 @@ def read_array(
     if name is not None and (not isinstance(name, str) or not name):
         raise ReadError("name= must be a non-empty string")
 
+    holder = reader_backend({name or "values": values}, backend, ReadError)
     origins: dict[Hashable, tuple[str, tuple[Any, ...]]] = {}
     if variables_from is not None:
-        dataset = _split_variables(array, variables_from, coords)
+        _check_split(names, variables_from, coords)
+        dataset = holder.from_split(values, names, coords, variables_from)
         axis_labels = tuple(coords[variables_from])
         origins = {label: (variables_from, axis_labels) for label in axis_labels}
         if field_axis == variables_from:
@@ -292,14 +292,13 @@ def read_array(
                 f"{_label_list(axis_labels)} selectable as columns."
             )
     else:
-        dataset = array.to_dataset(name=name or "values")
+        dataset = holder.from_array(values, names, coords, name or "values")
 
-    holder = backend_for(dataset, backend, ReadError)
     if field_axis is not None:
-        check_field_axis(dataset, field_axis, ReadError)
+        check_field_axis(dataset, field_axis, ReadError, holder)
 
     return TidyArray(
-        holder.wrap(dataset)[0], backend=holder, field_axis=field_axis, origins=origins,
+        dataset, backend=holder, field_axis=field_axis, origins=origins,
         source=source_text, notes=notes,
     )
 
@@ -581,10 +580,8 @@ def _parse_labels(
     return coords
 
 
-def _split_variables(
-    array: xr.DataArray, axis: Any, coords: Mapping[str, np.ndarray],
-) -> xr.Dataset:
-    if axis not in array.dims:
+def _check_split(names: list[str], axis: Any, coords: Mapping[str, np.ndarray]) -> None:
+    if axis not in names:
         raise ReadError(f'variables_from="{axis}" is not in dims')
     if axis not in coords:
         raise ReadError(
@@ -594,7 +591,6 @@ def _split_variables(
         raise ReadError(
             f'variables_from="{axis}" needs text labels, since they become variable names'
         )
-    return array.to_dataset(dim=axis)
 
 
 def _plain(value: Any) -> Any:

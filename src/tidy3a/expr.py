@@ -18,10 +18,9 @@ from collections.abc import Callable, Hashable, Sequence
 from typing import Any
 
 import numpy as np
-import pandas as pd
 
 from tidy3a.align import align_many, align_pair
-from tidy3a.backend import XARRAY, is_xarray, label_index
+from tidy3a.backend import is_xarray, xarray_backend
 from tidy3a.errors import GroupError, RefError, TidyError
 
 
@@ -583,9 +582,9 @@ def _field_view(data: Any, holders: list, name: Hashable, field_axis: Hashable, 
     return ctx.backend.field(data, holders[0], field_axis, name)
 
 
-def axis_labels(data: Any, axis: Hashable, backend: Any = XARRAY) -> Any:
+def axis_labels(data: Any, axis: Hashable, backend: Any = None) -> Any:
     """An axis's labels as data along it; unlabelled axes give 1-based positions."""
-    return backend.axis_labels(data, axis)
+    return (xarray_backend() if backend is None else backend).axis_labels(data, axis)
 
 
 def _inventory(ctx: Context) -> str:
@@ -597,7 +596,8 @@ def _inventory(ctx: Context) -> str:
     return "\n  " + "\n  ".join(parts)
 
 
-def _observation_hint(data: Any, name: Hashable, field_axis: Hashable, backend: Any = XARRAY) -> str:
+def _observation_hint(data: Any, name: Hashable, field_axis: Hashable, backend: Any = None) -> str:
+    backend = xarray_backend() if backend is None else backend
     for dim in backend.labelled_axes(data):
         if dim != field_axis and backend.has_label(data, dim, name):
             return f'\n  "{name}" is a value on the {dim} axis; to keep it use filter({dim} == {name!r})'
@@ -649,10 +649,10 @@ _FLOAT_REDUCERS = {"mean", "sum", "min", "max", "median", "std", "var"}
 
 def reduce_array(
     array: Any, op: str, axes: Sequence[Hashable], na_rm: bool = False,
-    min_count: int | None = None, backend: Any = XARRAY,
+    min_count: int | None = None, backend: Any = None,
 ) -> Any:
     """One reduction over *axes*, with missing values propagated unless *na_rm*."""
-    return backend.reduce(array, op, axes, na_rm, min_count)
+    return (xarray_backend() if backend is None else backend).reduce(array, op, axes, na_rm, min_count)
 
 
 def _evaluate_reduce(node: Reduce, ctx: Context) -> Any:
@@ -762,15 +762,25 @@ def _value_groups(key: ValueKey, axis: Hashable, values: Any, backend: Any) -> G
     return Groups(key.name, axis, backend.codes_like(codes, values), [_plain(label) for label in labels])
 
 
+def _pandas() -> Any:
+    """pandas when installed; it is optional, with NumPy fallbacks where tidy3A uses it."""
+    try:
+        import pandas
+    except ImportError:
+        return None
+    return pandas
+
+
 def _factorize(raw: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Sorted unique values and each position's code, exactly as ``np.unique`` gives them.
 
-    pandas finds the groups by hashing, which is much faster than sorting
-    every value. It gives missing values such as NaT no code, and some
-    object values cannot be sorted; those fall back to ``np.unique``.
+    pandas, when installed, finds the groups by hashing, which is much faster
+    than sorting every value. It gives missing values such as NaT no code,
+    and some object values cannot be sorted; those fall back to ``np.unique``.
     """
+    pd = _pandas()
     try:
-        codes, labels = pd.factorize(raw, sort=True)
+        codes, labels = pd.factorize(raw, sort=True) if pd is not None else (None, None)
     except TypeError:
         codes = None
     if codes is None or (codes < 0).any():
@@ -802,7 +812,7 @@ def _bin_edges(key: ValueKey, raw: np.ndarray) -> np.ndarray:
     if isinstance(edges, str):
         if raw.dtype.kind != "M":
             raise GroupError(f'bins({key.expr.text()}, "{edges}"): a duration needs time values')
-        step = pd.Timedelta(edges).to_timedelta64()
+        step = _duration(edges, key)
         if raw.size == 0:
             raise GroupError(f'bins({key.expr.text()}, "{edges}"): there are no times to bin')
         start = raw.min()
@@ -814,10 +824,47 @@ def _bin_edges(key: ValueKey, raw: np.ndarray) -> np.ndarray:
     return edges
 
 
+# Duration units a bins() string may use without pandas, in nanoseconds.
+_UNITS = {
+    "w": 7 * 86_400 * 10**9, "week": 7 * 86_400 * 10**9, "weeks": 7 * 86_400 * 10**9,
+    "d": 86_400 * 10**9, "day": 86_400 * 10**9, "days": 86_400 * 10**9,
+    "h": 3_600 * 10**9, "hour": 3_600 * 10**9, "hours": 3_600 * 10**9,
+    "min": 60 * 10**9, "minute": 60 * 10**9, "minutes": 60 * 10**9,
+    "s": 10**9, "second": 10**9, "seconds": 10**9,
+    "ms": 10**6, "us": 10**3, "ns": 1,
+}
+
+
+def _duration(text: str, key: ValueKey) -> np.timedelta64:
+    """A duration such as "30 days" or "2D": pandas' reading when installed, else a number and a unit."""
+    pd = _pandas()
+    if pd is not None:
+        return pd.Timedelta(text).to_timedelta64()
+    import re
+
+    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([A-Za-z]+)\s*", text)
+    unit = match and _UNITS.get(match.group(2).lower())
+    if not unit:
+        raise GroupError(
+            f'bins({key.expr.text()}, "{text}"): cannot read the duration; write a number and a unit '
+            '(weeks, days, hours, minutes, seconds, ms, us, ns), e.g. "30 days"'
+        )
+    return np.timedelta64(int(round(float(match.group(1)) * unit)), "ns")
+
+
 def _format_edge(value: Any) -> str:
     if isinstance(value, np.datetime64):
-        stamp = pd.Timestamp(value)
-        return stamp.date().isoformat() if stamp == stamp.normalize() else stamp.isoformat()
+        pd = _pandas()
+        if pd is not None:
+            stamp = pd.Timestamp(value)
+            return stamp.date().isoformat() if stamp == stamp.normalize() else stamp.isoformat()
+        nanoseconds = value.astype("datetime64[ns]")
+        if nanoseconds == nanoseconds.astype("datetime64[D]"):
+            return str(np.datetime_as_string(nanoseconds, unit="D"))
+        for unit in ("s", "us"):  # as pandas prints: whole seconds, microseconds, else nanoseconds
+            if nanoseconds == nanoseconds.astype(f"datetime64[{unit}]"):
+                return str(np.datetime_as_string(nanoseconds, unit=unit))
+        return str(np.datetime_as_string(nanoseconds, unit="ns"))
     value = _plain(value)
     return f"{value:g}" if isinstance(value, float) else str(value)
 

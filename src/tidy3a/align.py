@@ -13,14 +13,15 @@ from typing import Any
 
 import numpy as np
 
-from tidy3a.backend import XARRAY
+from tidy3a.backend import xarray_backend
 from tidy3a.errors import AlignError
 
 
 def align_pair(
-    left: Any, right: Any, left_text: str, right_text: str, notes: list[str], *, backend: Any = XARRAY,
+    left: Any, right: Any, left_text: str, right_text: str, notes: list[str], *, backend: Any = None,
 ) -> tuple[Any, Any]:
     """Return *left* and *right* ready for exact arithmetic, or raise ``AlignError``."""
+    backend = xarray_backend() if backend is None else backend
     for dim in left.dims:
         if dim not in right.dims:
             continue
@@ -31,8 +32,9 @@ def align_pair(
     return left, right
 
 
-def align_many(values: Sequence[Any], texts: Sequence[str], notes: list[str], *, backend: Any = XARRAY) -> list[Any]:
+def align_many(values: Sequence[Any], texts: Sequence[str], notes: list[str], *, backend: Any = None) -> list[Any]:
     """Align each array to earlier operands on every shared axis; keep scalars."""
+    backend = xarray_backend() if backend is None else backend
     aligned = []
     for value, text in zip(values, texts):
         if backend.is_array(value):
@@ -43,8 +45,9 @@ def align_many(values: Sequence[Any], texts: Sequence[str], notes: list[str], *,
     return aligned
 
 
-def align_to(value: Any, target: Any, text: str, notes: list[str], *, backend: Any = XARRAY) -> Any:
+def align_to(value: Any, target: Any, text: str, notes: list[str], *, backend: Any = None) -> Any:
     """Match *value*'s shared axes to *target*'s, reordering by label when needed."""
+    backend = xarray_backend() if backend is None else backend
     for dim in value.dims:
         if not backend.has_axis(target, dim):
             continue
@@ -52,8 +55,9 @@ def align_to(value: Any, target: Any, text: str, notes: list[str], *, backend: A
     return value
 
 
-def check_join_axes(left: Any, right: Any, right_text: str, *, backend: Any = XARRAY) -> None:
+def check_join_axes(left: Any, right: Any, right_text: str, *, backend: Any = None) -> None:
     """Joins align by label; a labelled axis still never pairs with an unlabelled one."""
+    backend = xarray_backend() if backend is None else backend
     left_sizes, right_sizes = backend.sizes(left), backend.sizes(right)
     for dim in backend.axes(left):
         if not backend.has_axis(right, dim):
