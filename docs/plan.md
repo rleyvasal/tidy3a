@@ -1377,6 +1377,129 @@ Decision unchanged: the NumPy backend stays experimental. Dependencies is the cr
 
 Precedents: xarray itself wraps several array libraries behind one data model; tidy3's verbs build one lazy Polars query whose execution engine is chosen when it is collected (`collect(engine=…)`); dplyr's verbs run on different backends (dbplyr, dtplyr) with one set of semantics.
 
+### Milestone 10 — A reusable NumPy library, and the next speed-ups
+
+Planned (2026-10-25); nothing below is implemented. Two tracks: make the NumPy code a library others can use without tidy3A, as named-arrays is, and take the speed-ups that measurements show are left. The tracks share the same modules, so the order matters (decision 8). A planner for lazy execution is a separate decision (decision 10), not a track.
+
+**Where the NumPy code stands.** Three modules, 1,306 lines, importing neither xarray nor pandas:
+
+| Module | Lines | Ties to tidy3A | Usable outside tidy3A as it is |
+|---|---|---|---|
+| `grouped.py`: one-pass grouped kernels | 118 | none | yes |
+| `labels.py`: the exact label rule, exact casts, join type checks | 223 | `TidyError` | nearly |
+| `numpy_backend.py`: array, collection, label index, every operation | 965 | `TidyError`; `is_xarray`, `kept_positions`, `memory_mapped` from `backend.py`; the grouping object | no |
+
+What ties `numpy_backend.py` to tidy3A: `group_reduce`, `group_counts`, and `broadcast` take `tidy3a.expr.Groups` by duck typing (`codes`, `labels`, `axis`, `name`, `blocks()`, `counts()`), an object defined in tidy3A's expression module; about 15 of its methods exist only because a verb needs them (`field`, `summary`, `attach`, `drop_position_axis`, `with_values`, `has_metadata`, `codes_like`, `fresh`, `from_split`, `from_records`, `outside`, `unsupported`, `wrap`), while about 45 are generic named-array operations (selection by position and label, transpose, broadcasting arithmetic, `dot`, reductions, grouped reductions, concat, joins, nearest-label matching); every error is a `TidyError`; `NumpyArray` has no `__array_ufunc__`, so `np.sqrt(array)` does not work and every operation goes through `backend.apply`; and everything is private (`_make`, `_take`, `_reindex`, `_Labels`), with no documentation of the array type itself. The alignment rule (§5.5) lives in `align.py`, shared by both backends, with tidy3A's messages.
+
+**Positioning.** named-arrays is about 14,000 lines and competes on breadth of API; xarray ships `xarray.namedarray`, a dependency-light named array without labels; Scipp is a C++ library with units; `numpy_groupies` and `numpy-indexed` do grouped reductions without accuracy promises. This code should not compete on breadth. What it has that none of them offer in pure NumPy, in about 1,500 lines:
+
+1. Exact label semantics: labels match only when they are the same kind and exactly equal, with exact-cast lookups (`2**53 + 1` never matches `2**53`), repeated-label rules, and join type checks. pandas, and so xarray, pair labels through float64.
+2. Reproducible grouped reductions: bit-identical to reducing each group alone, and the certified float64 kernel (below), correctly rounded in every test case.
+3. A collection of variables sharing axes and one label array per axis, with joins and alignment under those rules.
+
+So the reusable product is a small library with three layers, each usable alone, not a general named-array library.
+
+**The design (owner's notes, 2026-10-25), against what exists.** The notes describe a package of five layers with every dependency pointing downward; most of it is already in place under other names, and the table says where:
+
+| Layer in the notes | Dependencies | What exists today | Gap |
+|---|---|---|---|
+| 1. Core: the raw NumPy array, dimension names, optional coordinates, names to axis numbers | NumPy | `NumpyArray`, `NumpyData`, `_Labels`, `axis(dim)` | None in substance; make it public and documented (A4–A5) |
+| 2. Index and grouping: the index protocol and factory, key factorizing, the float rules | Core, NumPy | `LabelIndex` on each label array, built lazily and cached; `labels.py`; `Groups` with cached codes, counts, and blocks; `grouped.py` | The protocol and factory, the regular-grid index, key transforms as records (below) |
+| 3. Planner and executor: records an expression graph and runs it, optionally chunk by chunk | 1–2 | Expression trees (`expr.py`, formulas), executed eagerly through the backend methods; lazy values on the xarray backend through Dask | The planner (decision 10) |
+| 4. Verbs: names and labels only, never axis positions | 1–3 | The verbs; `slice` takes 1-based positions because positions are the user's concept there | None |
+| 5. Public API | 4 | `tidy3a` | None |
+
+Who touches NumPy: the notes say layers 1 and 2 only. The executor's kernels must as well (ufuncs, `take`, the grouped kernels); verbs, planner, and API stay NumPy-free. Today the expression evaluator and `verbs.py` still call NumPy in places (`np.result_type` for write-back promotion, `np.where`, the rounding hint in `align.py`); A5 moves those behind the backend.
+
+The index protocol: labels to positions, ranges to positions, and the `unique` and sorted flags, with a factory that inspects a label array once and picks the implementation; indexes built lazily and cached on the label array, as now. Implementations: sorted labels through `searchsorted` (exists); unsorted labels through one sort at build time (exists); a regular-grid index for evenly spaced labels such as gridded latitude, longitude, and time, which resolves labels and ranges arithmetically with no sort and no index memory (new, cheap, and the common case for the sample datasets); a multi-key index for composite labels (later; tidy3A keeps multi-level labels on xarray until then). Not in the protocol's NumPy-only implementations: a hash map for unique unsorted labels. A Python `dict` of 1M labels is slow to build and cannot be looked up vectorised; the fast hash is pandas (26 ms to factorize 10M keys, against 443 ms for `np.unique`), so hashing comes with pandas or a compiled kernel (track B), and the sort-once index is the unsorted case otherwise. Custom index classes can be registered for other label types, but the protocol carries the exactness obligations (a label `kind`, lookups through `exact_cast`), so a custom index cannot reintroduce `2**53 + 1 == 2**53`; that rule cost priority 1.
+
+Key transforms: grouping in the core is on exact equality only, and domain meaning lives in transforms applied to the key before factorizing: binning (`bins()` with edges or a duration exists), rounding, spatial grid cells (the voxel workload), time windows. Built-in transforms are small records holding their settings (bin width and origin, cell size), so they print in the plan and in `groups:`, compare equal when their settings do, serve as cache keys, and give readable group labels, in the sorted order the output uses; plain functions and lambdas are accepted for quick use and are never equal to anything else. Tolerance-based rounding can split nearby values that straddle a bucket edge, so bucket boundaries are user-controllable and documented.
+
+Corrections to the notes, from what was measured and built:
+
+- `bincount` with weights for float sums is the "simple float64" kernel below: it gives 0 for `[2**53, 1, -2**53]`, whose sum is 1, and `reduceat` adds floats in a different order from `np.sum`. The grouping module needs the certified or a compensated kernel and the floating-point contract, not `bincount` alone; `bincount` is right for counts and for integer and boolean sums.
+- A running key-to-code dictionary across chunks is a per-row Python loop, too slow for 90,000-group data, and assigns codes in arrival order while the output labels are sorted; chunked factorizing needs a vectorised hash per chunk, a merge, and a final relabelling (what Dask and flox do), and tree-combined float reductions are not bit-identical across chunk sizes (flox differed from per-group means in 14–15 of 32 groups).
+- NaN keys: `group_by` on a value key with NaN is an error today ("filter them out first"); the notes' rule (all NaN one group, `dropna` choosing whether it is kept) is pandas' with `dropna=False`. It is a behaviour change (decision 11). Signed zero already groups as one value in pandas and NumPy; NumPy 2's `np.unique` also groups NaN together.
+- The grouping bottleneck is measured, not suspected: at 10M points and 32 groups, finding groups 26 ms (pandas' hash), sorting 14, gathering the strided field 40, the 32 means 1; the many-small-groups case went from 4.8 s to 12 ms in priorities 2–3. What remains is memory traffic and hashing, which a planner does not change and columnar fields and compiled kernels do (track B).
+- Not in the notes, learned the hard way: the exact label rule applies to lookups, alignment, and joins, not only grouping (kind and exact equality, exact casts, join type checks, repeated labels), and lives in layer 2; xarray stays the reference implementation in tests (an optional test dependency) even when it is no longer the foundation, since the property tests against it, the pandas oracle for labels, and `fsum` and exact rationals for reductions found nearly every bug in milestones 9–10; and the reproducibility contract says what is bit-identical and what is only repeatable, and across what.
+
+#### Track A — the library
+
+**Layers and API** (names are placeholders; the package name is decision 2):
+
+| Layer | From | Public surface |
+|---|---|---|
+| `labels` (layer 2) | `labels.py` and `LabelIndex` from `numpy_backend.py` | `kind`, `equal`, `compare`, `strict_subset`, `lossy_join_type`, `exact_cast`; the index protocol (`get_indexer(wanted)`, `slice_indexer(start, stop)`, `unique`, `sorted`), the `index_for(labels)` factory, `SortedIndex`, `SortOnceIndex`, `GridIndex`, `register_index(kind, cls)`; `LabelError` |
+| `grouped` (layer 2) | `grouped.py`, `Groups` and `_factorize` from `expr.py`, plus the kernels from track B | `Grouping(codes, labels)` with `counts()`, `blocks()`; `factorize(values, transform=None, dropna=…)`; transforms `Bins(edges)`, `Duration(text)`, `Round(step, origin)`, `GridCells(size, origin)` as records; `reduce(values, op, grouping, axis, na_rm, min_count)`; `broadcast(stats, grouping)` |
+| `array` (layer 1, with the operations of layer 3's eager executor) | `NumpyArray`, `NumpyData`, `_Labels`, the helpers | `Array(values, dims, labels, attrs, name)` with `__array_ufunc__` and `__array_function__` broadcasting by axis name, `sel`, `isel`, `transpose`, `rename`, `reduce`, `dot`, `concat`; `Collection` with `assign`, `select`, `keep`, `join(how)`, `nearest`, `to_dict`; `align(a, b)` returning the arrays ready for exact arithmetic and what was reordered; `AlignError`; `to_xarray`/`from_xarray` when xarray is installed |
+
+tidy3A keeps the verbs, expressions, formulas, inspection output, the messages and hints, and a thin `NumpyBackend` adapter implementing its backend protocol with the library; its `Groups` wraps `Grouping`; its `LabelError` and `AlignError` inherit from both `TidyError` and the library's errors, so existing `except` clauses keep working.
+
+**Steps**, each with a gate:
+
+1. Write the backend interface down as a `typing.Protocol` in `backend.py` and check both backends against it in a test. Gate: the suite unchanged. This makes the boundary explicit before anything moves.
+2. Move the grouping object out of `expr.py` into `grouped.py` (`Grouping`); `expr.Groups` becomes a subclass holding tidy3A's `axis` and `name`. Gate: the suite and the 65-case corpus unchanged.
+3. Give the library its own errors; tidy3A's inherit from both. Gate: every test that matches an error message still passes.
+4. Add the index protocol and factory with the regular-grid index, and key transforms as records with `bins()` as the first; add `__array_ufunc__` and `__array_function__` to the array, with broadcasting by axis name and the alignment rule applied (decision 3 says whether labels must match exactly or the library offers a looser mode). Gate: `np.sqrt(array)`, `array + other`, and `np.where` give the same values as `backend.apply`, checked on both backends by the property tests.
+5. Move the verb-shaped methods into the adapter and name the public API; document the array, the collection, and the rules in the library's own README. Gate: `numpy_backend.py` imports nothing from tidy3A but the adapter does.
+6. Split the tests: the pandas-oracle label tests, the bit-identity and certified-kernel tests, and `test_numpy_labels.py` go with the library; the xarray-equivalence, corpus, and contract tests stay in tidy3A as its integration suite. Gate: both suites pass on current and minimum dependencies.
+7. Separate distribution, with tidy3A depending on it at a pinned minimum version; tidy3A's `pip install tidy3a` then installs NumPy and the library. Gate: the wheel checks in CI (plain, and with the xarray extra) pass.
+
+Steps 1–3 are small (a day), change no behaviour, and are worth doing whether or not the library ships: they remove the hidden coupling. Steps 4–7 are the library proper, with the grid index and the transforms adding perhaps a day: a few days of work, an API design pass, and from then on two packages to version and release. The risk is API churn in the library while tidy3A's verbs still change; tidy3A's suite, run against the library at every change, is what catches it.
+
+#### Track B — speed-ups
+
+Measured in this session (Apple M4, 10 threads, 10M points of five float32 fields unless stated; milliseconds):
+
+| Lever | Measured | Changes results |
+|---|---|---|
+| Columnar storage for field holders (each field a contiguous 1-D array) | Field mean 2.9 → 1.1; field write-back 3.4 → 0.9; gathering a field in group order 40 → 19; rotation 14 → 6.7 with `matmul`. One transpose per read: 17.7 (copying the same 200 MB: 4.4) | No |
+| Compiled one-pass grouping (Numba, in a scratch environment) | Compensated (Neumaier) float64 grouped mean in one pass: 10.0 on one thread, 3.4 on ten, against 55 + 14 (sort) today. Error against `math.fsum`: zero (one thread), 2.2 × 10⁻¹⁶ relative (ten threads); the two are not bit-identical in float64 but round to the same float32 | Last bits; gated by the floating-point contract (decision 4) |
+| `matmul` instead of `einsum` in `dot` | 24 against 66 on the same contiguous data; 6.7 on columnar data. Bit-identical for a permutation rotation (entries 0, ±1); for a general 3 × 3 matrix 35% of results differ, by about 2 float32 steps (largest absolute difference 3 × 10⁻⁵ on values up to 243) | Last bits; same gate |
+| Compiled factorize for integer-valued keys | 24.4 against pandas' 26: finding groups is memory-bound | No, and no gain |
+| Reusing buffers in point-cloud expressions | 6.8 → 6.5 for `sqrt(x² + y² + z²)` | No, and no gain |
+| Multi-threading beyond grouping (numexpr for formulas, Numba `prange`) | Not measured; NumPy's ufuncs use one of the ten cores | numexpr no; otherwise as above |
+
+Where the time goes today on the NumPy backend: the 10M-point §7 pipeline (55 ms) spends about 8 copying `[x, y, z]` out of the holder, 14 in the rotation (`einsum`; fancy indexing on the feature axis happens to leave the selection column-major), about 10 in arithmetic, and 17 in the filter (which already gathers by positions, 3.6, not by mask, 19). The grouped mean (102 ms) spends 26 finding groups (pandas), 14 sorting, 40 gathering the strided field, and 1 in the 32 means. The grouped mutate adds broadcasting (4) and the subtraction (5).
+
+**The floating-point contract**, measured first because it gates two levers. Four kernels for grouped float32 sums and means were compared on 12 cases, 5 broad random ones against `math.fsum` and 7 adversarial ones against exact rational sums (cancellation such as `[2**53, 1, -2**53]`, `[1e30, 1, -1e30]`, alternating ±1e8 with 1s, values and their negatives, a sum beyond float32 whose mean is within it), and on the full 10M-point pipelines:
+
+| Kernel | Worst error (float32 steps) | 10M grouped mean | 10M grouped mutate |
+|---|---|---|---|
+| Today: gather in group order, NumPy's float32 reduction per group | 39 on ordinary cancelling data; 46 million on adversarial cases; `inf` for the overflowing sum's mean | 99 ms, 238 MB | 107 ms, 238 MB |
+| Simple float64 accumulation (`np.bincount` with weights) | gives 0 for `[2**53, 1, -2**53]`, whose sum is 1 | 67 ms, 153 MB | 66 ms, 153 MB |
+| Exact: significands summed per exponent, totals combined with compensation; independent of input order and chunking | 0 | 159 ms, 372 MB | 157 ms, 372 MB |
+| Certified float64: one float64 pass plus a pass for the sum of magnitudes, which gives an error bound per group; where both ends of the bound round to the same float32 the result is correctly rounded, and the other groups go to the exact kernel | 0 | 74 ms, 191 MB | 83 ms, 191 MB |
+
+The certified kernel's weakness is heavy cancellation: on 10M values centred on zero, 26 of 32 groups fail the check and it takes 171 ms against 106 for the exact kernel alone. Three untested fixes: certify only the result asked for (sum or mean), switch to the exact kernel when most groups fail, and read significands and exponents from the float32 bits. A compiled compensated kernel (the Numba row above) is what pandas and Polars do, and resolves this at 10 ms without the bound.
+
+The contract the measurements support, pending decision 4: float32 sums and means accumulate in float64 and return float32; float64 inputs keep today's path until a kernel is shown better on the same references (sequential float64 is worse than NumPy's pairwise sums for them); labels, shapes, output types, and missing-value rules stay exact; results are repeatable for a fixed input, kernel, and environment, and exact between the two eager backends where they call the same kernel; grouped and ungrouped reductions may use different algorithms with their numerical agreement tested, not bit identity; documented rounding differences are allowed across algorithms, layouts, Dask chunking, thread counts, and devices. Tests use `math.fsum` for broad coverage and exact rational arithmetic for the adversarial corpus, compare against the stored float32 inputs, and measure error as absolute near zero, in float32 steps where meaningful, and scaled by the sum of magnitudes under cancellation.
+
+**Steps**, in the order that pays soonest:
+
+1. Columnar storage for field holders in the NumPy backend only: `read_array` and `from_xarray` store a holder with the field axis as separate contiguous fields (one transpose, 17.7 ms per 200 MB), `values` returns the user's layout as a view, and dims order as the user sees it never changes. NumPy-only, no numerical change. Gate: the suite, the corpus, and bit-identical results; the 10M-point §7 and grouped workloads faster end to end by the amounts above.
+2. The compiled kernels as an optional extra (`tidy3a[fast]`, Numba first: no build matrix, about 100 MB installed, 1–2 s first-call compilation cached on disk), used for grouped float32 sums and means and for finding groups when it wins; the pure-NumPy path (the certified kernel) stays the required fallback. Gate: both paths give the same float32 results on the accuracy corpus and the property tests; full-pipeline time and peak memory recorded. Projected 10M-point grouped mean about 40 ms (26 finding groups, 10 reducing, the rest overhead) and grouped mutate about 50, from 102 and 110.
+3. `matmul` in `dot` once the contract allows last-bit changes, measured on the whole §7 pipeline (rotation, offset, distance, filter together), since `opt_einsum` once made the rotation faster and the pipeline slower by changing the result's layout.
+4. Rerun `scripts/bench.sh` and the milestone 9 criteria, with the speed criterion as revised in decision 9.
+
+A Rust extension (PyO3 and maturin, built with `cibuildwheel`, as Polars is) is the long-run form of step 2 if the library stands alone and Numba's weight is unwanted; it needs a wheel build matrix and is not the first step.
+
+#### Decisions for the plan's owner
+
+1. **Library scope.** The three layers (`labels`, `grouped`, `array`), or `labels` and `grouped` only, which are nearly standalone now and carry the two distinctive pieces. Recommendation: all three; the collection and joins are what make the rules usable on real data.
+2. **Name and home.** A package name, and a separate repository or a subpackage of this one released on its own. Recommendation: a separate repository once step A5 is done; until then, a subpackage.
+3. **The alignment rule.** Whether exact alignment (§5.5) travels with the library as its only mode, or the library offers a looser mode (xarray's outer join) with exact as the default. Recommendation: exact only in the first version; a mode can be added, a changed default cannot.
+4. **The floating-point contract** stated above: adopt it, or keep bit identity with today's per-group reductions. Everything in track B steps 2 and 3 waits on this.
+5. **Ungrouped reductions.** Whether ungrouped float32 sums and means also move to float64 accumulation, so one rule covers both, or only grouped ones change. Recommendation: both, with their agreement tested.
+6. **Compiled kernels.** Numba as an optional extra, a Rust or Cython extension built into the library, or neither. Recommendation: Numba first, behind the fallback.
+7. **Columnar storage.** Backend-internal, applied on read for holders with a field axis, or left to the user's layout. Recommendation: backend-internal; the user never sees the layout.
+8. **Order of the tracks.** Steps A1–A3 first (they move the grouping object the kernels attach to), then track B inside the modules that later move unchanged, then A4–A7. The alternative, library first, delays every speed-up by the library's API design.
+9. **The speed criterion.** Replace "1.5 times faster than the xarray backend on every workload" with end-to-end times against the previous release for both backends, the ratio reported, and no workload more than 10% slower than the release before; see the milestone 9 note on why the ratio narrows as shared code improves.
+10. **The planner.** The notes make lazy execution the main mode, with eager as lazy plus an automatic compute after each verb so each verb is written once, and an executor that fuses and reorders steps and runs chunk by chunk over memory-mapped arrays without Dask. Milestone 9 decided the NumPy backend never rebuilds Dask support; this reverses that, and it is the largest piece of the design. What the measurements say: fusion and reordering gain little in NumPy (fusing `sqrt(x² + y² + z²)` saved 0.3 ms of 6.8 at 10M points, because ufuncs are memory-bound and fast; fusion pays with compiled or threaded execution), and "filter before heavy computation" applies only when the predicate does not need the heavy result, which in §7 it does (the filter needs the rotation and the distance). The planner's value is peak memory and out-of-core execution, not speed on in-memory data. Two conditions whatever is decided: labels, dims, dtypes, and attributes stay eager even when values are lazy, as in xarray and Dask, so every check, note ("changed: x reordered to match …"), message, and inspection line is produced at plan time unchanged; and eager stays the default (notebooks, pandas, and xarray are eager; Polars offers both and recommends lazy for big data), with the per-verb overhead guarded by the 34,688-point workloads (0.3–0.7 ms today). Staged approach: (a) verbs record plan nodes and execute them at once through the existing backend methods, which are already the executor's primitives; this gives `explain()` (the plan preview), running a pipeline on a head slice, and each verb written once, and is mostly a refactor; (b) chunked execution over memory maps only if out-of-core without Dask is a requirement, built after (a) and measured against Dask on the xarray backend, which exists and is tested, with chunked grouping under the floating-point contract since tree-combined reductions are not bit-identical across chunk sizes. Recommendation: (a) after track B; (b) not until a workload needs it.
+11. **NaN group keys.** Keep today's error on a value key with NaN, or adopt the notes' rule: all NaN one group, with `dropna` choosing whether it is kept (pandas' `dropna=False`). Recommendation: adopt it with `dropna=True` as the default, matching pandas, and a note saying how many positions were dropped.
+
+Precedents: pandas' grouped sums and means use Kahan compensation per group; Polars accumulates float32 means in float64 and returns the output type; Apache Arrow returns float64 for floating sums and means; DuckDB documents that its compensated `fsum` stays sensitive to input order; PyTorch documents that batched, sliced, and device-specific calculations may round differently; NumPy's own sums depend on axis and layout. The pandas and Polars descriptions are of current implementations, not guarantees.
+
 ## 11. Verification and release strategy
 
 Prioritize meaningful checks rather than copying tidy3's entire test matrix:
