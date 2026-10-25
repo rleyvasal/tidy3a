@@ -8,7 +8,9 @@
   `set_backend("numpy")`, or `backend="numpy"` on `tidy()`, `read_array()`,
   and `read_binary()`. Lazy, chunked, and memory-mapped data stay on xarray.
   The NumPy backend keeps attributes but not xarray storage encodings;
-  `docs/backends.md` lists the deliberate differences.
+  `docs/backends.md` lists the deliberate differences. It stays experimental:
+  it meets the correctness, import-time, and size criteria but not yet the
+  speed and dependency ones (plan milestone 9).
 - `dot` always uses NumPy's `einsum`. With `opt_einsum` installed, xarray
   used it instead, which changed results in the last digits and made later
   steps of a pipeline about twice as slow.

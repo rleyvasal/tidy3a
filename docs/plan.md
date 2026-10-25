@@ -1,6 +1,6 @@
 # tidy3A: repository and implementation plan
 
-Status: milestones 0–5 implemented; milestone 6 is implemented except Dask-backed grouping and the other verbs' materialization boundaries; milestone 7 is complete: `0.1.0` was published to PyPI on 2026-10-24; milestone 8 (Polars engine and tidy3 bridge) is planned, with one open question (§12); milestone 9 (backend interface, NumPy backend under evaluation) has completed steps 2–5 (the xarray backend behind the interface with no behaviour change, an experimental NumPy backend behind it, the whole suite run on both, and a pinned benchmark environment); step 6, the decision, is next.
+Status: milestones 0–5 implemented; milestone 6 is implemented except Dask-backed grouping and the other verbs' materialization boundaries; milestone 7 is complete: `0.1.0` was published to PyPI on 2026-10-24; milestone 8 (Polars engine and tidy3 bridge) is planned, with one open question (§12); milestone 9 (backend interface, NumPy backend under evaluation) is complete: the xarray backend stays the default behind a backend interface, and the NumPy backend stays experimental after meeting three of its five go/no-go criteria (step 6); the follow-ups that could change that are listed there.
 
 This document collects the design decisions and records implementation progress in §10. Interfaces described for later milestones remain planned; the completed milestones describe the current implementation.
 
@@ -1290,6 +1290,24 @@ Step 5 status (2026-10-24): complete.
 | Dependencies | A real reduction for users: tidy3A installs and runs eager pipelines without xarray, with pandas optional |
 | Import time | No worse than today's 224 ms; reported, not required on its own |
 | Maintenance | The NumPy backend contains no verb logic and stays within about 1,500 lines |
+
+Step 6 status (2026-10-24): decided. Measured on commit `18c14d3` in the pinned environment (`benchmarks/results/2026-10-24-18c14d33.json`, Apple M4, Python 3.12, NumPy 2.5.4, xarray 2026.9.0):
+
+| Criterion | Result | Met |
+|---|---|---|
+| Correctness | Every test passes on both backends: 1,248 on current and 1,210 on minimum dependencies. The 65-case corpus and 300 property tests agree exactly, errors and warnings included; the only differences are the documented and tested ones in `docs/backends.md` | Yes |
+| Speed | 14 of 24 reference workloads are at least 1.5 times faster and 8 between 1.0 and 1.5; the 10M-point grouped mutate is 0.95 and reading the nuScenes file 0.83 (0.20 against 0.17 ms). Geometric mean 1.82 | No |
+| Dependencies | `import tidy3a` fails without pandas, and then without xarray: they are imported at module level in `backend.py`, `expr.py`, and `io.py` | No |
+| Import time | 218 ms, against 224 ms before; loading the NumPy backend adds about 8 ms, and xarray alone takes 213 ms | Yes (reported) |
+| Maintenance | `numpy_backend.py` is 960 lines and holds no verb logic | Yes |
+
+Decision: the NumPy backend does not become the default; it stays experimental (`set_backend("numpy")`, `backend="numpy"`). It stays because it is correct, kept so by every test run at the cost of running the suite twice (about 2 more seconds); it is 2–3.9 times faster on in-memory data of nuScenes size and 1.15–2.5 times on the sample datasets; and each failed criterion has a specific cause. Removing it was the alternative: 960 fewer lines and one test run, losing those gains. The interface and the two-backend tests are kept either way; they already found real faults on the default backend (results changing with `opt_einsum`, a raw pandas error for repeated labels, labels compared through float64).
+
+Follow-ups that could change the decision, each to be judged by rerunning `scripts/bench.sh` and these criteria:
+
+1. Reading (speed): readers build an xarray dataset that the NumPy backend then converts; let readers build the chosen backend's collection directly.
+2. Large grouping (speed): both backends reduce group by group in Python, so neither is faster at 10M points; a grouped reduction in one pass (milestone 8's Polars engine, or NumPy's `reduceat` where results stay bit-identical) plugs into either backend's group operation.
+3. Dependencies: import xarray only when the xarray backend or an xarray input is used (`backend.py`, `io.py`), and make pandas optional in `expr.py`, with NumPy fallbacks for finding groups (already present) and for duration strings in `bins()`.
 
 Precedents: xarray itself wraps several array libraries behind one data model; tidy3's verbs build one lazy Polars query whose execution engine is chosen when it is collected (`collect(engine=…)`); dplyr's verbs run on different backends (dbplyr, dtplyr) with one set of semantics.
 
