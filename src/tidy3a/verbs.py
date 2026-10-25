@@ -595,7 +595,7 @@ def _store_vector(frame: TidyArray, target: Vector, value: Any, text: str, notes
 
 
 def group_by(*keys: Any, dropna: bool = True, **named: Any) -> Verb:
-    """Group by axes (kept), a value field, or ``bins(...)`` of one.
+    """Group by axes (kept), a value field, or a transform of one: ``bins(...)``, ``rounded(...)``, ``cells(...)``.
 
     Positions whose value is missing (NaN or NaT) are one group. ``dropna``
     leaves them out of every group, with a note saying how many, as pandas
@@ -609,11 +609,11 @@ def group_by(*keys: Any, dropna: bool = True, **named: Any) -> Verb:
         resolved: list[Any] = []
         for key in keys:
             if isinstance(key, ValueKey):
-                resolved.append(ValueKey(key.name, key.expr, key.edges, bool(dropna)))
+                resolved.append(key.with_dropna(bool(dropna)))
                 continue
             name = key.name if isinstance(key, Ref) else key
             if not isinstance(name, Hashable) or isinstance(key, (Expr, list)) and not isinstance(key, Ref):
-                raise GroupError("group_by() takes names, bins(...), or name = expression")
+                raise GroupError("group_by() takes names, bins(...), rounded(...), cells(...), or name = expression")
             if isinstance(key, Ref) and not check_name(key, Context(frame, verb="group_by", error=GroupError, grouped=False)):
                 if key.python is not MISSING:
                     raise GroupError(f'"{name}" is a notebook variable, not an axis or field of this data')

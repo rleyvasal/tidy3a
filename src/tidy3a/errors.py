@@ -3,9 +3,10 @@
 Every tidy3a error is a ``ValueError``, so code that already catches bad
 input keeps working; the subclasses say which step rejected it. The NumPy
 modules that are becoming a library (``tidy3a.labelarray``) raise their
-own family, ``LabelArrayError``; tidy3a's ``LabelError`` and ``AlignError`` inherit
-from both, and ``translating`` raises a library error that escapes through
-a verb, a reader, ``tidy()``, or ``collect()`` again as tidy3a's class.
+own family, ``LabelArrayError``; tidy3a's ``LabelError``, ``AlignError``, and
+``GroupError`` inherit from both, and ``translating`` raises a library
+error that escapes through a verb, a reader, ``tidy()``, or ``collect()``
+again as tidy3a's class.
 """
 
 from __future__ import annotations
@@ -45,7 +46,7 @@ class MutateError(TidyError):
     """``mutate`` cannot store a result."""
 
 
-class GroupError(TidyError):
+class GroupError(TidyError, labelarray.GroupError):
     """``group_by`` cannot group by what was asked for."""
 
 
@@ -61,7 +62,8 @@ class LabelError(TidyError, labelarray.LabelError):
     """Labels that cannot be ordered, compared, or looked up, or a label that is absent."""
 
 
-_FROM_LIBRARY = {labelarray.LabelError: LabelError, labelarray.AlignError: AlignError}
+_FROM_LIBRARY = {labelarray.LabelError: LabelError, labelarray.AlignError: AlignError,
+                 labelarray.GroupError: GroupError}
 
 
 def translating(function: Callable) -> Callable:

@@ -14,7 +14,9 @@ import builtins
 import operator
 import sys
 import warnings
-from collections.abc import Callable, Hashable, Sequence
+from collections.abc import Callable, Hashable, Iterator, Sequence
+from contextlib import contextmanager
+from fractions import Fraction
 from typing import Any
 
 import numpy as np
@@ -24,6 +26,8 @@ from tidy3a.backend import is_xarray, xarray_backend
 from tidy3a.errors import GroupError, RefError, TidyError
 from tidy3a.frame import TidyArray, tidy
 from tidy3a.grouped import Grouping
+from tidy3a.labelarray import errors as labelarray_errors
+from tidy3a.labelarray.transforms import ZONES, Bins, Duration, GridCells, Round, Transform, parse_duration
 
 
 # ── Nodes ───────────────────────────────────────────────────────────────────
@@ -377,16 +381,27 @@ class AxisKey:
 class ValueKey:
     """``group_by(ring)`` or ``group_by(bins(distance, edges))``: group positions by value.
 
+    ``transform`` is applied to the values before they are grouped by exact
+    equality: a record from ``tidy3a.labelarray.transforms`` (``bins()``,
+    ``rounded()``, and ``cells()`` make them), or None. ``label`` is how the
+    key prints in ``group_by(...)`` and the ``groups:`` line, and ``call``
+    is the helper's call with its settings, for messages.
+
     ``dropna`` says whether positions whose value is missing (NaN or NaT) are
     left out of every group, as pandas does by default, or kept as one group.
     """
 
-    def __init__(self, name: Hashable, expr: Expr, edges: Any = None, dropna: bool = True):
+    def __init__(self, name: Hashable, expr: Expr, transform: Any = None, dropna: bool = True, *,
+                 label: str | None = None, call: str | None = None):
         self.name = name
         self.expr = expr
-        self.edges = edges
+        self.transform = transform
         self.dropna = dropna
-        self.label = str(name) if edges is None else f"bins({expr.text()})"
+        self.label = str(name) if label is None else label
+        self.call = self.label if call is None else call
+
+    def with_dropna(self, dropna: bool) -> ValueKey:
+        return ValueKey(self.name, self.expr, self.transform, dropna, label=self.label, call=self.call)
 
 
 class Groups(Grouping):
@@ -811,9 +826,9 @@ def resolve_value_key(key: ValueKey, frame: Any, group_axes: Sequence[Hashable])
         raise GroupError(f"group_by({key.label}) groups the {axis} axis, which group_by also keeps")
     if axis == ctx.field_axis:
         raise GroupError(f"group_by({key.label}) would group the field axis {axis}; fields are columns")
-    if key.edges is None:
+    if key.transform is None:
         return _value_groups(key, axis, values, ctx.backend)
-    return _bin_groups(key, axis, values, ctx.backend)
+    return _transform_groups(key, axis, values, ctx.backend)
 
 
 def _value_groups(key: ValueKey, axis: Hashable, values: Any, backend: Any) -> Groups:
@@ -847,7 +862,7 @@ def _with_missing(key: ValueKey, axis: Hashable, codes: Any, labels: list, count
     """Groups whose last is the positions with a missing key: shown, or dropped with a note."""
     if not key.dropna:
         return Groups(key.name, axis, codes, labels)
-    subject = key.label if key.edges is None else key.expr.text()
+    subject = key.label if key.transform is None else key.expr.text()
     note = (f"changed: group_by({key.label}) dropped {count:,} position{'' if count == 1 else 's'} "
             f"with a missing {subject}; dropna=False keeps them as a group")
     return Groups(key.name, axis, codes, labels, dropped=count, note=note)
@@ -881,103 +896,61 @@ def _factorize(raw: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return np.asarray(labels), codes
 
 
-def _bin_groups(key: ValueKey, axis: Hashable, values: Any, backend: Any) -> Groups:
+def _transform_groups(key: ValueKey, axis: Hashable, values: Any, backend: Any) -> Groups:
+    if _zoned(values):
+        raise GroupError(f"{key.call}: {ZONES}")
     raw = values.values
-    # A missing value is in no bin, but it is not outside them either: it is a
-    # missing key, grouped or dropped as dropna says. Values outside every bin
-    # are still an error.
+    # A missing value is in no group, but it is not outside them either: it is a
+    # missing key, grouped or dropped as dropna says. Values in no group (outside
+    # every bin, or infinite) are still an error.
     missing = _missing_keys(raw)
-    edges = _bin_edges(key, raw if missing is None else raw[~missing])
-    codes = np.searchsorted(edges, raw, side="right") - 1
-    outside = (codes < 0) | (codes >= len(edges) - 1)
-    if missing is not None:
-        outside &= ~missing
+    with _settings_of(key.call):
+        codes, labels = key.transform.groups(raw if missing is None else raw[~missing])
+    outside = codes < 0
     if outside.any():
-        low, high = _format_edge(edges[0]), _format_edge(edges[-1])
-        raise GroupError(
-            f"{int(outside.sum()):,} positions of {key.expr.text()} fall outside every bin "
-            f"[{low}, {high}); they are never dropped silently.\n"
-            "  Widen the edges, or filter those positions out first."
-        )
-    labels = [f"[{_format_edge(a)}, {_format_edge(b)})" for a, b in zip(edges[:-1], edges[1:])]
+        raise GroupError(key.transform.outside(int(outside.sum()), key.expr.text()))
     if missing is None:
         return Groups(key.name, axis, backend.codes_like(codes, values), labels)
-    # Bin labels are text, and a NaN among them would make labels of mixed types, which
-    # cannot be looked up; the missing group is labelled with the text "NaN" (or "NaT").
-    codes[missing] = len(labels)
-    label = "NaT" if raw.dtype.kind in "mM" else "NaN"
-    return _with_missing(key, axis, backend.codes_like(codes, values), [*labels, label], int(missing.sum()))
+    # Text labels, such as bins', label the missing group with the text "NaN" (or "NaT"),
+    # since a NaN among them would make labels of mixed types, which cannot be looked up.
+    found = codes
+    codes = np.full(raw.shape, len(labels), dtype=found.dtype)
+    codes[~missing] = found
+    labels = [*labels, key.transform.missing_label(raw.dtype)]
+    return _with_missing(key, axis, backend.codes_like(codes, values), labels, int(missing.sum()))
 
 
-def _bin_edges(key: ValueKey, raw: np.ndarray) -> np.ndarray:
-    edges = key.edges
-    if isinstance(edges, str):
-        if raw.dtype.kind != "M":
-            raise GroupError(f'bins({key.expr.text()}, "{edges}"): a duration needs time values')
-        step = _duration(edges, key)
-        if raw.size == 0:
-            raise GroupError(f'bins({key.expr.text()}, "{edges}"): there are no times to bin')
-        start = raw.min()
-        count = int((raw.max() - start) // step) + 1
-        return start + np.arange(count + 1) * step
-    edges = np.asarray(edges)
-    if edges.ndim != 1 or len(edges) < 2 or not (edges[1:] > edges[:-1]).all():
-        raise GroupError(f"bins({key.expr.text()}, …) needs at least two increasing edges")
-    return edges
+def _zoned(values: Any) -> bool:
+    """Whether key values are times with a time zone.
+
+    xarray hands such times over without their zone: as naive datetimes
+    (recent versions), or as integer nanoseconds (2024.6). The zone is still
+    in the type, or in the pandas index behind the values, so that is where
+    to look; the NumPy backend never holds zoned times.
+    """
+    if getattr(values.dtype, "tz", None) is not None:
+        return True
+    variable = getattr(values, "variable", None)
+    if variable is None or values.dtype.kind != "O" or values.ndim != 1:
+        return False
+    return getattr(variable.to_index_variable().to_index(), "tz", None) is not None
 
 
-# Duration units a bins() string may use, in nanoseconds. Months and years are not
-# fixed lengths, and "m" could be either minutes or months, so none of them are units.
-_WEEK, _DAY, _HOUR, _MINUTE, _SECOND = 7 * 86_400 * 10**9, 86_400 * 10**9, 3_600 * 10**9, 60 * 10**9, 10**9
-_UNITS = {
-    **dict.fromkeys(("w", "week", "weeks"), _WEEK),
-    **dict.fromkeys(("d", "day", "days"), _DAY),
-    **dict.fromkeys(("h", "hr", "hrs", "hour", "hours"), _HOUR),
-    **dict.fromkeys(("min", "mins", "minute", "minutes"), _MINUTE),
-    **dict.fromkeys(("s", "sec", "secs", "second", "seconds"), _SECOND),
-    **dict.fromkeys(("ms", "millisecond", "milliseconds"), 10**6),
-    **dict.fromkeys(("us", "microsecond", "microseconds"), 10**3),
-    **dict.fromkeys(("ns", "nanosecond", "nanoseconds"), 1),
-}
+@contextmanager
+def _settings_of(call: str, separator: str = ": ") -> Iterator[None]:
+    """Raise the library's grouping errors, whose messages are clauses, after the call that made the key."""
+    try:
+        yield
+    except labelarray_errors.GroupError as error:
+        if isinstance(error, TidyError):
+            raise
+        raise GroupError(f"{call}{separator}{error}") from None
 
 
 def _duration(text: str, key: ValueKey) -> np.timedelta64:
-    """A duration such as "30 days", "2D", or "1h30min": numbers with units, added exactly.
-
-    tidy3a reads durations itself, so a duration means the same whether or
-    not pandas is installed.
-    """
-    import re
-    from fractions import Fraction
-
-    parts = re.findall(r"(\d+(?:\.\d+)?)\s*([A-Za-z]+)", text)
-    rest = re.sub(r"(\d+(?:\.\d+)?)\s*([A-Za-z]+)", "", text).strip()
-    units = [_UNITS.get(unit.lower()) for _, unit in parts]
-    total = sum((Fraction(number) * unit for (number, _), unit in zip(parts, units) if unit), Fraction(0))
-    if not parts or rest or not all(units) or total.denominator != 1 or total <= 0:
-        raise GroupError(
-            f'bins({key.expr.text()}, "{text}"): cannot read the duration; write numbers with units '
-            '(weeks, days, hours, minutes, seconds, ms, us, ns), e.g. "30 days" or "1h30min", '
-            "a whole number of nanoseconds; months and years have no fixed length"
-        )
-    return np.timedelta64(int(total), "ns")
-
-
-def _format_edge(value: Any) -> str:
-    if isinstance(value, np.datetime64):
-        pd = _pandas()
-        if pd is not None:
-            stamp = pd.Timestamp(value)
-            return stamp.date().isoformat() if stamp == stamp.normalize() else stamp.isoformat()
-        nanoseconds = value.astype("datetime64[ns]")
-        if nanoseconds == nanoseconds.astype("datetime64[D]"):
-            return str(np.datetime_as_string(nanoseconds, unit="D"))
-        for unit in ("s", "us"):  # as pandas prints: whole seconds, microseconds, else nanoseconds
-            if nanoseconds == nanoseconds.astype(f"datetime64[{unit}]"):
-                return str(np.datetime_as_string(nanoseconds, unit=unit))
-        return str(np.datetime_as_string(nanoseconds, unit="ns"))
-    value = _plain(value)
-    return f"{value:g}" if isinstance(value, float) else str(value)
+    """A duration such as "30 days", "2D", or "1h30min", read by ``labelarray.transforms.parse_duration``."""
+    with _settings_of(f'bins({key.expr.text()}, "{text}")'):
+        return parse_duration(text)
 
 
 def _label_list(labels: np.ndarray) -> list:
@@ -998,11 +971,72 @@ def _plain(value: Any) -> Any:
     return value.item() if isinstance(value, np.generic) and value.dtype.kind not in "mM" else value
 
 
-def bins(field: Any, edges: Any) -> ValueKey:
-    """Group by ranges: left-closed, right-open bins with *edges*, or a duration for time."""
+def bins(field: Any, edges: Any, origin: Any = None) -> ValueKey:
+    """Group by ranges: left-closed, right-open bins with *edges*, or a duration for time.
+
+    A duration such as ``"30 days"`` gives windows of that width from
+    *origin*, the first time present by default; every bin or window from
+    the first to the last is a group, empty or not. Values either side of
+    an edge fall into different groups, by design: move the edges, or the
+    origin, to move the split.
+    """
     expr = as_expr(field)
     name = f"{expr.name}_bin" if isinstance(expr, Ref) else "bin"
-    return ValueKey(name, expr, edges)
+    if isinstance(edges, str):
+        call = f'bins({expr.text()}, "{edges}")'
+        with _settings_of(call):
+            transform: Transform = Duration(edges, origin)
+    else:
+        call = f"bins({expr.text()}, …)"
+        if origin is not None:
+            raise GroupError(f"{call}: an origin places the windows of a duration; edges are placed already")
+        with _settings_of(call, separator=" "):
+            transform = Bins(edges)
+    return ValueKey(name, expr, transform, label=f"bins({expr.text()})", call=call)
+
+
+def rounded(field: Any, step: Any, origin: Any = 0) -> ValueKey:
+    """Group by values rounded to the nearest ``origin + k * step``: ``group_by(rounded(distance, 0.5))``.
+
+    Each group is labelled by its rounded value, and only values that occur
+    are groups. Every bucket is ``[c - step / 2, c + step / 2)`` around its
+    rounded value ``c``, so halves round up, not to even as ``np.round``
+    does. Values either side of a bucket edge fall into different groups
+    however close they are, by design: move the origin to move the edges.
+    *step* and *origin* are read as the decimals they print as, so with a
+    step of 0.1 the edge between 0.3 and 0.4 is 0.35 exactly as written.
+    """
+    expr = as_expr(field)
+    call = _helper_call("rounded", expr, step, origin)
+    with _settings_of(call):
+        transform = Round(step, origin)
+    name = f"{expr.name}_rounded" if isinstance(expr, Ref) else "rounded"
+    return ValueKey(name, expr, transform, label=f"rounded({expr.text()})", call=call)
+
+
+def cells(field: Any, size: Any, origin: Any = 0) -> ValueKey:
+    """Group by cells ``[origin + k * size, origin + (k + 1) * size)`` of a grid: ``group_by(cells(x, 0.2))``.
+
+    Each group is labelled ``"[low, high)"``, and only cells holding a value
+    are groups, since a grid can be large and sparse. Values either side of
+    a cell edge fall into different cells however close they are, by design:
+    move the origin to move the edges. *size* and *origin* are read as the
+    decimals they print as, so 0.3 is in the cell ``[0.3, 0.4)`` of size 0.1.
+    """
+    expr = as_expr(field)
+    call = _helper_call("cells", expr, size, origin)
+    with _settings_of(call):
+        transform = GridCells(size, origin)
+    name = f"{expr.name}_cell" if isinstance(expr, Ref) else "cell"
+    return ValueKey(name, expr, transform, label=f"cells({expr.text()})", call=call)
+
+
+def _helper_call(helper: str, expr: Expr, setting: Any, origin: Any) -> str:
+    def text(value: Any) -> str:
+        return str(value) if isinstance(value, (np.generic, Fraction)) else repr(value)
+
+    given = isinstance(origin, (bool, np.bool_)) or not isinstance(origin, (int, float)) or origin != 0
+    return f"{helper}({expr.text()}, {text(setting)}{f', origin={text(origin)}' if given else ''})"
 
 
 # ── Elementwise functions ───────────────────────────────────────────────────

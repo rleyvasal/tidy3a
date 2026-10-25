@@ -13,5 +13,9 @@ class AlignError(LabelArrayError):
     """Labels on a shared axis do not match."""
 
 
+class GroupError(LabelArrayError):
+    """Key values or a key transform's settings that cannot give groups."""
+
+
 class ShapeError(LabelArrayError):
     """Axis names, sizes, or ranks that do not fit together."""
