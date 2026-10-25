@@ -98,7 +98,7 @@ def test_float32_keys():
 
 
 def times_data():
-    times = np.array(["2026-01-02", "NaT", "2026-01-01", "NaT"], dtype="datetime64[s]")
+    times = np.array(["2026-01-02", "NaT", "2026-01-01", "NaT"], dtype="datetime64[ns]")
     return tidy(xr.Dataset({"v": ("point", [1.0, 2.0, 3.0, 4.0]), "t": ("point", times)}))
 
 

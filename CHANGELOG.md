@@ -24,6 +24,19 @@ threshold can keep or drop a point differently from 0.2.0.
   (`where(...)`) receive a `NumpyArray` (with `dims`, `sizes`, `shape`,
   `ndim`, `dtype`, `values`, `attrs`) instead of an xarray `DataArray`.
   `set_backend("xarray")` keeps the behaviour of 0.2.0.
+- `group_by` on a value with missing values no longer raises: every NaN is
+  one group, and every NaT. `dropna=True`, the default as in pandas, leaves
+  those positions out of every group, with a note saying how many;
+  `dropna=False` keeps them as a group labelled NaN (NaT for times), last.
+  `bins()` follows the same rule. NaT keys formed a group before and are
+  now dropped unless `dropna=False`.
+- Label lookups on evenly spaced labels (grid latitude, longitude, time)
+  are arithmetic, with no sort and no index held.
+- `NumpyArray`, the NumPy backend's array, supports NumPy's ufuncs,
+  `np.where`, and Python's operators, broadcasting by axis name under the
+  exact alignment rule. It is no longer hashable, since `==` compares values.
+- Fixed: on ARM, a float equal to `2**63` was treated as an exact int64
+  label, since the cast saturates.
 - The compiled kernels run only from the sizes where they pay (100,000
   values for grouped sums, 300,000 for few-value sums), below which calling
   them costs more than it saves; results are the same either way.
