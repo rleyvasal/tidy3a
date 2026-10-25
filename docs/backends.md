@@ -36,10 +36,17 @@ Behaviour that is the same on both, once easy to get wrong:
   `AlignError`; so is a join on repeated labels, unless both sides have the
   very same labels. Gaps promote types as xarray does: integers of up to 16
   bits to `float32`, wider integers and booleans to `float64`.
-- Results are bit-identical, including float means over an axis that is not
-  first: each group is indexed as a mask would index it, so NumPy adds the
-  values in the same order. Both backends use the same one-pass grouped
-  reductions (`tidy3a.grouped`) where those stay bit-identical.
+- Results are bit-identical on both backends for in-memory data. Float32 sums
+  and means go through one shared kernel (`tidy3a.labelarray.sums`): every
+  grouped one, and every ungrouped one adding 8 or more values per result, is
+  correctly rounded (the float32 nearest the exact result), so it is the same
+  for any memory layout, with or without the compiled kernels, on any number
+  of threads; ungrouped reductions of fewer than 8 values per result add in
+  float64 in a fixed order and round once. `dot` goes through one shared
+  contraction (`tidy3a.labelarray.contract`, NumPy's `matmul`) whose result
+  does not depend on layout. Other reductions keep NumPy's per-group results,
+  indexed as a mask would index each group; lazy (Dask) values keep xarray's
+  and Dask's own arithmetic, which can round differently.
 - Python's operators run without NumPy's floating-point warnings (division by
   zero); NumPy functions such as `sqrt` and `log` warn, as they do on xarray
   arrays.

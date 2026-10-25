@@ -21,6 +21,8 @@ from tidy3a import grouped
 from tidy3a import labels as exact
 from tidy3a.backend import kept_positions
 from tidy3a.errors import TidyError
+from tidy3a.labelarray import sums
+from tidy3a.labelarray.contract import contract
 
 _EXACT = {"arithmetic_join": "exact"}
 
@@ -245,9 +247,17 @@ class XarrayBackend:
         return value.isin(choices)
 
     def dot(self, left: xr.DataArray, right: xr.DataArray, over: Sequence[Hashable]) -> xr.DataArray:
-        # Always NumPy's einsum. When opt_einsum is installed, xarray uses it instead, which
-        # changes results in the last digits (so they would depend on what else is installed)
-        # and returns column-major arrays that made later steps twice as slow.
+        """In memory, the shared contraction (``tidy3a.labelarray.contract``), as the NumPy backend does.
+
+        Lazy arrays use ``xr.dot`` with NumPy's einsum: with ``opt_einsum``
+        installed, xarray would use it, which changes results in the last
+        digits and returns column-major arrays that made later steps twice as slow.
+        """
+        if left.chunks is None and right.chunks is None:
+            values, kept = contract(left.values, left.dims, right.values, right.dims, over)
+            coords = {name: coord for item in (left, right) for name, coord in item.coords.items()
+                      if set(coord.dims) <= set(kept)}
+            return xr.DataArray(values, dims=kept, coords=coords)
         with xr.set_options(**_EXACT, use_opt_einsum=False):
             return xr.dot(left, right, dim=over)
 
@@ -286,6 +296,8 @@ class XarrayBackend:
                 return result.where(array.notnull().all(dim=axes))
             if op == "count":
                 return array.notnull().sum(dim=axes)
+            if op in ("sum", "mean") and array.dtype == np.float32 and array.chunks is None:
+                return self._float32(array, op, axes, na_rm, min_count)
             options = {"skipna": na_rm} if array.dtype.kind in "fcmM" else {}
             result = getattr(array, op)(dim=axes, **options)
             if op == "sum" and min_count is not None:
@@ -293,9 +305,31 @@ class XarrayBackend:
                 result = result.where(present >= min_count)
             return result
 
+    def _float32(self, array: xr.DataArray, op: str, axes: Sequence[Hashable], na_rm: bool,
+                 min_count: int | None) -> xr.DataArray:
+        """A float32 sum or mean from the shared kernel (``tidy3a.labelarray.sums``).
+
+        The reduction of a one-position slice gives the result's axes,
+        coordinates, name, and attributes, as xarray would give them.
+        """
+        numbers = tuple(array.get_axis_num(a) for a in axes)
+        values = sums.reduce(array.values, op, numbers, na_rm=na_rm, min_count=min_count)
+        template = getattr(array.isel({a: slice(0, 1) for a in axes}), op)(dim=list(axes))
+        return template.copy(data=values)
+
     def group_reduce(self, array: xr.DataArray, op: str, groups: Any, others: Sequence[Hashable],
                      na_rm: bool, min_count: int | None) -> xr.DataArray:
         """*op* per group of *groups* (``tidy3a.expr.Groups``), over its axis and *others*."""
+        if op in ("sum", "mean") and array.dtype == np.float32 and array.chunks is None:
+            axes = (array.get_axis_num(groups.axis), *(array.get_axis_num(o) for o in others))
+            values = sums.reduce(array.values, op, axes, na_rm=na_rm, min_count=min_count, codes=groups.codes,
+                                 groups=len(groups), sizes=groups.counts())
+            template = self.reduce(array.isel({groups.axis: slice(0, 1)}), op, [groups.axis, *others], na_rm,
+                                   min_count)
+            coords = dict(template.coords.items())
+            coords[groups.name] = label_index(groups.labels, groups.name)
+            return xr.DataArray(values, dims=(groups.name, *template.dims), coords=coords, name=template.name,
+                                attrs=template.attrs)
         fast = self._one_pass(array, op, groups, others, na_rm, min_count)
         if fast is not None:
             return fast

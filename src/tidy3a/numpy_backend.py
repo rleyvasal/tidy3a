@@ -33,6 +33,8 @@ from tidy3a import grouped
 from tidy3a import labels as exact
 from tidy3a.backend import is_xarray, kept_positions, memory_mapped
 from tidy3a.errors import TidyError
+from tidy3a.labelarray import sums
+from tidy3a.labelarray.contract import contract
 from tidy3a.labelarray.errors import LabelError, ShapeError
 from tidy3a.labels import exact_cast
 from tidy3a.labels import kind as _kind
@@ -756,13 +758,9 @@ class NumpyBackend:
         return NumpyArray._make(np.isin(value.data, choices), value.dims, value.coords)
 
     def dot(self, left: NumpyArray, right: NumpyArray, over: Sequence[Hashable]) -> NumpyArray:
-        dims = list(dict.fromkeys([*left.dims, *right.dims]))
-        letters = {d: chr(ord("a") + k) for k, d in enumerate(dims)}
-        kept = [d for d in dims if d not in over]
-        spec = ",".join("".join(letters[d] for d in item.dims) for item in (left, right))
-        result = np.einsum(f"{spec}->{''.join(letters[d] for d in kept)}", left.data, right.data)
+        result, kept = contract(left.data, left.dims, right.data, right.dims, over)
         coords = {d: c for item in (left, right) for d, c in item.coords.items() if d in kept}
-        return NumpyArray._make(np.asarray(result), tuple(kept), coords)
+        return NumpyArray._make(result, kept, coords)
 
     def fresh(self, value: Any, keep_attrs: bool) -> Any:
         if isinstance(value, NumpyArray):
@@ -778,14 +776,24 @@ class NumpyBackend:
         if not axes:
             return array
         numbers = tuple(array.axis(a) for a in axes)
-        # One axis goes to NumPy as an integer, as xarray passes it: NumPy sums a
-        # tuple of axes in another order, which changes float results in the last bit.
-        result = _reduce_data(array.data, op, numbers[0] if len(numbers) == 1 else numbers, na_rm, min_count)
+        if op in ("sum", "mean") and array.data.dtype == np.float32:
+            result = sums.reduce(array.data, op, numbers, na_rm=na_rm, min_count=min_count)
+        else:
+            # One axis goes to NumPy as an integer, as xarray passes it: NumPy sums a
+            # tuple of axes in another order, which changes float results in the last bit.
+            result = _reduce_data(array.data, op, numbers[0] if len(numbers) == 1 else numbers, na_rm, min_count)
         dims = tuple(d for d in array.dims if d not in axes)
         return NumpyArray._make(np.asarray(result), dims, {d: c for d, c in array.coords.items() if d in dims})
 
     def group_reduce(self, array: NumpyArray, op: str, groups: Any, others: Sequence[Hashable],
                      na_rm: bool, min_count: int | None) -> NumpyArray:
+        if op in ("sum", "mean") and array.data.dtype == np.float32:
+            axes = (array.axis(groups.axis), *(array.axis(o) for o in others))
+            values = sums.reduce(array.data, op, axes, na_rm=na_rm, min_count=min_count, codes=groups.codes,
+                                 groups=len(groups), sizes=groups.counts())
+            dims = tuple(d for d in array.dims if d != groups.axis and d not in others)
+            coords = {d: c for d, c in array.coords.items() if d in dims}
+            return NumpyArray._make(values, (groups.name, *dims), {groups.name: _new_labels(groups.labels), **coords})
         fast = self._one_pass(array, op, groups, others, na_rm, min_count)
         if fast is not None:
             return fast

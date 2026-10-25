@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+Float32 sums and means change in their last bits: they now add in float64
+and round once, and most are correctly rounded. Labels, shapes, output
+types, and missing-value rules are unchanged. Filters on a value close to a
+threshold can keep or drop a point differently from 0.2.0.
+
+- Every grouped float32 `sum` and `mean`, and every ungrouped one adding 8 or
+  more values per result, is correctly rounded: the float32 nearest the exact
+  result, the same on both backends, for any memory layout, with or without
+  compiled kernels. Before, NumPy added in float32 and could be off by tens
+  of float32 steps on data that cancels, or give `inf` for a mean whose sum
+  overflows float32. Ungrouped reductions of fewer than 8 values per result,
+  such as `sum(p**2, over="i")` over x, y, z, add in float64 in a fixed order.
+  Float64 data is unchanged.
+- Grouped float32 sums and means take one pass instead of one step per
+  group: about 2 times faster on 10M points in 32 groups with NumPy alone.
+- The `fast` extra, `pip install 'tidy3a[fast]'`, adds Numba: grouped float32
+  sums and means, and sums over a few values such as x, y, z, in one
+  compiled, parallel pass, with the same results. Numba is imported on the
+  first such reduction, not with tidy3a. With it, the 10M-point rotate,
+  distance, and filter pipeline takes 49 ms instead of 56.
+- `dot` multiplies with NumPy's `matmul`, arranging the operands the same way
+  for every layout: a 3 x 3 rotation of 10M points takes 6.5 ms instead of
+  13.3 (68.7 on row-major input). Results can differ from 0.2.0 in the last
+  bits for general matrices. An overflow in `dot` shows as infinity without
+  a warning, since BLAS libraries do not report it reliably.
+
 ## 0.2.0 — 2026-10-25
 
 NumPy is now the only requirement, and labels match under one exact rule.

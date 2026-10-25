@@ -465,7 +465,9 @@ def test_group_by_value_field():
 @pytest.mark.parametrize("key_type", ["float32", "int16", "uint64", "datetime64[s]", "str"])
 def test_group_by_many_values_matches_per_group_masks(key_type):
     # More groups than the mask path handles, so positions are reordered into blocks;
-    # results must equal reducing each group's mask, bit for bit.
+    # results must equal reducing each group's mask, bit for bit, except float32 sums and
+    # means, which are correctly rounded (plan milestone 10, decision 4).
+    from test_float32_sums import expected as rounded
     rng = np.random.default_rng(1)
     count, size = 40, 2_000
     keys = rng.integers(0, count, size)
@@ -491,8 +493,8 @@ def test_group_by_many_values_matches_per_group_masks(key_type):
         mask = key_values == label
         part = ds.isel(point=mask)
         group = out.isel(key=i).transpose("sensor")
-        np.testing.assert_array_equal(group["m"].values, part.v.mean("point", skipna=False).values)
-        np.testing.assert_array_equal(group["s"].values, part.v.sum("point").values)
+        np.testing.assert_array_equal(group["m"].values, [rounded(row, "mean", False) for row in part.v.values])
+        np.testing.assert_array_equal(group["s"].values, [rounded(row, "sum", True) for row in part.v.values])
         np.testing.assert_array_equal(group["mx"].values, part.v.max("point", skipna=False).values)
         np.testing.assert_array_equal(group["sd"].values, part.v.std("point").values)
         np.testing.assert_array_equal(group["sc"].values, part.c.sum("point").values)

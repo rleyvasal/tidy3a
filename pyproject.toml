@@ -30,8 +30,13 @@ dependencies = [
 # chunked, and memory-mapped data. 2.2.2 is the first pandas built for NumPy 2;
 # older wheels fail to import alongside numpy>=2.0.
 xarray = ["xarray>=2024.6", "pandas>=2.2.2"]
+# Compiled grouped float32 sums and means (tidy3a.labelarray.sums); the same results as without it, faster.
+# 0.60 is the first Numba release for NumPy 2.0. Numba supports a new NumPy some months after it appears.
+fast = ["numba>=0.60"]
 # opt_einsum: xarray uses it for dot when installed; the tests check tidy3a's results do not change.
-dev = ["xarray>=2024.6", "pandas>=2.2.2", "pytest>=7.0", "flox>=0.9", "ipython>=8.0", "dask[array]", "opt_einsum"]
+# numba: the tests run the compiled path; the minimum-dependency job runs the NumPy path.
+dev = ["xarray>=2024.6", "pandas>=2.2.2", "numba>=0.60", "pytest>=7.0", "flox>=0.9", "ipython>=8.0", "dask[array]",
+       "opt_einsum"]
 
 [project.urls]
 Homepage = "https://github.com/rleyvasal/tidy3a"
