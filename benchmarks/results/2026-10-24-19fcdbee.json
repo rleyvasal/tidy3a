@@ -1,0 +1,345 @@
+{
+ "environment": {
+  "date": "2026-10-24T23:36:05",
+  "git_commit": "19fcdbee4907c02e0233f212636474902c24e9fc",
+  "git_dirty": false,
+  "python": "3.12.12",
+  "executable": "/var/folders/fp/5s1jc3vj05115fc48kr5572m0000gn/T/tmp.0a9bJ2KGpr/env/bin/python",
+  "platform": "macOS-27.0.1-arm64-arm-64bit",
+  "cpu": "Apple M4",
+  "cpu_count": 10,
+  "packages": {
+   "affine": "3.0.1",
+   "attrs": "26.1.0",
+   "certifi": "2026.10.23",
+   "click": "8.5.0",
+   "numpy": "2.5.4",
+   "packaging": "26.3",
+   "pandas": "3.1.0",
+   "pyparsing": "3.3.3",
+   "pyproj": "3.8.0",
+   "python-dateutil": "3.0.0",
+   "rasterio": "1.5.2",
+   "rioxarray": "0.23.0",
+   "scipy": "1.18.1",
+   "six": "1.17.0",
+   "tidy3a": "0.1.0",
+   "tzdata": "2026.5",
+   "xarray": "2026.9.0"
+  }
+ },
+ "results": {
+  "synthetic 34,688 points: \u00a77 rotate, distance, 50 m filter": {
+   "xarray": {
+    "median_ms": 1.1390839936211705,
+    "best_ms": 1.0455410229042172,
+    "repeats": 25
+   },
+   "numpy": {
+    "median_ms": 0.41191698983311653,
+    "best_ms": 0.38487499114125967,
+    "repeats": 25
+   }
+  },
+  "synthetic 34,688 points: \u00a77 with the formula": {
+   "xarray": {
+    "median_ms": 0.8557920227758586,
+    "best_ms": 0.8202499593608081,
+    "repeats": 25
+   },
+   "numpy": {
+    "median_ms": 0.3665839903987944,
+    "best_ms": 0.3457500133663416,
+    "repeats": 25
+   }
+  },
+  "synthetic 34,688 points: mean intensity per ring": {
+   "xarray": {
+    "median_ms": 2.3801669594831765,
+    "best_ms": 2.2295420058071613,
+    "repeats": 25
+   },
+   "numpy": {
+    "median_ms": 0.5609170184470713,
+    "best_ms": 0.5080839619040489,
+    "repeats": 25
+   }
+  },
+  "synthetic 34,688 points: intensity centred per ring": {
+   "xarray": {
+    "median_ms": 2.3345830268226564,
+    "best_ms": 2.213875006418675,
+    "repeats": 25
+   },
+   "numpy": {
+    "median_ms": 0.6242499803192914,
+    "best_ms": 0.5653330008499324,
+    "repeats": 25
+   }
+  },
+  "100,000 points in 90,000 groups: mean per group": {
+   "xarray": {
+    "median_ms": 31.153937510680407,
+    "best_ms": 30.70737503003329,
+    "repeats": 12
+   },
+   "numpy": {
+    "median_ms": 30.294479511212558,
+    "best_ms": 29.41366599407047,
+    "repeats": 12
+   }
+  },
+  "100,000 points in 90,000 groups: centred per group": {
+   "xarray": {
+    "median_ms": 30.847666959743947,
+    "best_ms": 29.411208000965416,
+    "repeats": 13
+   },
+   "numpy": {
+    "median_ms": 30.098874995019287,
+    "best_ms": 28.824792010709643,
+    "repeats": 13
+   }
+  },
+  "synthetic 10,000,000 points: \u00a77 rotate, distance, 50 m filter": {
+   "xarray": {
+    "median_ms": 56.984541995916516,
+    "best_ms": 56.712749996222556,
+    "repeats": 7
+   },
+   "numpy": {
+    "median_ms": 55.85808301111683,
+    "best_ms": 54.92887500440702,
+    "repeats": 7
+   }
+  },
+  "synthetic 10,000,000 points: \u00a77 with the formula": {
+   "xarray": {
+    "median_ms": 37.89066700846888,
+    "best_ms": 37.30475000338629,
+    "repeats": 10
+   },
+   "numpy": {
+    "median_ms": 37.42764602066018,
+    "best_ms": 36.20308398967609,
+    "repeats": 10
+   }
+  },
+  "synthetic 10,000,000 points: mean intensity per ring": {
+   "xarray": {
+    "median_ms": 113.59804100356996,
+    "best_ms": 113.1469999672845,
+    "repeats": 5
+   },
+   "numpy": {
+    "median_ms": 112.4329169979319,
+    "best_ms": 111.15399998379871,
+    "repeats": 5
+   }
+  },
+  "synthetic 10,000,000 points: intensity centred per ring": {
+   "xarray": {
+    "median_ms": 120.82037498475984,
+    "best_ms": 116.43391702091321,
+    "repeats": 5
+   },
+   "numpy": {
+    "median_ms": 134.48637496912852,
+    "best_ms": 132.27991701569408,
+    "repeats": 5
+   }
+  },
+  "nuScenes sweep: \u00a77 rotate, distance, 50 m filter": {
+   "xarray": {
+    "median_ms": 1.648708013817668,
+    "best_ms": 1.5819160034880042,
+    "repeats": 25
+   },
+   "numpy": {
+    "median_ms": 0.857166014611721,
+    "best_ms": 0.823458016384393,
+    "repeats": 25
+   }
+  },
+  "nuScenes sweep: \u00a77 with the formula": {
+   "xarray": {
+    "median_ms": 1.0165839921683073,
+    "best_ms": 0.9921250166371465,
+    "repeats": 25
+   },
+   "numpy": {
+    "median_ms": 0.5069999606348574,
+    "best_ms": 0.48562500160187483,
+    "repeats": 25
+   }
+  },
+  "nuScenes sweep: mean intensity per ring": {
+   "xarray": {
+    "median_ms": 2.473000029567629,
+    "best_ms": 2.369208028540015,
+    "repeats": 25
+   },
+   "numpy": {
+    "median_ms": 0.5611249944195151,
+    "best_ms": 0.5326250102370977,
+    "repeats": 25
+   }
+  },
+  "nuScenes sweep: intensity centred per ring": {
+   "xarray": {
+    "median_ms": 2.426041988655925,
+    "best_ms": 2.329082984942943,
+    "repeats": 25
+   },
+   "numpy": {
+    "median_ms": 0.6363749853335321,
+    "best_ms": 0.6173750152811408,
+    "repeats": 25
+   }
+  },
+  "nuScenes sweep: read the .bin file": {
+   "xarray": {
+    "median_ms": 0.1610829494893551,
+    "best_ms": 0.15391700435429811,
+    "repeats": 25
+   },
+   "numpy": {
+    "median_ms": 0.08774996967986226,
+    "best_ms": 0.08049997268244624,
+    "repeats": 25
+   }
+  },
+  "air temperature: filter a lat/lon window": {
+   "xarray": {
+    "median_ms": 3.2425420358777046,
+    "best_ms": 2.6115000364370644,
+    "repeats": 25
+   },
+   "numpy": {
+    "median_ms": 2.70116695901379,
+    "best_ms": 2.390249981544912,
+    "repeats": 25
+   }
+  },
+  "air temperature: mean per latitude": {
+   "xarray": {
+    "median_ms": 1.4382089721038938,
+    "best_ms": 1.3772090314887464,
+    "repeats": 25
+   },
+   "numpy": {
+    "median_ms": 1.207833003718406,
+    "best_ms": 1.1799160274676979,
+    "repeats": 25
+   }
+  },
+  "air temperature: anomaly per grid point": {
+   "xarray": {
+    "median_ms": 2.4405840085819364,
+    "best_ms": 2.264499955344945,
+    "repeats": 25
+   },
+   "numpy": {
+    "median_ms": 1.853833964560181,
+    "best_ms": 1.6902500065043569,
+    "repeats": 25
+   }
+  },
+  "air temperature: 30-day windows per grid point": {
+   "xarray": {
+    "median_ms": 5.933167005423456,
+    "best_ms": 5.578041018452495,
+    "repeats": 25
+   },
+   "numpy": {
+    "median_ms": 2.296124992426485,
+    "best_ms": 2.081209036987275,
+    "repeats": 25
+   }
+  },
+  "air temperature: formula air - 273.15": {
+   "xarray": {
+    "median_ms": 1.3503329828381538,
+    "best_ms": 1.1072499910369515,
+    "repeats": 25
+   },
+   "numpy": {
+    "median_ms": 0.8694999851286411,
+    "best_ms": 0.7287079934030771,
+    "repeats": 25
+   }
+  },
+  "ERA-Interim: wind speed formula": {
+   "xarray": {
+    "median_ms": 1.244167040567845,
+    "best_ms": 1.1511250049807131,
+    "repeats": 25
+   },
+   "numpy": {
+    "median_ms": 0.613874988630414,
+    "best_ms": 0.5579589633271098,
+    "repeats": 25
+   }
+  },
+  "ERA-Interim: rotate packed wind": {
+   "xarray": {
+    "median_ms": 2.2737079998478293,
+    "best_ms": 2.105208986904472,
+    "repeats": 25
+   },
+   "numpy": {
+    "median_ms": 0.999332987703383,
+    "best_ms": 0.9022500016726553,
+    "repeats": 25
+   }
+  },
+  "ERA-Interim: northern mean speed per level": {
+   "xarray": {
+    "median_ms": 2.241999958641827,
+    "best_ms": 2.108875021804124,
+    "repeats": 25
+   },
+   "numpy": {
+    "median_ms": 1.1856670025736094,
+    "best_ms": 1.0650409967638552,
+    "repeats": 25
+   }
+  },
+  "Landsat: NDVI": {
+   "xarray": {
+    "median_ms": 0.9825409506447613,
+    "best_ms": 0.9575419826433063,
+    "repeats": 25
+   },
+   "numpy": {
+    "median_ms": 0.3968750243075192,
+    "best_ms": 0.3760420368053019,
+    "repeats": 25
+   }
+  },
+  "Landsat: mean per band": {
+   "xarray": {
+    "median_ms": 0.39016600931063294,
+    "best_ms": 0.38179103285074234,
+    "repeats": 25
+   },
+   "numpy": {
+    "median_ms": 0.300041981972754,
+    "best_ms": 0.29375002486631274,
+    "repeats": 25
+   }
+  },
+  "Landsat: crop on x": {
+   "xarray": {
+    "median_ms": 0.2567499759607017,
+    "best_ms": 0.23375003365799785,
+    "repeats": 25
+   },
+   "numpy": {
+    "median_ms": 0.11274998541921377,
+    "best_ms": 0.1026670215651393,
+    "repeats": 25
+   }
+  }
+ }
+}

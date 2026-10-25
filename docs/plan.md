@@ -1336,7 +1336,27 @@ Review fixes, priority 3: grouping (2026-10-24). Tests in `tests/test_grouped.py
 - `group_by` keeps the groups it found to check the key, so the next verb does not find them again, and each `mutate` step passes them on unless it wrote a name the key reads or a whole holder variable.
 - 200 random cases per backend compare the one-pass path with the per-group path bit for bit (dtypes, NaN, -0.0, infinities, three memory layouts, eight reductions, `na_rm`, `min_count`, summarise and mutate); every supported reduction takes the one-pass path in some of them, fully or partly.
 
-Results: 100,000 points in 90,000 groups, mean per group: xarray 4.8 s → 31 ms, NumPy 446 → 31 ms; centred per group about the same. Few large groups are unchanged (32 rings over 10M points: about 113 ms on both), since their float means still go group by group; follow-up 2 stays open for them: matching NumPy's blocked summation for large groups would be needed. The suite passes on both backends on current and minimum dependencies; the corpus is identical on both; the demo agrees. The pinned benchmark has not been rerun. Next: priority 4 (NumPy-only public input and output, packaging, one duration syntax).
+Results: 100,000 points in 90,000 groups, mean per group: xarray 4.8 s → 31 ms, NumPy 446 → 31 ms; centred per group about the same. Few large groups are unchanged (32 rings over 10M points: about 113 ms on both), since their float means still go group by group; follow-up 2 stays open for them: matching NumPy's blocked summation for large groups would be needed. The suite passes on both backends on current and minimum dependencies; the corpus is identical on both; the demo agrees. Next: priority 4 (NumPy-only public input and output, packaging, one duration syntax).
+
+Criteria rerun after the review fixes (2026-10-24), on commit `19fcdbe` in the pinned environment (`benchmarks/results/2026-10-24-19fcdbee.json`, Apple M4, Python 3.12, NumPy 2.5.4, xarray 2026.9.0, nuScenes Mini and the sample data present):
+
+| Criterion | Result | Met |
+|---|---|---|
+| Correctness | Every test passes on both backends: 1,720 on current and 1,676 on minimum dependencies. The 65-case corpus, 300 pipeline property tests, and 200 grouped-reduction cases per backend agree exactly | Yes |
+| Speed | 16 of 26 workloads are at least 1.5 times faster, 9 between 1.0 and 1.5, and the 10M-point grouped mutate 0.90 (134 against 121 ms), just past the 10% limit. Geometric mean 1.82, as before | No |
+| Dependencies | `import tidy3a` and eager pipelines run with NumPy alone (checked in an environment with only NumPy, tidy3A installed without its dependencies), but installing tidy3A still installs xarray and pandas, and `collect()` and arrays passed in from outside need xarray | No (priority 4) |
+| Import time | 41 ms without xarray (NumPy alone takes 25 ms); 46 ms with the NumPy backend; 220 ms once the xarray backend loads, against 218 ms before | Yes (reported) |
+| Maintenance | `numpy_backend.py` is 945 lines and holds no verb logic; the label rule (`labels.py`, 223 lines) and grouped kernels (`grouped.py`, 118 lines) are shared by both backends | Yes |
+
+Against step 6 (`18c14d3`), both backends are faster, and where they now share code the gap between them narrowed:
+
+- The 10M-point §7 pipeline went from 1.43 to 1.02 because the xarray backend got faster (84.5 → 57.0 ms; the NumPy backend 58.9 → 55.9 ms): filters build only the kept positions on both.
+- The grouped workloads are 10–25% faster on both (the groups are found once); on 34,688 points and nuScenes the NumPy backend is now 3.7–4.4 times faster than xarray.
+- Reading the nuScenes file went from 0.83 to 1.84 (0.09 against 0.16 ms), since readers build the NumPy backend's collection directly.
+- The new 90,000-group workloads run about 30 ms on both (the xarray backend took 4.8 s before priority 3), so their ratio is 1.0.
+- The 10M-point grouped mutate went from 0.95 to 0.90 (NumPy 155 → 134 ms, xarray 147 → 121 ms). Profiles show the same work on both: finding groups (about 24 ms), sorting by group (13 ms), gathering the 32 groups, and broadcasting back. Gathering the axis once and taking views, as xarray does, did not change it (124 → 123 ms), so the cause is not yet found.
+
+Decision unchanged: the NumPy backend stays experimental. Dependencies is the criterion that matters most for users, and priority 4 addresses it. The speed criterion has a structural problem: every speed-up made in shared code (the label rule, grouped kernels, positions kept by filters) helps both backends and narrows the ratio, so "1.5 times faster on every workload" measures how much stays backend-specific rather than how fast tidy3A is. Judging speed by end-to-end times against the previous release, with the ratio reported, may be the better criterion; that is a decision for the plan's owner.
 
 Precedents: xarray itself wraps several array libraries behind one data model; tidy3's verbs build one lazy Polars query whose execution engine is chosen when it is collected (`collect(engine=…)`); dplyr's verbs run on different backends (dbplyr, dtplyr) with one set of semantics.
 
