@@ -897,8 +897,7 @@ def _factorize(raw: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _transform_groups(key: ValueKey, axis: Hashable, values: Any, backend: Any) -> Groups:
-    if getattr(values.dtype, "tz", None) is not None:
-        # xarray hands zoned times over as objects without their zone, so the type is what tells.
+    if _zoned(values):
         raise GroupError(f"{key.call}: {ZONES}")
     raw = values.values
     # A missing value is in no group, but it is not outside them either: it is a
@@ -919,6 +918,22 @@ def _transform_groups(key: ValueKey, axis: Hashable, values: Any, backend: Any) 
     codes[~missing] = found
     labels = [*labels, key.transform.missing_label(raw.dtype)]
     return _with_missing(key, axis, backend.codes_like(codes, values), labels, int(missing.sum()))
+
+
+def _zoned(values: Any) -> bool:
+    """Whether key values are times with a time zone.
+
+    xarray hands such times over without their zone: as naive datetimes
+    (recent versions), or as integer nanoseconds (2024.6). The zone is still
+    in the type, or in the pandas index behind the values, so that is where
+    to look; the NumPy backend never holds zoned times.
+    """
+    if getattr(values.dtype, "tz", None) is not None:
+        return True
+    variable = getattr(values, "variable", None)
+    if variable is None or values.dtype.kind != "O" or values.ndim != 1:
+        return False
+    return getattr(variable.to_index_variable().to_index(), "tz", None) is not None
 
 
 @contextmanager
