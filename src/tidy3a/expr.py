@@ -23,6 +23,7 @@ from tidy3a.align import align_many, align_pair
 from tidy3a.backend import is_xarray, xarray_backend
 from tidy3a.errors import GroupError, RefError, TidyError
 from tidy3a.frame import TidyArray, tidy
+from tidy3a.grouped import Grouping
 
 
 # ── Nodes ───────────────────────────────────────────────────────────────────
@@ -383,33 +384,18 @@ class ValueKey:
         self.label = str(name) if edges is None else f"bins({expr.text()})"
 
 
-class Groups:
-    """A value key resolved against current data: one code per position on ``axis``."""
+class Groups(Grouping):
+    """A value key resolved against current data: a grouping of the positions on ``axis``.
 
-    def __init__(self, name: Hashable, axis: Hashable, codes: Any, labels: Sequence[Any]):
+    ``codes_array`` is the codes as the backend's array along ``axis``, with
+    its labels, for broadcasting a per-group result back onto the positions.
+    """
+
+    def __init__(self, name: Hashable, axis: Hashable, codes_array: Any, labels: Sequence[Any]):
+        super().__init__(codes_array.values, labels)
         self.name = name
         self.axis = axis
-        self.codes = codes
-        self.labels = list(labels)
-        self._blocks: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
-        self._counts: np.ndarray | None = None
-
-    def counts(self) -> np.ndarray:
-        """Positions in each group, counted once for the sort by group and for ``n()``."""
-        if self._counts is None:
-            self._counts = np.bincount(self.codes.values, minlength=len(self.labels))
-        return self._counts
-
-    def blocks(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Positions sorted by group, keeping their order within a group, and each group's start and end."""
-        if self._blocks is None:
-            codes = self.codes.values
-            # NumPy's stable sort is a radix sort for 8- and 16-bit integers, far faster than for int64.
-            narrow = np.min_scalar_type(builtins.max(len(self.labels) - 1, 0))
-            order = np.argsort(codes.astype(narrow, copy=False), kind="stable")
-            ends = np.cumsum(self.counts())
-            self._blocks = (order, np.concatenate(([0], ends[:-1])), ends)
-        return self._blocks
+        self.codes_array = codes_array
 
 
 # ── Evaluation ──────────────────────────────────────────────────────────────

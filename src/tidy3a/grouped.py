@@ -17,13 +17,54 @@ group on its own, as both backends do otherwise:
 Other reductions (std, var, median), other types, groups with no positions,
 and reductions over further axes are left to the caller. This module needs
 NumPy only. ``ONE_PASS = False`` turns it off, for comparison in tests.
+
+``Grouping`` is the object the kernels and both backends work from: one
+integer code per position and the group labels in code order, with the
+group sizes and the positions sorted by group computed once and kept.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from typing import Any
+
 import numpy as np
 
 ONE_PASS = True
+
+
+class Grouping:
+    """Positions assigned to groups: one code per position, and each group's label.
+
+    Codes are integers from 0 to ``len(labels) - 1``; ``labels[code]`` is the
+    group's label. ``counts()`` and ``blocks()`` are computed on first use and
+    kept, so a sort by group serves every reduction of the same grouping.
+    """
+
+    def __init__(self, codes: Any, labels: Sequence[Any]):
+        self.codes = np.asarray(codes)
+        self.labels = list(labels)
+        self._counts: np.ndarray | None = None
+        self._blocks: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+
+    def __len__(self) -> int:
+        return len(self.labels)
+
+    def counts(self) -> np.ndarray:
+        """Positions in each group, in code order."""
+        if self._counts is None:
+            self._counts = np.bincount(self.codes, minlength=len(self.labels))
+        return self._counts
+
+    def blocks(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Positions sorted by group, keeping their order within a group, and each group's start and end."""
+        if self._blocks is None:
+            # NumPy's stable sort is a radix sort for 8- and 16-bit integers, far faster than for int64.
+            narrow = np.min_scalar_type(max(len(self.labels) - 1, 0))
+            order = np.argsort(self.codes.astype(narrow, copy=False), kind="stable")
+            ends = np.cumsum(self.counts())
+            self._blocks = (order, np.concatenate(([0], ends[:-1])), ends)
+        return self._blocks
 
 # NumPy adds fewer than this many values one after another; more, in blocks (pairwise summation).
 SMALL = 8

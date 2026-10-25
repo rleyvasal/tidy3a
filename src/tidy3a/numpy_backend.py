@@ -832,7 +832,7 @@ class NumpyBackend:
         xarray backend and to per-group masks. With many groups, the positions
         come from one sort instead of one scan of the axis per group.
         """
-        codes = groups.codes.values
+        codes = groups.codes
         count = len(groups.labels)
         if count <= _FEW_GROUPS:
             return [_take(array, groups.axis, np.flatnonzero(codes == code)) for code in range(count)]
@@ -846,14 +846,14 @@ class NumpyBackend:
 
     def broadcast(self, stats: NumpyArray, groups: Any) -> NumpyArray:
         axis = stats.axis(groups.name)
-        codes = groups.codes.values
+        codes = groups.codes
         # Group results come with the group axis first (group_reduce). Indexing gathers them
         # several times faster than np.take, into the same values and the same C-ordered layout.
         data = stats.data[codes] if axis == 0 else np.take(stats.data, codes, axis=axis)
         dims = stats.dims[:axis] + (groups.axis,) + stats.dims[axis + 1:]
         coords = {d: c for d, c in stats.coords.items() if d != groups.name}
-        if groups.axis in groups.codes.coords:
-            coords[groups.axis] = groups.codes.coords[groups.axis]
+        if groups.axis in groups.codes_array.coords:
+            coords[groups.axis] = groups.codes_array.coords[groups.axis]
         return NumpyArray._make(data, dims, coords)
 
     # ── Building collections ────────────────────────────────────────────────

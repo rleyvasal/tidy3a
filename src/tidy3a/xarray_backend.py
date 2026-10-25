@@ -356,7 +356,7 @@ class XarrayBackend:
         per-group mask would, so reductions give bit-identical results. Chunked
         arrays keep per-group masks, which stay lazy.
         """
-        codes = groups.codes.values
+        codes = groups.codes
         count = len(groups.labels)
         if array.chunks is not None or count <= _FEW_GROUPS:
             return [array.isel({groups.axis: codes == code}) for code in range(count)]
@@ -375,7 +375,7 @@ class XarrayBackend:
 
     def broadcast(self, stats: xr.DataArray, groups: Any) -> xr.DataArray:
         """A per-group result back on each grouped position."""
-        picked = stats.isel({groups.name: groups.codes})
+        picked = stats.isel({groups.name: groups.codes_array})
         return picked.drop_vars(groups.name, errors="ignore")
 
     # ── Building collections ────────────────────────────────────────────────

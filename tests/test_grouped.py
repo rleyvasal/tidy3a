@@ -204,3 +204,42 @@ def test_broadcasting_group_results_back_gathers_once_without_np_take(monkeypatc
     out = (frame >> mutate(c=col("values") - mean(col("values")))).collect()
     xr.testing.assert_identical(out, expected)
     assert out["c"].values.tobytes() == expected["c"].values.tobytes()
+
+
+# ── The grouping object (milestone 10, step A2) ─────────────────────────────
+
+
+def test_grouping_holds_plain_codes_and_labels_and_caches_its_derived_arrays():
+    codes = np.array([2, 0, 2, 1, 0, 2])
+    grouping = grouped.Grouping(codes, ["a", "b", "c"])
+    assert isinstance(grouping.codes, np.ndarray) and grouping.codes.dtype.kind in "iu"
+    assert grouping.labels == ["a", "b", "c"]
+    assert len(grouping) == 3
+    assert grouping.counts().tolist() == [2, 1, 3]
+    order, starts, ends = grouping.blocks()
+    assert order.tolist() == [1, 4, 3, 0, 2, 5]  # positions sorted by group, original order within a group
+    assert starts.tolist() == [0, 2, 3] and ends.tolist() == [2, 3, 6]
+    assert grouping.counts() is grouping.counts() and grouping.blocks() is grouping.blocks()
+    empty = grouped.Grouping(np.array([], dtype=np.intp), [])
+    assert len(empty) == 0 and empty.counts().tolist() == [] and empty.blocks()[0].tolist() == []
+
+
+def test_grouping_needs_nothing_from_tidy3a():
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(grouped))
+    imported = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
+    imported |= {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
+    assert not {name for name in imported if name and name.startswith("tidy3a")}
+
+
+def test_groups_is_a_grouping_with_tidy3as_name_axis_and_backend_codes():
+    data = xr.Dataset({"v": ("point", np.arange(6.0)), "key": ("point", [3, 1, 3, 2, 1, 3])})
+    frame = tidy(data) >> group_by(col("key"))
+    groups = expr.Context(frame, verb="summarise").groups()
+    assert isinstance(groups, grouped.Grouping)
+    assert groups.name == "key" and groups.axis == "point"
+    assert groups.codes.tolist() == [2, 0, 2, 1, 0, 2] and groups.labels == [1, 2, 3]
+    assert frame._backend.is_array(groups.codes_array) and groups.codes_array.dims == ("point",)
+    assert grouped.Grouping(groups.codes, groups.labels).blocks()[0].tolist() == groups.blocks()[0].tolist()
