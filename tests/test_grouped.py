@@ -1,0 +1,146 @@
+"""Grouped reductions in one pass give the same bits as reducing each group on its own.
+
+``tidy3a.grouped`` reduces every group at once where that is exact: min,
+max, count, any, all, and integer sums in any order; float sums and means
+of groups with fewer than 8 positions, which NumPy adds one after another
+starting from 0.0. Other groups and reductions are reduced one by one, as
+before. ``grouped.ONE_PASS = False`` turns the one-pass path off, giving the
+reference these tests compare with.
+"""
+
+import numpy as np
+import pytest
+import xarray as xr
+
+from tidy3a import (
+    all,
+    any,
+    bins,
+    col,
+    expr,
+    group_by,
+    grouped,
+    max,
+    mean,
+    median,
+    min,
+    mutate,
+    n,
+    std,
+    sum,
+    summarise,
+    tidy,
+)
+
+REDUCERS = {"sum": sum, "mean": mean, "min": min, "max": max, "any": any, "all": all, "std": std, "median": median}
+
+
+def _dataset(rng):
+    groups = int(rng.integers(9, 80))
+    sizes = rng.integers(1, 8, groups)
+    if rng.random() < 0.4:  # some groups of 8 or more, reduced one by one
+        sizes[rng.integers(groups, size=3)] = rng.integers(8, 40, 3)
+    size = int(sizes.sum())
+    key = rng.permutation(np.repeat(rng.permutation(groups) * 3, sizes))
+    dtype = str(rng.choice(["float32", "float64", "int16", "int64", "bool"]))
+    layout = str(rng.choice(["1d", "first", "last"]))
+    shape = (size,) if layout == "1d" else (size, 3)
+    values = rng.normal(size=shape) * 10 ** rng.uniform(-3, 8, shape)
+    if dtype.startswith("float"):
+        values[rng.random(shape) < 0.05] = -0.0
+        values[rng.random(shape) < 0.05] = np.nan
+        values[rng.random(shape) < 0.01] = np.inf
+    elif dtype == "bool":
+        values = values > 0
+    values = values.astype(dtype)
+    coords = {"point": np.arange(size) * 2}
+    if layout == "1d":
+        return xr.Dataset({"v": ("point", values), "key": ("point", key)}, coords=coords), None
+    coords["feature"] = ["f1", "f2", "f3"]
+    dims = ("point", "feature")
+    if layout == "last":
+        values, dims = np.ascontiguousarray(values.T), ("feature", "point")
+    return xr.Dataset({"v": (dims, values), "key": ("point", key)}, coords=coords), "feature"
+
+
+def _run(data, field_axis, op, na_rm, min_count, mode):
+    options = {"na_rm": na_rm}
+    if op == "sum" and min_count is not None:
+        options["min_count"] = min_count
+    value = REDUCERS[op](col("v"), **options)
+    step = summarise(m=value, k=n()) if mode == "summarise" else mutate(c=value)
+    return (tidy(data, field_axis=field_axis) >> group_by(col("key")) >> step).collect()
+
+
+def _identical(fast, slow):
+    xr.testing.assert_identical(fast, slow)
+    for name in slow.variables:
+        assert fast[name].dtype == slow[name].dtype, name
+        if slow[name].dtype.kind != "O":  # object arrays hold pointers; assert_identical compared them
+            assert fast[name].values.tobytes() == slow[name].values.tobytes(), name
+
+
+@pytest.mark.parametrize("seed", range(200))
+def test_one_pass_grouped_reductions_match_reducing_each_group(seed, monkeypatch):
+    rng = np.random.default_rng(seed)
+    data, field_axis = _dataset(rng)
+    op = str(rng.choice(list(REDUCERS)))
+    na_rm, mode = bool(rng.random() < 0.5), str(rng.choice(["summarise", "mutate"]))
+    min_count = int(rng.integers(1, 4)) if rng.random() < 0.3 else None
+    fast = _run(data, field_axis, op, na_rm, min_count, mode)
+    monkeypatch.setattr(grouped, "ONE_PASS", False)
+    _identical(fast, _run(data, field_axis, op, na_rm, min_count, mode))
+
+
+def test_bins_with_empty_groups_match_too(monkeypatch):
+    rng = np.random.default_rng(0)
+    data = xr.Dataset({"v": ("point", rng.normal(size=200))})
+    edges = np.concatenate([np.linspace(-3, 0, 20), np.linspace(10, 12, 5)])  # the last bins stay empty
+
+    def run():
+        return (tidy(data) >> group_by(bins(col("v"), edges)) >> summarise(m=mean(col("v")), lo=min(col("v")),
+                                                                         k=n())).collect()
+
+    fast = run()
+    monkeypatch.setattr(grouped, "ONE_PASS", False)
+    _identical(fast, run())
+
+
+def test_many_small_groups_are_not_reduced_one_by_one(monkeypatch):
+    rng = np.random.default_rng(0)
+    key = rng.permutation(np.repeat(np.arange(1000), rng.integers(1, 8, 1000)))
+    data = xr.Dataset({"v": ("point", rng.normal(size=len(key))), "key": ("point", key)})
+    frame = tidy(data) >> group_by(col("key"))
+    backend = type(frame._backend)
+    calls = []
+    original = backend.reduce
+    monkeypatch.setattr(backend, "reduce", lambda self, *a, **k: calls.append(1) or original(self, *a, **k))
+    frame >> summarise(m=mean(col("v")), s=sum(col("v")), hi=max(col("v")))
+    assert len(calls) <= 3  # at most one, describing the result, per summary; not one per group
+
+
+def test_group_by_finds_the_groups_once_for_the_next_verb(monkeypatch):
+    data = xr.Dataset({"v": ("point", np.arange(12.0)), "key": ("point", np.arange(12) % 5)})
+    found = []
+    original = expr._factorize
+    monkeypatch.setattr(expr, "_factorize", lambda raw: found.append(1) or original(raw))
+    tidy(data) >> group_by(col("key")) >> summarise(m=mean(col("v")), s=sum(col("v")))
+    assert len(found) == 1
+    found.clear()
+    tidy(data) >> group_by(col("key")) >> mutate(a=mean(col("v")), b=max(col("v")), c=col("v") * 2)
+    assert len(found) == 1
+
+
+def test_groups_are_found_again_after_a_step_changes_the_key():
+    data = xr.Dataset({"v": ("point", np.arange(6.0)), "key": ("point", [0, 0, 1, 1, 2, 2])})
+    out = (tidy(data) >> group_by(col("key")) >> mutate(key=col("key") * 0, m=mean(col("v")))).collect()
+    assert out["m"].values.tolist() == [2.5] * 6  # one group once the key is all zeros
+    cloud = xr.Dataset({"values": (("point", "feature"), np.array([[1.0, 0], [3, 0], [5, 1], [7, 1]]))},
+                       coords={"feature": ["x", "ring"]})
+    keep_x = xr.DataArray([1.0, 0.0], dims="feature", coords={"feature": ["x", "ring"]})
+    out = (tidy(cloud, field_axis="feature") >> group_by(col("ring"))
+           >> mutate(ring=col("ring") * 0, m=mean(col("x")))).collect()
+    assert out["m"].values.tolist() == [4.0] * 4
+    out = (tidy(cloud, field_axis="feature") >> group_by(col("ring"))
+           >> mutate(values=col("values") * keep_x, m=mean(col("x")))).collect()
+    assert out["m"].values.tolist() == [4.0] * 4  # the whole holder replaced: ring is all zeros now

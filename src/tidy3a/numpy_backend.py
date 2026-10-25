@@ -29,6 +29,7 @@ from typing import Any
 
 import numpy as np
 
+from tidy3a import grouped
 from tidy3a import labels as exact
 from tidy3a.backend import is_xarray, kept_positions, memory_mapped
 from tidy3a.errors import TidyError
@@ -772,6 +773,9 @@ class NumpyBackend:
 
     def group_reduce(self, array: NumpyArray, op: str, groups: Any, others: Sequence[Hashable],
                      na_rm: bool, min_count: int | None) -> NumpyArray:
+        fast = self._one_pass(array, op, groups, others, na_rm, min_count)
+        if fast is not None:
+            return fast
         stats = [self.reduce(part, op, [groups.axis, *others], na_rm, min_count)
                  for part in self._group_parts(array, groups)]
         labels = _new_labels(groups.labels)
@@ -781,6 +785,27 @@ class NumpyBackend:
         empty = self.reduce(_take(array, groups.axis, builtins.slice(0, 0)), op, [groups.axis, *others], na_rm, min_count)
         return NumpyArray._make(empty.data[np.newaxis][:0], (groups.name, *empty.dims),
                                 {groups.name: labels, **empty.coords})
+
+    def _one_pass(self, array: NumpyArray, op: str, groups: Any, others: Sequence[Hashable],
+                  na_rm: bool, min_count: int | None) -> NumpyArray | None:
+        """Every group at once where that is exact (``tidy3a.grouped``); the rest one by one."""
+        if others or len(groups.labels) <= _FEW_GROUPS:
+            return None
+        order, starts, ends = groups.blocks()
+        fast = grouped.one_pass(array.data, array.axis(groups.axis), op, na_rm, min_count, order, starts, ends)
+        if fast is None:
+            return None
+        values, done = fast
+        rest = np.flatnonzero(~done)
+        if len(rest):
+            stats = np.stack([self.reduce(_take(array, groups.axis, order[int(starts[g]):int(ends[g])]), op,
+                                          [groups.axis], na_rm, min_count).data for g in rest])
+            if stats.dtype != values.dtype:
+                return None
+            values[rest] = stats
+        dims = tuple(d for d in array.dims if d != groups.axis)
+        coords = {d: c for d, c in array.coords.items() if d in dims}
+        return NumpyArray._make(values, (groups.name, *dims), {groups.name: _new_labels(groups.labels), **coords})
 
     def _group_parts(self, array: NumpyArray, groups: Any) -> list[NumpyArray]:
         """Each group's positions, in their original order and in a mask's memory layout.

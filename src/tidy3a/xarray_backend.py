@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
+from tidy3a import grouped
 from tidy3a import labels as exact
 from tidy3a.backend import kept_positions
 from tidy3a.errors import TidyError
@@ -294,6 +295,9 @@ class XarrayBackend:
     def group_reduce(self, array: xr.DataArray, op: str, groups: Any, others: Sequence[Hashable],
                      na_rm: bool, min_count: int | None) -> xr.DataArray:
         """*op* per group of *groups* (``tidy3a.expr.Groups``), over its axis and *others*."""
+        fast = self._one_pass(array, op, groups, others, na_rm, min_count)
+        if fast is not None:
+            return fast
         stats = [
             self.reduce(part, op, [groups.axis, *others], na_rm, min_count)
             for part in self._group_parts(array, groups)
@@ -303,6 +307,44 @@ class XarrayBackend:
             return xr.concat(stats, dim=index)
         empty = self.reduce(array.isel({groups.axis: slice(0, 0)}), op, [groups.axis, *others], na_rm, min_count)
         return empty.expand_dims({groups.name: 0}).assign_coords({groups.name: index})
+
+    def _one_pass(self, array: xr.DataArray, op: str, groups: Any, others: Sequence[Hashable],
+                  na_rm: bool, min_count: int | None) -> xr.DataArray | None:
+        """Every group at once where that is exact (``tidy3a.grouped``); the rest one by one.
+
+        One group's result, reduced as before, gives the result's axes,
+        coordinates, and name.
+        """
+        if array.chunks is not None or others or len(groups.labels) <= _FEW_GROUPS:
+            return None
+        order, starts, ends = groups.blocks()
+        axis = groups.axis
+        fast = grouped.one_pass(array.values, array.get_axis_num(axis), op, na_rm, min_count, order, starts, ends)
+        if fast is None:
+            return None
+        values, done = fast
+        ordered = None
+        first = array.get_axis_num(axis) == 0
+
+        def one(group: int) -> xr.DataArray:
+            nonlocal ordered
+            ordered = array.isel({axis: order}) if ordered is None else ordered
+            part = ordered.isel({axis: builtins.slice(int(starts[group]), int(ends[group]))})
+            return self.reduce(part if first else part.copy(), op, [axis], na_rm, min_count)
+
+        rest = np.flatnonzero(~done)
+        template = one(int(rest[0]) if len(rest) else 0)
+        if len(rest):
+            stats = np.stack([template.values, *(one(int(g)).values for g in rest[1:])])
+            if stats.dtype != values.dtype:
+                return None
+            values[rest] = stats
+        if template.dtype != values.dtype:
+            return None
+        coords = {name: coord for name, coord in template.coords.items()}
+        coords[groups.name] = label_index(groups.labels, groups.name)
+        return xr.DataArray(values, dims=(groups.name, *template.dims), coords=coords, name=template.name,
+                            attrs=template.attrs)
 
     def _group_parts(self, array: xr.DataArray, groups: Any) -> list[xr.DataArray]:
         """Each group's positions, in their original order.

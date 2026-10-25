@@ -38,7 +38,8 @@ Behaviour that is the same on both, once easy to get wrong:
   bits to `float32`, wider integers and booleans to `float64`.
 - Results are bit-identical, including float means over an axis that is not
   first: each group is indexed as a mask would index it, so NumPy adds the
-  values in the same order.
+  values in the same order. Both backends use the same one-pass grouped
+  reductions (`tidy3a.grouped`) where those stay bit-identical.
 - Python's operators run without NumPy's floating-point warnings (division by
   zero); NumPy functions such as `sqrt` and `log` warn, as they do on xarray
   arrays.

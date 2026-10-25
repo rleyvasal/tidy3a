@@ -25,7 +25,7 @@ _ANNOTATION_COLUMN = 40
 class TidyArray:
     """Named arrays with tidy3A's axis roles; build one with ``tidy()`` or ``read_array()``."""
 
-    __slots__ = ("_data", "_backend", "_field_axis", "_origins", "_source", "_notes", "_groups")
+    __slots__ = ("_data", "_backend", "_field_axis", "_origins", "_source", "_notes", "_groups", "_resolved")
 
     def __init__(
         self,
@@ -37,6 +37,7 @@ class TidyArray:
         source: str | None = None,
         notes: Sequence[str] = (),
         groups: Sequence[Any] = (),
+        resolved: tuple[Any, Any, Any] | None = None,
     ):
         self._data = data
         self._backend = xarray_backend() if backend is None else backend
@@ -47,6 +48,8 @@ class TidyArray:
         self._notes = tuple(notes)
         # group_by keys, in order (tidy3a.verbs.AxisKey / ValueKey)
         self._groups = tuple(groups)
+        # (data, value key, tidy3a.expr.Groups): the key's groups, found once and valid for that data
+        self._resolved = resolved
 
     def _evolve(self, data: Any = None, *, notes: Sequence[str] = (), **changes: Any) -> TidyArray:
         """A copy with *data* and other parts replaced; *notes* are appended."""
@@ -77,6 +80,7 @@ class TidyArray:
             source=changes.pop("source", self._source),
             notes=new_notes,
             groups=changes.pop("groups", self._groups),
+            resolved=changes.pop("resolved", None),
         )
 
     def to_xarray(self) -> Any:

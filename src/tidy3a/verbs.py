@@ -44,6 +44,7 @@ from tidy3a.expr import (
     evaluate,
     resolve,
     resolve_value_key,
+    walk,
 )
 from tidy3a.frame import TidyArray, tidy
 from tidy3a.selectors import Column, Exclude, Selector
@@ -447,10 +448,27 @@ def mutate(*assignments: Any, **named: Any) -> Verb:
             origins = {k: v for k, v in frame._origins.items() if backend.has_variable(data, k)}
             if not isinstance(step.target, Vector):
                 origins.pop(step.target, None) if backend.has_variable(frame._data, step.target) else None
-            frame = frame._evolve(data, notes=notes, origins=origins)
+            frame = frame._evolve(data, notes=notes, origins=origins, resolved=_still_grouped(ctx, step, data))
         return frame
 
     return Verb(_call_text("mutate", positional, named), apply, operation="mutate", arguments=steps)
+
+
+def _still_grouped(ctx: Context, step: Assignment, data: Any) -> tuple | None:
+    """The step's groups, for the next step, when the step wrote nothing its key reads.
+
+    The key's groups still hold unless the step wrote a name the key refers
+    to, or replaced a whole holder variable, whose fields the key may read.
+    """
+    key = ctx.value_key
+    if ctx._groups is None or key is None:
+        return None
+    written = {item.name for item in step.target.items} if isinstance(step.target, Vector) else {step.target}
+    read = {node.name for node in walk(key.expr) if isinstance(node, Ref)}
+    holders = set(_holders(ctx.data, ctx.field_axis, ctx.backend)) if ctx.field_axis is not None else set()
+    if written & (read | holders):
+        return None
+    return data, key, ctx._groups
 
 
 def _result_metadata(value: Any, node: Expr, backend: Any = None) -> Any:
@@ -603,7 +621,9 @@ def group_by(*keys: Any, **named: Any) -> Verb:
                 f"got {', '.join(key.label for key in values)}"
             )
         if values:
-            resolve_value_key(values[0], frame, [k.axis for k in resolved if isinstance(k, AxisKey)])
+            found = resolve_value_key(values[0], frame, [k.axis for k in resolved if isinstance(k, AxisKey)])
+            # The next verb reuses these groups while the data is unchanged.
+            return frame._evolve(groups=resolved, resolved=(frame._data, values[0], found))
         return frame._evolve(groups=resolved)
 
     return Verb(_call_text("group_by", keys, named), apply, operation="group_by", arguments=(keys, named))

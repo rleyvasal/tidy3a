@@ -421,6 +421,9 @@ class Context:
         self.keys = frame._groups if grouped else ()
         self.notes: list[str] = []
         self._groups: Groups | None = None
+        resolved = getattr(frame, "_resolved", None)
+        if resolved is not None and resolved[0] is self.data and resolved[1] is self.value_key:
+            self._groups = resolved[2]  # found by group_by or an earlier mutate step on this data
 
     @property
     def group_axes(self) -> list[Hashable]:
