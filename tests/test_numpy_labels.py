@@ -1,10 +1,10 @@
-"""Label lookups in ``numpy_core.LabelIndex``, checked against pandas.
+"""Label lookups in the NumPy backend's ``LabelIndex``, checked against pandas.
 
 pandas' ``Index.get_indexer`` is the reference for which labels match: the
 prototype must agree with it wherever labels are unique, including across
 numeric types, time units, NaN, and labels of a different kind. Where the
 prototype differs on purpose, the test says so: repeated labels raise a
-``CoreError`` naming the operation, and integers beyond float64 precision are
+``LabelError`` naming the operation, and integers beyond float64 precision are
 compared exactly, where pandas compares them through float64.
 """
 
@@ -12,7 +12,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from numpy_core import CoreError, Dataset, LabelIndex, Variable, align, apply, label_index, labelled, sel
+from tidy3a import AlignError
+from tidy3a.align import align_pair
+from tidy3a.numpy_backend import NUMPY, LabelError, LabelIndex, NumpyArray, NumpyData, label_index
 
 DAYS = np.array(["2026-01-01", "2026-01-02", "2026-01-03"], dtype="datetime64[ns]")
 
@@ -94,75 +96,79 @@ def test_large_integers_compare_exactly_unlike_pandas():
 def test_repeated_labels_raise_where_pandas_raises():
     index = LabelIndex(np.array([1.0, 2.0, 1.0]))
     assert not index.unique
-    with pytest.raises(CoreError, match="labels repeat"):
+    with pytest.raises(LabelError, match="labels repeat"):
         index.get_indexer([1.0])
     assert not LabelIndex(np.array([np.nan, 1.0, np.nan])).unique  # two NaN labels repeat too
     assert index.get_indexer(np.array([], dtype=float)).size == 0
 
 
 def test_mixed_type_labels_are_an_error_naming_the_operation():
-    a = labelled([1.0, 2.0], ("k",), {"k": np.array([1, "a"], dtype=object)})
-    b = labelled([1.0, 2.0], ("k",), {"k": np.array(["a", 1], dtype=object)})
-    with pytest.raises(CoreError, match=r"add: labels on 'k' mix types \(int, str\)"):
-        apply(np.add, a, b)
-    with pytest.raises(CoreError, match=r"sel: labels on 'k' mix types"):
-        sel(a, k=["a"])
+    a = NumpyArray([1.0, 2.0], ("k",), {"k": np.array([1, "a"], dtype=object)})
+    b = NumpyArray([1.0, 2.0], ("k",), {"k": np.array(["a", 1], dtype=object)})
+    with pytest.raises(LabelError, match=r"align: labels on 'k' mix types \(int, str\)"):
+        align_pair(a, b, "a", "b", [], backend=NUMPY)
+    with pytest.raises(LabelError, match=r"sel: labels on 'k' mix types"):
+        NUMPY.sel(a, {"k": ["a"]})
 
 
 # ── The index in selection and alignment ────────────────────────────────────
 
 
 def test_selection_by_label_across_time_units_and_nan():
-    a = labelled([1.0, 2.0, 3.0], ("time",), {"time": DAYS})
-    assert sel(a, time=np.datetime64("2026-01-02")).values.tolist() == [2.0]
-    assert sel(a, time="2026-01-03").values.tolist() == [3.0]
-    with pytest.raises(CoreError, match="no label"):
-        sel(a, time=np.datetime64("2026-01-02T12", "h"))
-    b = labelled([1.0, 2.0, 3.0], ("x",), {"x": [0.5, np.nan, 1.5]})
-    assert sel(b, x=np.nan).values.tolist() == [2.0]
-    with pytest.raises(CoreError, match="no label"):
-        sel(labelled([1.0, 2.0], ("k",), {"k": [0, 1]}), k=True)
+    a = NumpyArray([1.0, 2.0, 3.0], ("time",), {"time": DAYS})
+    assert NUMPY.sel(a, {"time": np.datetime64("2026-01-02")}).values.tolist() == 2.0  # one label: the axis goes
+    assert NUMPY.sel(a, {"time": ["2026-01-03"]}).values.tolist() == [3.0]  # a list keeps it
+    with pytest.raises(LabelError, match="no label"):
+        NUMPY.sel(a, {"time": np.datetime64("2026-01-02T12", "h")})
+    b = NumpyArray([1.0, 2.0, 3.0], ("x",), {"x": [0.5, np.nan, 1.5]})
+    assert NUMPY.sel(b, {"x": [np.nan]}).values.tolist() == [2.0]
+    with pytest.raises(LabelError, match="no label"):
+        NUMPY.sel(NumpyArray([1.0, 2.0], ("k",), {"k": [0, 1]}), {"k": [True]})
 
 
 def test_alignment_matches_nan_labels_and_reports_real_differences():
-    a = labelled([1.0, 2.0, 3.0], ("x",), {"x": [0.5, np.nan, 1.5]})
-    b = labelled([20.0, 10.0, 30.0], ("x",), {"x": [np.nan, 0.5, 1.5]})
-    out = apply(np.add, a, b)
-    assert out.values.tolist() == [11.0, 22.0, 33.0]
-    assert out.notes == ("changed: x reordered to match the first operand in add",)
-    same = labelled([1.0, 1.0, 1.0], ("x",), {"x": [0.5, np.nan, 1.5]})
-    assert apply(np.add, a, same).notes == ()  # equal labels, NaN included: nothing reordered
-    c = labelled([1.0, 2.0, 3.0], ("x",), {"x": [0.5, 2.5, 1.5]})
-    with pytest.raises(CoreError, match="1 only in the first operand, 1 only in operand 2"):
-        apply(np.add, a, c)
+    a = NumpyArray([1.0, 2.0, 3.0], ("x",), {"x": [0.5, np.nan, 1.5]})
+    b = NumpyArray([20.0, 10.0, 30.0], ("x",), {"x": [np.nan, 0.5, 1.5]})
+    notes = []
+    left, right = align_pair(a, b, "a", "b", notes, backend=NUMPY)
+    assert NUMPY.apply(np.add, left, right).values.tolist() == [11.0, 22.0, 33.0]
+    assert notes == ["changed: x reordered to match (nan  0.5  1.5 → 0.5  nan  1.5) in a and b"]
+    same = NumpyArray([1.0, 1.0, 1.0], ("x",), {"x": [0.5, np.nan, 1.5]})
+    notes = []
+    align_pair(a, same, "a", "same", notes, backend=NUMPY)
+    assert notes == []  # equal labels, NaN included: nothing reordered
+    c = NumpyArray([1.0, 2.0, 3.0], ("x",), {"x": [0.5, 2.5, 1.5]})
+    with pytest.raises(AlignError, match="1 labels are only in c; 1 only in a"):
+        align_pair(a, c, "a", "c", [], backend=NUMPY)
 
 
 def test_alignment_across_time_units():
-    a = labelled([1.0, 2.0], ("time",), {"time": DAYS[:2]})
-    b = labelled([20.0, 10.0], ("time",), {"time": np.array(["2026-01-02", "2026-01-01"], dtype="datetime64[s]")})
-    assert apply(np.add, a, b).values.tolist() == [11.0, 22.0]
+    a = NumpyArray([1.0, 2.0], ("time",), {"time": DAYS[:2]})
+    b = NumpyArray([20.0, 10.0], ("time",), {"time": np.array(["2026-01-02", "2026-01-01"], dtype="datetime64[s]")})
+    left, right = align_pair(a, b, "a", "b", [], backend=NUMPY)
+    assert NUMPY.apply(np.add, left, right).values.tolist() == [11.0, 22.0]
 
 
 # ── Caching and immutability ────────────────────────────────────────────────
 
 
 def test_index_is_built_once_per_label_array():
-    data = Dataset({"v": Variable(np.zeros(4), ("point",))}, {"point": [4, 3, 2, 1]})
+    data = NumpyData({"v": NumpyArray(np.zeros(4), ("point",))}, {"point": [4, 3, 2, 1]})
     labels = data.coords["point"]
     assert label_index(labels) is label_index(labels)
-    assert sel(data["v"], point=[3]).coords["point"].tolist() == [3]
-    assert label_index(labels) is label_index(data["v"].coords["point"])
+    assert NUMPY.sel(NUMPY.variable(data, "v"), {"point": [3]}).coords["point"].tolist() == [3]
+    assert label_index(labels) is label_index(NUMPY.variable(data, "v").coords["point"])
 
 
 def test_labels_are_frozen_so_a_cached_index_cannot_go_stale():
     source = np.array([10, 20, 30])
-    a = labelled([1.0, 2.0, 3.0], ("point",), {"point": source})
+    a = NumpyArray([1.0, 2.0, 3.0], ("point",), {"point": source})
     source[0] = 99  # the caller's array is not the stored one
     assert a.coords["point"].tolist() == [10, 20, 30]
     assert not a.coords["point"].flags.writeable
     view = source.view()
     view.flags.writeable = False  # read-only, but its base can still change
-    b = labelled([1.0, 2.0, 3.0], ("point",), {"point": view})
+    b = NumpyArray([1.0, 2.0, 3.0], ("point",), {"point": view})
     assert b.coords["point"] is not view
     writeable = np.array([1, 2, 3])
     assert label_index(writeable) is not label_index(writeable)  # never cached

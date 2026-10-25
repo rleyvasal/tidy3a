@@ -18,6 +18,7 @@ from typing import Any
 import numpy as np
 import xarray as xr
 
+from tidy3a.backend import backend_for
 from tidy3a.errors import ReadError
 from tidy3a.frame import TidyArray, check_field_axis
 
@@ -90,7 +91,7 @@ def read_binary(
     dim: str = "record", labels: Mapping[str, Sequence[Any]] | None = None,
     byte_order: str = "little", offset: int = 0,
     field_offsets: Mapping[str, int] | None = None, record_size: int | None = None,
-    lazy: bool = False,
+    lazy: bool = False, backend: str | None = None,
 ) -> TidyArray:
     """Read fixed-width numeric and text fields into separate typed variables.
 
@@ -159,8 +160,10 @@ def read_binary(
         storage += ", memory-mapped" if nbytes else ", empty (no mapping)"
     if offset:
         storage += f", {offset:,}-byte header skipped"
+    holder = backend_for(data, backend, ReadError)
     return TidyArray(
-        data, source=f'raw record file "{path.name}", {byte_order}-endian, {storage}',
+        holder.wrap(data)[0], backend=holder,
+        source=f'raw record file "{path.name}", {byte_order}-endian, {storage}',
         notes=(f"record: {dtype.itemsize} bytes; {fields}",
                f"inferred: {dim} = {nbytes:,} bytes / {dtype.itemsize} bytes = {len(records):,}",
                *text_notes),
@@ -206,6 +209,7 @@ def read_array(
     order: str | None = None,
     offset: int | None = None,
     lazy: bool = False,
+    backend: str | None = None,
 ) -> TidyArray:
     """Read a homogeneous numeric array and name its axes.
 
@@ -228,6 +232,10 @@ def read_array(
     ``order`` ("C", row-major records, the default, or "F"), and ``offset``
     (bytes to skip, default 0). ``lazy=True`` memory-maps the file instead
     of loading it.
+
+    ``backend=`` (experimental) is ``"xarray"`` or ``"numpy"``; without it,
+    the default from ``set_backend()`` is used. Memory-mapped data stays on
+    xarray.
     """
     kind, path = _classify(source)
     description = _describe_source(kind, path)
@@ -286,11 +294,13 @@ def read_array(
     else:
         dataset = array.to_dataset(name=name or "values")
 
+    holder = backend_for(dataset, backend, ReadError)
     if field_axis is not None:
         check_field_axis(dataset, field_axis, ReadError)
 
     return TidyArray(
-        dataset, field_axis=field_axis, origins=origins, source=source_text, notes=notes,
+        holder.wrap(dataset)[0], backend=holder, field_axis=field_axis, origins=origins,
+        source=source_text, notes=notes,
     )
 
 

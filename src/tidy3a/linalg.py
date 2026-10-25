@@ -77,7 +77,7 @@ def _elementwise(name: str, ufunc: Callable) -> Callable:
         return Call(name, (as_expr(x),))
 
     def apply(node: Call, ctx: Context) -> Any:
-        return ufunc(evaluate(node.args[0], ctx))
+        return ctx.backend.apply(ufunc, evaluate(node.args[0], ctx))
 
     function.__name__ = name
     function.__qualname__ = name

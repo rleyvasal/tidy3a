@@ -10,26 +10,34 @@ import xarray as xr
 import tidy3a
 from tidy3a import (TidyError, col, filter, group_by, infer, left_join, mean, mutate, read_array, select,
                     slice, summarise, tidy)
-from tidy3a.backend import XARRAY, XarrayBackend
+from tidy3a.backend import XARRAY, XarrayBackend, get_backend
 from tidy3a.frame import TidyArray
 
 PACKAGE = Path(tidy3a.__file__).parent
 # The xarray backend, and the readers that build xarray datasets from files.
 MAY_IMPORT_XARRAY = {"backend.py", "io.py"}
+# The NumPy backend converts to and from xarray only when asked, importing it there.
+MAY_IMPORT_XARRAY_IN_FUNCTIONS = {"numpy_backend.py"}
 
 
-def _imports_xarray(path: Path) -> bool:
-    for node in ast.walk(ast.parse(path.read_text())):
+def _xarray_imports(tree: ast.AST) -> list[ast.AST]:
+    found = []
+    for node in ast.walk(tree):
         if isinstance(node, ast.Import) and any(a.name.split(".")[0] == "xarray" for a in node.names):
-            return True
+            found.append(node)
         if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "xarray":
-            return True
-    return False
+            found.append(node)
+    return found
 
 
-def test_only_the_backend_and_readers_import_xarray():
-    importing = sorted(p.name for p in PACKAGE.glob("*.py") if _imports_xarray(p))
-    assert set(importing) <= MAY_IMPORT_XARRAY, importing
+def test_only_the_backends_and_readers_import_xarray():
+    for path in PACKAGE.glob("*.py"):
+        tree = ast.parse(path.read_text())
+        if path.name in MAY_IMPORT_XARRAY or not _xarray_imports(tree):
+            continue
+        assert path.name in MAY_IMPORT_XARRAY_IN_FUNCTIONS, f"{path.name} imports xarray"
+        top_level = [node for node in tree.body if node in _xarray_imports(tree)]
+        assert not top_level, f"{path.name} imports xarray at module level"
 
 
 def cloud():
@@ -40,13 +48,14 @@ def cloud():
 
 def test_every_verb_keeps_the_frames_backend():
     frame = cloud()
-    assert frame._backend is XARRAY
+    backend = get_backend()
+    assert frame._backend is backend
     steps = [select("x", "intensity", "ring"), filter(col("x") > 0), mutate(r=col("x") * 2),
              slice(point=[1]), group_by(col("ring")), summarise(m=mean(col("intensity")))]
     for step in steps:
         frame = frame >> step
-        assert frame._backend is XARRAY
-    assert tidy(xr.Dataset({"a": ("t", [1.0])}))._backend is XARRAY
+        assert frame._backend is backend
+    assert tidy(xr.Dataset({"a": ("t", [1.0])}))._backend is backend
 
 
 def test_joining_data_from_two_backends_is_an_error_naming_both():
@@ -54,5 +63,5 @@ def test_joining_data_from_two_backends_is_an_error_naming_both():
         name = "other"
 
     right = TidyArray(xr.Dataset({"b": ("point", [1.0, 2.0, 3.0])}), backend=Other())
-    with pytest.raises(TidyError, match="xarray backend and the other data the other backend"):
+    with pytest.raises(TidyError, match=f"{get_backend().name} backend and the other data the other backend"):
         cloud() >> left_join(right)

@@ -408,8 +408,6 @@ class Groups:
 class Context:
     """What an expression is evaluated against, and how reductions behave."""
 
-    backend: Any = XARRAY
-
     def __init__(self, frame: Any, *, verb: str, error: type[TidyError] = TidyError,
                  mode: str = "rows", grouped: bool = True):
         self.frame = frame
@@ -480,7 +478,7 @@ def evaluate(node: Expr, ctx: Context) -> Any:
     if isinstance(node, Ref):
         return resolve(node, ctx)
     if isinstance(node, Literal):
-        return node.value
+        return ctx.backend.outside(node.value)
     if isinstance(node, Vector):
         return resolve_vector(node, ctx)
     if isinstance(node, BinOp):
@@ -488,7 +486,7 @@ def evaluate(node: Expr, ctx: Context) -> Any:
     if isinstance(node, UnaryOp):
         value = evaluate(node.operand, ctx)
         op = {"-": operator.neg, "+": operator.pos, "~": operator.invert}[node.symbol]
-        return op(value)
+        return ctx.backend.apply(op, value)
     if isinstance(node, Call):
         function = FUNCTIONS.get(node.name)
         if function is None:
@@ -541,7 +539,7 @@ def resolve(ref: Ref, ctx: Context) -> Any:
     A notebook name that is not data resolves to its Python value.
     """
     if isinstance(ref, NameRef) and not check_name(ref, ctx) and ref.python is not MISSING:
-        return ref.python
+        return ctx.backend.outside(ref.python)
     data, backend = ctx.data, ctx.backend
     name = ref.name
     field_axis = ctx.field_axis
@@ -852,7 +850,7 @@ def _if_else(node: Call, ctx: Context) -> Any:
 
 
 def _abs(node: Call, ctx: Context) -> Any:
-    return abs(evaluate(node.args[0], ctx))
+    return ctx.backend.apply(operator.abs, evaluate(node.args[0], ctx))
 
 
 FUNCTIONS: dict[str, Callable[[Call, Context], Any]] = {

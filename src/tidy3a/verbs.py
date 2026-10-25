@@ -753,8 +753,8 @@ def _join(how: str, other: Any, suffix: Any, tolerance: Any) -> Verb:
         raise TypeError(f"{name}() suffix must be a pair of strings, e.g. ('_x', '_y')")
 
     def apply(frame: TidyArray) -> TidyArray:
-        right_frame = other if isinstance(other, TidyArray) else tidy(other)
         backend = frame._backend
+        right_frame = other if isinstance(other, TidyArray) else tidy(other, backend=backend.name)
         if right_frame._backend is not backend:
             raise TidyError(
                 f"{name}(): this data uses the {backend.name} backend and the other data the "

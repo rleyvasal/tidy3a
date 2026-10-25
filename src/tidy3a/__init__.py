@@ -1,6 +1,7 @@
 """tidy3A: tidy-style verbs for named multidimensional arrays."""
 
 from tidy3a.__version__ import __version__
+from tidy3a.backend import set_backend
 from tidy3a.errors import (
     AlignError,
     FilterError,
@@ -103,7 +104,7 @@ __all__ = [
     "ends_with", "env", "everything", "fields", "filter", "fixed_text", "full_join", "group_by", "if_else",
     "infer", "inner_join", "is_numeric", "label", "last_col", "left_join", "matches", "max",
     "mean", "median", "min", "mutate", "n", "nan", "num_range", "pull", "read_array", "read_binary", "select",
-    "slice", "slice_head", "slice_tail", "starts_with", "std", "sum", "summarise", "summarize",
+    "set_backend", "slice", "slice_head", "slice_tail", "starts_with", "std", "sum", "summarise", "summarize",
     "tidy", "ungroup", "var", "variable", "where",
     # formula
     "FormulaError", "formula",

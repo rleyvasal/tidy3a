@@ -8,8 +8,11 @@ in it. Arrays expose a small common surface (``dims``, ``sizes``, ``ndim``,
 from label lookups to arithmetic under the alignment rules, is a backend
 method.
 
-``XarrayBackend`` is the only backend so far and wraps the xarray code the
-package used before the interface existed, unchanged. A backend raises
+``XarrayBackend`` wraps the xarray code the package used before the
+interface existed, unchanged; it is the default. ``NumpyBackend``
+(``tidy3a.numpy_backend``) is experimental and holds eager, in-memory data
+only. ``set_backend`` chooses the default, and ``tidy()`` and the readers take
+``backend=``. A backend raises
 tidy3A errors only where a limitation is its own (computing a median of a
 whole chunked array); rule errors and their hints come from the callers.
 
@@ -66,6 +69,10 @@ class XarrayBackend:
             name = data.name if data.name is not None else "values"
             return data.to_dataset(name=name), "xarray DataArray"
         return data, "xarray Dataset"
+
+    def outside(self, value: Any) -> Any:
+        """An array from the calling code, as this backend's array; xarray's already is."""
+        return value
 
     def to_xarray(self, data: xr.Dataset) -> xr.Dataset:
         return data.copy(deep=False)
@@ -375,3 +382,54 @@ class XarrayBackend:
 
 
 XARRAY = XarrayBackend()
+
+_BACKENDS = ("xarray", "numpy")
+_default = "xarray"
+
+
+def set_backend(name: str) -> None:
+    """Choose the backend new data uses when none is named: ``"xarray"`` (the default) or ``"numpy"``.
+
+    The NumPy backend is experimental and holds eager, in-memory data only;
+    lazy, chunked, and memory-mapped inputs stay on xarray when it is only
+    the default.
+    """
+    global _default
+    _check_name(name)
+    _default = name
+
+
+def get_backend(name: str | None = None) -> Any:
+    """The backend called *name*, or the default one."""
+    name = _default if name is None else name
+    _check_name(name)
+    if name == "xarray":
+        return XARRAY
+    from tidy3a.numpy_backend import NUMPY
+
+    return NUMPY
+
+
+def backend_for(data: Any, requested: str | None, error: type[TidyError] = TidyError) -> Any:
+    """The backend that holds xarray *data*: the one asked for, or the default.
+
+    Data the NumPy backend cannot hold stays on xarray, unless the NumPy
+    backend was asked for by name; then it is an error that says why.
+    """
+    backend = get_backend(requested)
+    if backend is XARRAY:
+        return XARRAY
+    reason = backend.unsupported(data)
+    if reason is None:
+        return backend
+    if requested is not None:
+        raise error(
+            f'backend="{backend.name}" holds eager, in-memory data only, but {reason}.\n'
+            '  Use backend="xarray", or load the values into memory first'
+        )
+    return XARRAY
+
+
+def _check_name(name: Any) -> None:
+    if name not in _BACKENDS:
+        raise TidyError(f'backend must be one of {", ".join(map(repr, _BACKENDS))}, not {name!r}')

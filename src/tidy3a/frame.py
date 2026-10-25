@@ -14,7 +14,7 @@ from typing import Any
 
 import numpy as np
 
-from tidy3a.backend import XARRAY, is_xarray_object
+from tidy3a.backend import XARRAY, backend_for, get_backend, is_xarray_object
 from tidy3a.errors import TidyError
 
 # Long label lists are shortened in the inspection output.
@@ -106,17 +106,28 @@ class TidyArray:
         return _inspect(self)
 
 
-def tidy(data: Any, *, field_axis: str | None = None) -> TidyArray:
+def tidy(data: Any, *, field_axis: str | None = None, backend: str | None = None) -> TidyArray:
     """Wrap an xarray ``DataArray`` or ``Dataset`` for tidy3A verbs.
 
     An unnamed DataArray becomes the variable ``values``. ``field_axis=``
     declares the axis whose labels act as column names, as in
-    ``read_array``. A ``TidyArray`` is returned unchanged.
+    ``read_array``. A ``TidyArray`` is returned unchanged, or moved to the
+    backend named by ``backend=``.
 
     Wrapping preserves metadata and backing storage without reading
     measurement values. Keep file-backed sources open until collection.
+
+    ``backend=`` (experimental) is ``"xarray"`` or ``"numpy"``; without it,
+    the default from ``set_backend()`` is used.
     """
     if isinstance(data, TidyArray):
+        if backend is not None and get_backend(backend) is not data._backend:
+            source = data.to_xarray()
+            target = backend_for(source, backend)
+            data = TidyArray(
+                target.wrap(source)[0], backend=target, field_axis=data._field_axis,
+                origins=data._origins, source=data._source, notes=data._notes, groups=data._groups,
+            )
         if field_axis is None or field_axis == data._field_axis:
             return data
         if data._field_axis is not None:
@@ -127,15 +138,16 @@ def tidy(data: Any, *, field_axis: str | None = None) -> TidyArray:
         check_field_axis(data._data, field_axis, TidyError, data._backend)
         return data._evolve(field_axis=field_axis)
     if is_xarray_object(data):
-        dataset, source = XARRAY.wrap(data)
+        holder = backend_for(data, backend)
+        dataset, source = holder.wrap(data)
     else:
         raise TypeError(
             f"tidy() wraps xarray DataArray and Dataset objects, not {type(data).__name__}; "
             "use read_array() for NumPy arrays and files"
         )
     if field_axis is not None:
-        check_field_axis(dataset, field_axis, TidyError)
-    return TidyArray(dataset, field_axis=field_axis, source=source)
+        check_field_axis(dataset, field_axis, TidyError, holder)
+    return TidyArray(dataset, backend=holder, field_axis=field_axis, source=source)
 
 
 def check_field_axis(data: Any, axis: Any, error: type[TidyError], backend: Any = XARRAY) -> None:
