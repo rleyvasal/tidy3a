@@ -492,10 +492,10 @@ class NumpyBackend:
 
         if isinstance(data, xr.DataArray):
             name = data.name if data.name is not None else "values"
-            return self.from_xarray(data.to_dataset(name=name)), "xarray DataArray"
-        return self.from_xarray(data), "xarray Dataset"
+            return self._from_xarray(data.to_dataset(name=name)), "xarray DataArray"
+        return self._from_xarray(data), "xarray Dataset"
 
-    def from_xarray(self, dataset: Any) -> NumpyData:
+    def _from_xarray(self, dataset: Any) -> NumpyData:
         variables = {name: NumpyArray._make(np.asarray(value.data), tuple(value.dims), {}, dict(value.attrs), name)
                      for name, value in dataset.data_vars.items()}
         coords = {name: dataset[name].values for name in dataset.coords}
@@ -684,9 +684,6 @@ class NumpyBackend:
     def is_array(self, value: Any) -> bool:
         return isinstance(value, NumpyArray)
 
-    def is_lazy(self, value: Any) -> bool:
-        return False
-
     def array(self, values: Any, dims: Sequence[Hashable] = (), coords: Mapping | None = None,
               name: Hashable | None = None) -> NumpyArray:
         if coords:
@@ -696,7 +693,7 @@ class NumpyBackend:
     def codes_like(self, codes: np.ndarray, values: NumpyArray) -> NumpyArray:
         return NumpyArray._make(np.asarray(codes), values.dims[:1], dict(values.coords))
 
-    def named(self, value: NumpyArray, name: Hashable) -> NumpyArray:
+    def _named(self, value: NumpyArray, name: Hashable) -> NumpyArray:
         return NumpyArray._make(value.data, value.dims, value.coords, value.attrs, name)
 
     def isel(self, obj: Any, indexers: Mapping[Hashable, Any], drop: bool = False) -> Any:
@@ -724,7 +721,7 @@ class NumpyBackend:
         return self.isel(obj, positions)
 
     def field(self, data: NumpyData, holder: Hashable, field_axis: Hashable, name: Hashable) -> NumpyArray:
-        return self.named(self.sel(data.array(holder), {field_axis: name}), name)
+        return self._named(self.sel(data.array(holder), {field_axis: name}), name)
 
     def transpose(self, value: NumpyArray, *dims: Hashable) -> NumpyArray:
         order = [value.axis(d) for d in dims]

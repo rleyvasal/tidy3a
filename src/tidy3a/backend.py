@@ -8,8 +8,10 @@ in it. Arrays expose a small common surface (``dims``, ``sizes``, ``ndim``,
 from label lookups to arithmetic under the alignment rules, is a backend
 method.
 
-``XarrayBackend`` (``tidy3a.xarray_backend``) is the default and wraps the
-xarray code the package used before the interface existed. ``NumpyBackend``
+``Backend`` below is the interface, written as a protocol that both backends
+are checked against. ``XarrayBackend`` (``tidy3a.xarray_backend``) is the
+default when xarray is installed and wraps the xarray code the package used
+before the interface existed. ``NumpyBackend``
 (``tidy3a.numpy_backend``) is experimental and holds eager, in-memory data
 only. ``set_backend`` chooses the default, and ``tidy()`` and the readers take
 ``backend=``. A backend raises tidy3A errors only where a limitation is its
@@ -28,7 +30,8 @@ from __future__ import annotations
 import importlib.util
 import mmap
 import sys
-from typing import Any
+from collections.abc import Hashable, Mapping
+from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -72,6 +75,227 @@ def kept_positions(index: Any, size: int) -> tuple[Any, np.ndarray]:
         return index, index
     index = index.astype(np.int64, copy=True)
     return index, index
+
+
+@runtime_checkable
+class Backend(Protocol):
+    """What a backend provides; the verbs, expressions, formulas, and alignment rules use nothing else.
+
+    A collection holds variables sharing axes and labels; an array is one variable
+    with named axes. Both backends are checked against this protocol in the tests:
+    the same methods, parameters, and defaults, and no public method outside it.
+    Arrays also provide ``dims``, ``sizes``, ``shape``, ``ndim``, ``dtype``, and ``values``.
+    """
+
+    name: str
+
+    # ── Conversion ────────────────────────────────────────────────────────────
+
+    def wrap(self, data: Any) -> tuple[Any, str]:
+        """A collection from an xarray object, and a description of its source."""
+
+    def unsupported(self, data: Any) -> str | None:
+        """Why xarray *data* cannot be held by this backend, or None when it can."""
+
+    def outside(self, value: Any) -> Any:
+        """An array from the calling code (an xarray object) as this backend's array; other values unchanged."""
+
+    def to_xarray(self, data: Any) -> Any:
+        """A shallow xarray Dataset sharing the values."""
+
+    def collect(self, data: Any) -> Any:
+        """An xarray Dataset with lazy values computed."""
+
+    def to_dict(self, data: Any) -> dict:
+        """NumPy arrays in the layout of xarray's ``Dataset.to_dict(data="array")``."""
+
+    # ── Readers ───────────────────────────────────────────────────────────────
+
+    def from_records(self, variables: Any, coords: Any) -> Any:
+        """A collection of separately typed fields, each ``(dims, values)`` (``read_binary``)."""
+
+    def from_array(self, values: Any, dims: Any, coords: Any, name: Any) -> Any:
+        """One array as a collection of one variable (``read_array``)."""
+
+    def from_split(self, values: Any, dims: Any, coords: Any, axis: Any) -> Any:
+        """One variable per label on *axis* (``read_array(..., variables_from=axis)``)."""
+
+    # ── Collections ───────────────────────────────────────────────────────────
+
+    def variable_names(self, data: Any) -> list[Hashable]:
+        """The variable names, in order."""
+
+    def has_variable(self, data: Any, name: Any) -> bool:
+        """Whether *name* is a variable."""
+
+    def variable(self, data: Any, name: Any) -> Any:
+        """The variable *name* as an array with its labels."""
+
+    def variables(self, data: Any) -> Mapping[Hashable, Any]:
+        """Every variable as an array, by name."""
+
+    def sizes(self, obj: Any) -> Mapping[Hashable, int]:
+        """Axis name to size, for a collection or an array."""
+
+    def axes(self, obj: Any) -> Any:
+        """The axis names, in order."""
+
+    def has_axis(self, obj: Any, dim: Any) -> bool:
+        """Whether *dim* is an axis; an unhashable name is not."""
+
+    def has_coordinate(self, data: Any, name: Any) -> bool:
+        """Whether *name* is a coordinate of the collection."""
+
+    def attrs(self, obj: Any) -> Mapping[Hashable, Any]:
+        """The attributes of a collection or an array."""
+
+    def coordinate_attrs(self, data: Any, name: Any) -> Mapping[Hashable, Any]:
+        """The attributes of coordinate *name*."""
+
+    def coordinate_names(self, data: Any) -> Any:
+        """The coordinate names, supporting set operations."""
+
+    # ── Labels ────────────────────────────────────────────────────────────────
+
+    def has_labels(self, obj: Any, dim: Any) -> bool:
+        """Whether *dim* has labels on *obj*."""
+
+    def labelled_axes(self, obj: Any) -> list[Hashable]:
+        """The axes of *obj* that have labels."""
+
+    def label_map(self, obj: Any) -> Mapping[Hashable, Any]:
+        """Axis name to label list, for every labelled axis."""
+
+    def label_values(self, obj: Any, dim: Any) -> Any:
+        """The labels of *dim* as a NumPy array, for formatting and arithmetic."""
+
+    def label_list(self, obj: Any, dim: Any) -> Any:
+        """The labels of *dim* as Python values, for messages."""
+
+    def has_label(self, obj: Any, dim: Any, label: Any) -> bool:
+        """Whether *label* is among the labels of *dim*."""
+
+    def label_count(self, obj: Any, dim: Any) -> int:
+        """How many labels *dim* has."""
+
+    def labels_unique(self, obj: Any, dim: Any) -> bool:
+        """Whether no label on *dim* repeats."""
+
+    def label_position(self, obj: Any, dim: Any, label: Any) -> Any:
+        """The position of *label* on *dim*; an error when it is absent."""
+
+    def compare_labels(self, left: Any, right: Any, dim: Any) -> tuple[str, int, int]:
+        """``("same", 0, 0)``, ``("reordered", 0, 0)``, or ``("different", only in left, only in right)`` under the exact rule."""
+
+    def labels_strict_subset(self, part: Any, whole: Any, dim: Any) -> bool:
+        """Whether *part*'s labels on *dim* are some, but not all, of *whole*'s."""
+
+    def reorder_like(self, value: Any, dim: Any, reference: Any) -> Any:
+        """*value* with its labels on *dim* put in *reference*'s order."""
+
+    def axis_labels(self, data: Any, axis: Any) -> Any:
+        """An axis's labels as data along it; an unlabelled axis gives 1-based positions."""
+
+    def axis_coordinate(self, data: Any, axis: Any) -> Any:
+        """An axis's coordinate as an array, attributes included."""
+
+    def keep(self, data: Any, axis: Any, index: Any) -> Any:
+        """Positions on *axis* (a mask, a slice, or positions); an unlabelled axis is labelled with the 1-based positions kept."""
+
+    # ── Arrays ────────────────────────────────────────────────────────────────
+
+    def is_array(self, value: Any) -> bool:
+        """Whether *value* is this backend's array."""
+
+    def array(self, values: Any, dims: Any = (), coords: Any = None, name: Any = None) -> Any:
+        """A new array from values, axis names, and labels."""
+
+    def codes_like(self, codes: Any, values: Any) -> Any:
+        """Group codes as an array on the first axis of *values*, sharing its labels."""
+
+    def isel(self, obj: Any, indexers: Any, drop: Any = False) -> Any:
+        """Selection by position on named axes; an integer drops the axis."""
+
+    def sel(self, obj: Any, indexers: Any, drop: Any = False) -> Any:
+        """Selection by label on named axes."""
+
+    def field(self, data: Any, holder: Any, field_axis: Any, name: Any) -> Any:
+        """One field of a holder, the field axis dropped, named after the field."""
+
+    def transpose(self, value: Any, *dims: Any) -> Any:
+        """*value* with its axes in the given order."""
+
+    def rename_axes(self, value: Any, names: Any) -> Any:
+        """*value* with axes renamed."""
+
+    def concat(self, values: Any, dim: Any, labels: Any, *, exact: Any = False) -> Any:
+        """Arrays stacked along a new labelled axis; ``exact`` refuses mismatched labels."""
+
+    def apply(self, op: Any, *operands: Any) -> Any:
+        """*op* on operands already aligned, broadcasting by axis name; scalars pass through."""
+
+    def where(self, condition: Any, true: Any, false: Any) -> Any:
+        """Values from *true* where *condition* holds, else from *false*."""
+
+    def isin(self, value: Any, choices: Any) -> Any:
+        """Whether each value is among *choices*."""
+
+    def dot(self, left: Any, right: Any, over: Any) -> Any:
+        """The product of *left* and *right* summed over the axes *over*."""
+
+    def fresh(self, value: Any, keep_attrs: Any) -> Any:
+        """*value* without storage encoding, and without attributes unless *keep_attrs*."""
+
+    # ── Reductions and grouping ───────────────────────────────────────────────
+
+    def reduce(self, array: Any, op: Any, axes: Any, na_rm: Any = False, min_count: Any = None) -> Any:
+        """*op* over *axes* with tidy3A's missing-value rules (``na_rm``, ``min_count``)."""
+
+    def group_reduce(self, array: Any, op: Any, groups: Any, others: Any, na_rm: Any, min_count: Any) -> Any:
+        """*op* per group of *groups* over its axis and *others*."""
+
+    def group_counts(self, groups: Any, per_position: Any) -> Any:
+        """Positions per group, times *per_position*."""
+
+    def broadcast(self, stats: Any, groups: Any) -> Any:
+        """A per-group result back on each grouped position."""
+
+    # ── Building collections ──────────────────────────────────────────────────
+
+    def select_variables(self, data: Any, names: Any) -> Any:
+        """The collection reduced to *names*, dropping labels no variable uses."""
+
+    def assign(self, data: Any, name: Any, value: Any) -> Any:
+        """Add or replace a variable whose labels agree with the collection's."""
+
+    def replace(self, data: Any, name: Any, value: Any) -> Any:
+        """Replace an existing variable's array."""
+
+    def with_values(self, target: Any, values: Any) -> Any:
+        """*target* with new values and no attributes."""
+
+    def has_metadata(self, value: Any) -> bool:
+        """Whether *value* carries attributes or encoding a write-back would clear."""
+
+    def drop_position_axis(self, data: Any, axis: Any) -> Any:
+        """The collection with the one remaining position on *axis* dropped."""
+
+    def summary(self, results: Any, attrs: Any, coords: Any) -> Any:
+        """A collection of summary results with the given attributes and coordinates."""
+
+    def attach(self, data: Any, name: Any, values: Any, along: Any) -> Any:
+        """A 1-D variable attached by position along *along*."""
+
+    # ── Joins ─────────────────────────────────────────────────────────────────
+
+    def rename_variables(self, data: Any, names: Any) -> Any:
+        """The collection with variables renamed."""
+
+    def nearest(self, right: Any, dim: Any, left: Any, tolerance: Any) -> Any:
+        """*right* on *left*'s labels for *dim*, taking the nearest label within *tolerance*."""
+
+    def merge(self, left: Any, right: Any, how: Any) -> Any:
+        """Join on shared axes by label: ``left``, ``inner``, or ``outer``; conflicting attributes are dropped."""
 
 
 def xarray_backend() -> Any:
@@ -151,8 +375,6 @@ def backend_for(data: Any, requested: str | None, error: type[TidyError] = TidyE
     backend was asked for by name; then it is an error that says why.
     """
     backend = get_backend(requested)
-    if backend.name == "xarray":
-        return backend
     return _fallback(backend, backend.unsupported(data), requested, error)
 
 

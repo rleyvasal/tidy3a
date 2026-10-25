@@ -50,6 +50,10 @@ class XarrayBackend:
             return data.to_dataset(name=name), "xarray DataArray"
         return data, "xarray Dataset"
 
+    def unsupported(self, data: Any) -> str | None:
+        """Why an xarray object cannot be held here: never, so None."""
+        return None
+
     # ── Readers ─────────────────────────────────────────────────────────────
 
     def from_records(self, variables: Mapping[Hashable, tuple], coords: Mapping[Hashable, np.ndarray]) -> xr.Dataset:
@@ -195,9 +199,6 @@ class XarrayBackend:
     def is_array(self, value: Any) -> bool:
         return isinstance(value, xr.DataArray)
 
-    def is_lazy(self, value: xr.DataArray) -> bool:
-        return value.chunks is not None
-
     def array(self, values: Any, dims: Sequence[Hashable] = (), coords: Mapping | None = None,
               name: Hashable | None = None) -> xr.DataArray:
         if not dims and coords is None and name is None:
@@ -207,9 +208,6 @@ class XarrayBackend:
     def codes_like(self, codes: np.ndarray, values: xr.DataArray) -> xr.DataArray:
         """Group codes along *values*' one axis, carrying its labels."""
         return xr.DataArray(codes, dims=values.dims[0], coords=values.coords)
-
-    def named(self, value: xr.DataArray, name: Hashable) -> xr.DataArray:
-        return value.rename(name)
 
     def isel(self, obj: Any, indexers: Mapping[Hashable, Any], drop: bool = False) -> Any:
         return obj.isel(indexers, drop=drop)

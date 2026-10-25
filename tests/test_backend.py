@@ -1,6 +1,7 @@
 """The backend seam (plan milestone 9): verbs reach stored data only through a backend."""
 
 import ast
+import inspect
 import subprocess
 import sys
 import textwrap
@@ -13,7 +14,8 @@ import xarray as xr
 import tidy3a
 from tidy3a import (TidyError, col, filter, group_by, infer, left_join, mean, mutate, read_array, select,
                     slice, summarise, tidy)
-from tidy3a.backend import XarrayBackend, get_backend
+from tidy3a.backend import Backend, XarrayBackend, get_backend
+from tidy3a.numpy_backend import NumpyBackend
 from tidy3a.frame import TidyArray
 
 PACKAGE = Path(tidy3a.__file__).parent
@@ -122,3 +124,33 @@ def test_joining_data_from_two_backends_is_an_error_naming_both():
     right = TidyArray(xr.Dataset({"b": ("point", [1.0, 2.0, 3.0])}), backend=Other())
     with pytest.raises(TidyError, match=f"{get_backend().name} backend and the other data the other backend"):
         cloud() >> left_join(right)
+
+
+# ── The interface, written down ─────────────────────────────────────────────
+
+
+def _public_methods(cls):
+    return {name for name in dir(cls) if not name.startswith("_") and callable(getattr(cls, name))}
+
+
+@pytest.mark.parametrize("backend_class", [XarrayBackend, NumpyBackend])
+def test_each_backend_implements_exactly_the_protocol(backend_class):
+    """The same methods, parameters, and defaults as ``Backend``, and no public method outside it."""
+    protocol = _public_methods(Backend)
+    assert _public_methods(backend_class) == protocol
+    assert isinstance(backend_class(), Backend)
+    for name in sorted(protocol):
+        expected = inspect.signature(getattr(Backend, name))
+        actual = inspect.signature(getattr(backend_class, name))
+        described = [(p.name, p.kind, p.default) for p in expected.parameters.values()]
+        implemented = [(p.name, p.kind, p.default) for p in actual.parameters.values()]
+        assert implemented == described, f"{backend_class.__name__}.{name}{actual} differs from Backend.{name}{expected}"
+
+
+def test_every_protocol_method_is_used_by_the_shared_modules():
+    """The protocol holds what the verbs, expressions, rules, and readers call, and nothing more."""
+    source = Path(__file__).resolve().parents[1] / "src" / "tidy3a"
+    shared = "".join((source / name).read_text() for name in
+                     ("verbs.py", "expr.py", "formula.py", "align.py", "frame.py", "io.py", "linalg.py", "backend.py"))
+    unused = sorted(name for name in _public_methods(Backend) if f".{name}(" not in shared)
+    assert unused == []
