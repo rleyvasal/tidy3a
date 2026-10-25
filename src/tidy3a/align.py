@@ -13,9 +13,9 @@ from typing import Any
 
 import numpy as np
 
-from tidy3a import labels
 from tidy3a.backend import xarray_backend
 from tidy3a.errors import AlignError
+from tidy3a.labelarray import labels
 
 
 def align_pair(

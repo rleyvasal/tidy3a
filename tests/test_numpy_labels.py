@@ -1,4 +1,4 @@
-"""Label lookups in the NumPy backend's ``LabelIndex``, checked against pandas.
+"""Label lookups in the NumPy backend's label indexes (``labelarray.index``), checked against pandas.
 
 pandas' ``Index.get_indexer`` is the reference for which labels match: the
 prototype must agree with it wherever labels are unique, including across
@@ -14,7 +14,8 @@ import pytest
 
 from tidy3a import AlignError
 from tidy3a.align import align_pair
-from tidy3a.numpy_backend import NUMPY, LabelError, LabelIndex, NumpyArray, NumpyData, label_index
+from tidy3a.labelarray.index import index_for
+from tidy3a.numpy_backend import NUMPY, LabelError, NumpyArray, NumpyData, label_index
 
 DAYS = np.array(["2026-01-01", "2026-01-02", "2026-01-03"], dtype="datetime64[ns]")
 
@@ -55,7 +56,7 @@ CASES = {
 def test_lookups_match_pandas(name):
     labels, wanted = CASES[name]
     expected = pd.Index(labels).get_indexer(wanted)
-    np.testing.assert_array_equal(LabelIndex(labels).get_indexer(wanted), expected)
+    np.testing.assert_array_equal(index_for(labels).get_indexer(wanted), expected)
 
 
 def _random_labels(dtype: str, n: int, rng: np.random.Generator) -> np.ndarray:
@@ -82,23 +83,23 @@ def test_random_labels_match_pandas_sorted_and_shuffled(dtype, seed):
     wanted = np.concatenate([rng.choice(labels, 200), rng.choice(others, 200)])
     rng.shuffle(wanted)
     for candidate in (np.sort(labels), labels[rng.permutation(len(labels))]):
-        np.testing.assert_array_equal(LabelIndex(candidate).get_indexer(wanted),
+        np.testing.assert_array_equal(index_for(candidate).get_indexer(wanted),
                                       pd.Index(candidate).get_indexer(wanted))
 
 
 def test_large_integers_compare_exactly_unlike_pandas():
     labels, wanted = np.array([2**53 + 1, 3]), np.array([float(2**53)])
     assert pd.Index(labels).get_indexer(wanted).tolist() == [0]  # pandas: through float64, 2**53 == 2**53 + 1
-    assert LabelIndex(labels).get_indexer(wanted).tolist() == [-1]  # exact: they differ
-    assert LabelIndex(labels).get_indexer([2**53 + 1]).tolist() == [0]
+    assert index_for(labels).get_indexer(wanted).tolist() == [-1]  # exact: they differ
+    assert index_for(labels).get_indexer([2**53 + 1]).tolist() == [0]
 
 
 def test_repeated_labels_raise_where_pandas_raises():
-    index = LabelIndex(np.array([1.0, 2.0, 1.0]))
+    index = index_for(np.array([1.0, 2.0, 1.0]))
     assert not index.unique
     with pytest.raises(LabelError, match="labels repeat"):
         index.get_indexer([1.0])
-    assert not LabelIndex(np.array([np.nan, 1.0, np.nan])).unique  # two NaN labels repeat too
+    assert not index_for(np.array([np.nan, 1.0, np.nan])).unique  # two NaN labels repeat too
     assert index.get_indexer(np.array([], dtype=float)).size == 0
 
 
@@ -179,8 +180,8 @@ def test_sorted_and_unsorted_labels_give_the_same_positions():
     labels = np.sort(rng.choice(10**6, 10**4, replace=False))
     shuffled = labels[rng.permutation(len(labels))]
     wanted = rng.choice(labels, 1000)
-    np.testing.assert_array_equal(labels[LabelIndex(labels).get_indexer(wanted)], wanted)
-    np.testing.assert_array_equal(shuffled[LabelIndex(shuffled).get_indexer(wanted)], wanted)
+    np.testing.assert_array_equal(labels[index_for(labels).get_indexer(wanted)], wanted)
+    np.testing.assert_array_equal(shuffled[index_for(shuffled).get_indexer(wanted)], wanted)
 
 
 def test_a_callers_labels_cannot_change_a_frame_later():

@@ -13,8 +13,9 @@ and to list labels for messages exactly as the xarray backend does.
 
 The backend owns its labels: labels from outside are copied once into a
 read-only ``_Labels`` array, which nothing else can unlock, so each label
-array's index (``LabelIndex``) is built on first use and kept on the array,
-released with it. Labels compare under one exact rule (``tidy3a.labels``).
+array's index (``labelarray.index``) is built on first use and kept on the
+array, released with it. Labels compare under one exact rule
+(``labelarray.labels``).
 Variable data is not copied or frozen: as with the xarray backend, wrapping
 in-memory data shares it.
 """
@@ -30,15 +31,14 @@ from typing import Any
 import numpy as np
 
 from tidy3a import grouped
-from tidy3a import labels as exact
 from tidy3a.backend import is_xarray, kept_positions, memory_mapped
 from tidy3a.errors import TidyError
+from tidy3a.labelarray import labels as exact
 from tidy3a.labelarray import sums
+from tidy3a.labelarray.align import order_like
 from tidy3a.labelarray.contract import contract
-from tidy3a.labelarray.errors import LabelError, ShapeError
-from tidy3a.labels import exact_cast
-from tidy3a.labels import kind as _kind
-from tidy3a.labels import missing as _missing
+from tidy3a.labelarray.errors import AlignError, LabelError, ShapeError
+from tidy3a.labelarray.index import LabelIndex, index_for
 
 # Up to this many groups, scanning the axis once per group is cheaper than sorting it.
 _FEW_GROUPS = 8
@@ -56,9 +56,18 @@ _QUIET = {
 
 
 class NumpyArray:
-    """A NumPy array with one name per axis, labels for its labelled axes, attributes, and a name."""
+    """A NumPy array with one name per axis, labels for its labelled axes, attributes, and a name.
+
+    NumPy's ufuncs, ``np.where``, and Python's operators work on it, broadcasting by axis name under
+    the exact alignment rule (``labelarray.align``): the same labels in another order are matched by
+    label, and labels that differ are an ``AlignError``. Results have no attributes or name, as
+    ``NumpyBackend.apply`` gives. Python's operators do not warn about division by zero or overflow,
+    as on xarray arrays; NumPy's functions do.
+    """
 
     __slots__ = ("data", "dims", "coords", "attrs", "name")
+
+    __hash__ = None  # type: ignore[assignment]  # == compares values, as on NumPy and xarray arrays
 
     def __init__(self, data: Any, dims: Sequence[Hashable] = (), coords: Mapping[Hashable, Any] | None = None,
                  attrs: Mapping[Hashable, Any] | None = None, name: Hashable | None = None):
@@ -107,6 +116,22 @@ class NumpyArray:
     def __repr__(self) -> str:
         sizes = ", ".join(f"{d}: {n}" for d, n in self.sizes.items())
         return f"<NumpyArray {self.name or ''}({sizes}) {self.dtype}>"
+
+    def __array_ufunc__(self, ufunc: np.ufunc, method: str, *inputs: Any, **kwargs: Any) -> Any:
+        # Reductions, generalised ufuncs (core dimensions), and out= or where= arrays address
+        # positions, not axis names, so they are left to NumPy's error.
+        if method != "__call__" or ufunc.signature is not None or "out" in kwargs or "where" in kwargs:
+            return NotImplemented
+        if not all(isinstance(x, NumpyArray) or _is_scalar(x) for x in inputs):
+            return NotImplemented  # a plain array has no axis names to broadcast by
+        return _elementwise(ufunc, inputs, kwargs)
+
+    def __array_function__(self, func: Callable, types: Sequence[type], args: Sequence[Any],
+                           kwargs: Mapping[str, Any]) -> Any:
+        handler = _FUNCTIONS.get(func)
+        if handler is None or not all(issubclass(t, (NumpyArray, np.ndarray)) for t in types):
+            return NotImplemented
+        return handler(*args, **kwargs)
 
 
 class NumpyData:
@@ -212,88 +237,16 @@ def _plain(labels: np.ndarray) -> np.ndarray:
 
 # ── Label index ─────────────────────────────────────────────────────────────
 
-class LabelIndex:
-    """Positions of labels on one axis, built once per label array.
-
-    Labels are searched with ``np.searchsorted``: directly when they are
-    already strictly increasing (positions after a filter, most time and
-    coordinate axes), otherwise through one stable sort made at build time.
-    A missing label (NaN or NaT) is held apart, since it never sorts or
-    compares equal; one such label can still be looked up.
-    """
-
-    __slots__ = ("kind", "dtype", "size", "unique", "_sorted", "_sorter", "_kept", "_missing")
-
-    def __init__(self, labels: np.ndarray, op: str = "index", dim: Hashable = None):
-        kind, values = _kind(np.asarray(labels), op, dim)
-        missing = _missing(values)
-        kept = np.flatnonzero(~missing)
-        present = values[kept] if missing.any() else values
-        self.kind, self.dtype, self.size = kind, present.dtype, len(values)
-        self._missing = np.flatnonzero(missing)
-        self._kept = None if len(kept) == len(values) else kept
-        try:
-            increasing = bool(np.all(present[1:] > present[:-1]))
-            if increasing:
-                self._sorter, self._sorted = None, present
-            else:
-                # Order among equal labels is irrelevant (repeats cannot be looked up), so the
-                # faster unstable sort is enough.
-                self._sorter = np.argsort(present)
-                self._sorted = present[self._sorter]
-        except TypeError:
-            raise LabelError(f"{op}: labels on {dim!r} cannot be ordered, so they cannot be looked up") from None
-        repeated = not increasing and bool(np.any(self._sorted[1:] == self._sorted[:-1]))
-        self.unique = not repeated and len(self._missing) <= 1
-
-    def get_indexer(self, wanted: Any) -> np.ndarray:
-        """The position of each wanted label, or -1 where it is absent."""
-        wanted = np.atleast_1d(np.asarray(wanted))
-        if wanted.ndim != 1:
-            raise LabelError("look up labels as a one-dimensional list")
-        result = np.full(len(wanted), -1, dtype=np.intp)
-        if not len(wanted) or not self.size:
-            return result
-        if not self.unique:
-            raise LabelError("labels repeat, so a label does not name one position")
-        try:
-            kind, wanted = _kind(wanted, "look up", None)
-        except LabelError:
-            return result  # a label of a different type is simply not present
-        if self.kind == "time" and kind in ("text", "bytes"):
-            try:
-                wanted, kind = np.asarray(wanted, dtype="datetime64"), "time"
-            except ValueError:
-                return result
-        if kind != self.kind:
-            return result
-        missing = _missing(wanted)
-        if missing.any() and len(self._missing):
-            result[missing] = self._missing[0]
-        rest = np.flatnonzero(~missing)
-        cast, exact = (wanted[rest], np.ones(len(rest), dtype=bool)) if wanted.dtype == self.dtype \
-            else exact_cast(wanted[rest], self.dtype)
-        if not len(self._sorted):
-            return result
-        found = np.searchsorted(self._sorted, cast)
-        clipped = np.minimum(found, len(self._sorted) - 1)
-        hit = exact & (found < len(self._sorted)) & (self._sorted[clipped] == cast)
-        positions = clipped if self._sorter is None else self._sorter[clipped]
-        if self._kept is not None:
-            positions = self._kept[positions]
-        result[rest[hit]] = positions[hit]
-        return result
-
-
 def label_index(labels: np.ndarray, op: str = "index", dim: Hashable = None) -> LabelIndex:
-    """The index for a label array: built on first use and kept on labels this backend owns.
+    """The index for a label array (``labelarray.index.index_for``): built on first use and kept on labels
+    this backend owns.
 
     Other arrays, which could change, get a fresh index each time.
     """
     if not _owned(labels):
-        return LabelIndex(labels, op, dim)
+        return index_for(labels, op, dim)
     if labels._index is None:
-        labels._index = LabelIndex(labels, op, dim)
+        labels._index = index_for(labels, op, dim)
     return labels._index
 
 
@@ -331,6 +284,102 @@ def _broadcast(operands: Sequence[Any]) -> tuple[list[Any], tuple[Hashable, ...]
             data = np.reshape(data, [sizes[d] if d in item.dims else 1 for d in dims])
         raw.append(data)
     return raw, tuple(dims), coords
+
+
+# ── NumPy's protocols ───────────────────────────────────────────────────────
+
+
+def _is_scalar(value: Any) -> bool:
+    return isinstance(value, (int, float, complex, str, bytes, np.generic)) or \
+        (isinstance(value, np.ndarray) and value.ndim == 0)
+
+
+def _elementwise(func: Callable, operands: Sequence[Any], kwargs: Mapping[str, Any]) -> Any:
+    """*func* on operands aligned and broadcast by axis name; one array per output."""
+    raw, dims, coords = _broadcast(_aligned(operands))
+    result = func(*raw, **kwargs)
+    if isinstance(result, tuple):
+        return tuple(NumpyArray._make(np.asarray(r), dims, coords) for r in result)
+    return NumpyArray._make(np.asarray(result), dims, coords)
+
+
+def _aligned(operands: Sequence[Any]) -> list[Any]:
+    """Each array's axes matched to the first array with that axis, as ``tidy3a.align`` matches them."""
+    first: dict[Hashable, NumpyArray] = {}
+    aligned = []
+    for item in operands:
+        if isinstance(item, NumpyArray):
+            for dim in item.dims:
+                if dim in first:
+                    item = _matched(first[dim], item, dim)
+            for dim in item.dims:
+                first.setdefault(dim, item)
+        aligned.append(item)
+    return aligned
+
+
+def _matched(reference: NumpyArray, value: NumpyArray, dim: Hashable) -> NumpyArray:
+    labelled = dim in reference.coords
+    if labelled != (dim in value.coords):
+        raise AlignError(f"{dim} is labelled on one operand but not on another; "
+                         "pairing by length could match the wrong positions")
+    if not labelled:
+        ours, theirs = reference.sizes[dim], value.sizes[dim]
+        if ours != theirs:
+            raise AlignError(f"{dim} has {ours:,} positions on one operand and {theirs:,} on another, "
+                             "and neither has labels to match")
+        return value
+    order = order_like(reference.coords[dim], value.coords[dim], dim, index=label_index)
+    if order is None:
+        return value
+    taken = _take(value, dim, order)
+    taken.coords[dim] = reference.coords[dim]
+    return taken
+
+
+def _where(condition: Any, true: Any = None, false: Any = None) -> Any:
+    operands = (condition, true, false)
+    if true is None or false is None or not all(isinstance(v, NumpyArray) or _is_scalar(v) for v in operands):
+        return NotImplemented  # with one argument, np.where gives positions
+    return _elementwise(np.where, operands, {})
+
+
+_FUNCTIONS: dict[Callable, Callable] = {np.where: _where}
+
+
+def _operator(ufunc: np.ufunc, reflected: bool = False) -> Callable:
+    def method(self: NumpyArray, other: Any) -> Any:
+        # Expressions set __array_ufunc__ to None so that their own reflected operators build an
+        # expression; anything else without axis names is not an operand.
+        if getattr(other, "__array_ufunc__", False) is None or not (isinstance(other, NumpyArray) or _is_scalar(other)):
+            return NotImplemented
+        with np.errstate(all="ignore"):
+            return _elementwise(ufunc, (other, self) if reflected else (self, other), {})
+
+    return method
+
+
+def _unary(ufunc: np.ufunc) -> Callable:
+    def method(self: NumpyArray) -> NumpyArray:
+        with np.errstate(all="ignore"):
+            return _elementwise(ufunc, (self,), {})
+
+    return method
+
+
+for _name, _ufunc in [
+    ("add", np.add), ("sub", np.subtract), ("mul", np.multiply), ("truediv", np.true_divide),
+    ("floordiv", np.floor_divide), ("mod", np.remainder), ("divmod", np.divmod), ("pow", np.power),
+    ("and", np.bitwise_and), ("or", np.bitwise_or), ("xor", np.bitwise_xor),
+    ("lshift", np.left_shift), ("rshift", np.right_shift),
+]:
+    setattr(NumpyArray, f"__{_name}__", _operator(_ufunc))
+    setattr(NumpyArray, f"__r{_name}__", _operator(_ufunc, reflected=True))
+for _name, _ufunc in [("lt", np.less), ("le", np.less_equal), ("eq", np.equal), ("ne", np.not_equal),
+                      ("gt", np.greater), ("ge", np.greater_equal)]:
+    setattr(NumpyArray, f"__{_name}__", _operator(_ufunc))  # Python swaps the sides of comparisons itself
+for _name, _ufunc in [("neg", np.negative), ("pos", np.positive), ("abs", np.absolute), ("invert", np.invert)]:
+    setattr(NumpyArray, f"__{_name}__", _unary(_ufunc))
 
 
 def _take(value: NumpyArray, dim: Hashable, index: Any) -> NumpyArray:

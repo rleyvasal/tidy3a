@@ -18,9 +18,9 @@ import pandas as pd
 import xarray as xr
 
 from tidy3a import grouped
-from tidy3a import labels as exact
 from tidy3a.backend import kept_positions
 from tidy3a.errors import TidyError
+from tidy3a.labelarray import labels as exact
 from tidy3a.labelarray import sums
 from tidy3a.labelarray.contract import contract
 
