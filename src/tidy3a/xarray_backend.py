@@ -372,7 +372,7 @@ class XarrayBackend:
         return parts
 
     def group_counts(self, groups: Any, per_position: int) -> xr.DataArray:
-        counts = np.bincount(groups.codes.values, minlength=len(groups.labels)) * per_position
+        counts = groups.counts() * per_position
         return xr.DataArray(counts, dims=groups.name, coords={groups.name: groups.labels})
 
     def broadcast(self, stats: xr.DataArray, groups: Any) -> xr.DataArray:

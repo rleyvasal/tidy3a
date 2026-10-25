@@ -1347,6 +1347,14 @@ Results: 100,000 points in 90,000 groups, mean per group: xarray 4.8 s → 31 ms
 
 Results: the suite passes on both backends on current and minimum dependencies; the corpus is identical except for one message that now also suggests `read_array`; the demo agrees. With the Dependencies criterion now met, the remaining unmet criterion is Speed.
 
+Grouping costs (2026-10-24). The 10M-point grouped mutate, the one workload past the 10% limit, was split into stages with their times on both backends: finding groups (about 32 ms, pandas), sorting by group (29 ms), reducing (52 ms, almost all of it gathering the strided `intensity` column in group order; the 32 means themselves take 1.2 ms), and putting group results back on each point, 22.8 ms on NumPy against 10.1 ms on xarray: the whole backend gap. Fixed, each with a test in `tests/test_grouped.py` that failed first and results unchanged bit for bit:
+
+- The NumPy backend broadcasts group results by indexing (`stats[codes]`, 4 ms on 10M points) instead of `np.take` (19 ms), which gives the same values in the same layout.
+- Group labels are converted to Python values in one `tolist()` call instead of one by one: 18 of the 30 ms for 90,000 groups. Times and durations stay NumPy scalars, as before.
+- Group sizes are counted once (`Groups.counts()`), for the sort by group and for `n()`, instead of a second pass over every point.
+
+Results: 90,000 groups take 12–13 ms on both backends (31–33 ms before); the 10M-point grouped mean 102–104 ms (113–115); the 10M-point grouped mutate 110 ms on NumPy against 116 ms on xarray (127 against 116 before, ratio 0.92 → 1.06), so no workload is now more than 10% slower. Ideas measured and set aside: a special path for integer-valued keys (29 ms against pandas' 26 ms); an exact batched kernel for large float groups (at most about 1 ms, since gathering, which any exact method needs, is the cost); reusing buffers in point-cloud expressions (6.8 → 6.5 ms on 10M points). What remains in grouping is the same on both backends: finding groups, sorting, and gathering.
+
 Criteria rerun after the review fixes (2026-10-24), on commit `19fcdbe` in the pinned environment (`benchmarks/results/2026-10-24-19fcdbee.json`, Apple M4, Python 3.12, NumPy 2.5.4, xarray 2026.9.0, nuScenes Mini and the sample data present):
 
 | Criterion | Result | Met |

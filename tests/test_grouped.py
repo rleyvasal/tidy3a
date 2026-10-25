@@ -144,3 +144,63 @@ def test_groups_are_found_again_after_a_step_changes_the_key():
     out = (tidy(cloud, field_axis="feature") >> group_by(col("ring"))
            >> mutate(values=col("values") * keep_x, m=mean(col("x")))).collect()
     assert out["m"].values.tolist() == [4.0] * 4  # the whole holder replaced: ring is all zeros now
+
+
+# ── Costs that grow with the number of groups or points ─────────────────────
+
+
+def _many(groups=1000, key_dtype="int64"):
+    rng = np.random.default_rng(1)
+    key = rng.permutation(np.repeat(np.arange(groups), 3)).astype(key_dtype)
+    return xr.Dataset({"v": ("point", rng.normal(size=len(key))), "key": ("point", key)})
+
+
+def test_group_sizes_are_counted_once_per_step(monkeypatch):
+    data = _many()
+    counted = []
+    original = np.bincount
+    monkeypatch.setattr(np, "bincount", lambda *a, **k: counted.append(1) or original(*a, **k))
+    tidy(data) >> group_by(col("key")) >> summarise(m=sum(col("v")), k=n())
+    assert len(counted) == 1  # once, for both the sort by group and n()
+
+
+def test_group_labels_are_converted_in_one_call(monkeypatch):
+    calls = []
+    original = expr._plain
+    monkeypatch.setattr(expr, "_plain", lambda value: calls.append(1) or original(value))
+    tidy(_many()) >> group_by(col("key")) >> summarise(m=mean(col("v")))
+    assert len(calls) < 10, len(calls)
+
+
+@pytest.mark.parametrize("values", [
+    np.array([3, 1, 3, 2]), np.array([0.5, -1.0, 0.5, 2.0], dtype="float32"), np.array([True, False, True, True]),
+    np.array(["b", "a", "b", "c"], dtype=object), np.array(["2026-01-02", "2026-01-01", "2026-01-02"], dtype="datetime64[ns]"),
+    np.array([5, 1, 5], dtype="timedelta64[ns]"), np.array([2, 1, 2], dtype="uint8"),
+])
+def test_group_labels_keep_their_python_types(values):
+    data = xr.Dataset({"v": ("point", np.arange(len(values), dtype=float)), "key": ("point", values)})
+    groups = expr.resolve_value_key(expr.ValueKey("key", col("key")), tidy(data), [])
+    expected = [expr._plain(label) for label in np.unique(values)]
+    assert [type(label) for label in groups.labels] == [type(label) for label in expected]
+    assert groups.labels == expected
+
+
+def test_broadcasting_group_results_back_gathers_once_without_np_take(monkeypatch):
+    rng = np.random.default_rng(2)
+    data = xr.Dataset({"values": (("point", "feature"), rng.normal(size=(40, 3)).astype("float32")),
+                       "key": ("point", rng.integers(0, 12, 40))}, coords={"feature": ["f1", "f2", "f3"]})
+    expected = (tidy(data, field_axis="feature") >> group_by(col("key"))
+                >> mutate(c=col("values") - mean(col("values")))).collect()
+    taken = []
+    original = np.take
+    monkeypatch.setattr(np, "take", lambda *a, **k: taken.append(1) or original(*a, **k))
+    frame = tidy(data, field_axis="feature", backend="numpy") >> group_by(col("key"))
+    groups = expr.Context(frame, verb="mutate").groups()
+    stats = frame._backend.group_reduce(frame._backend.variable(frame._data, "values"), "mean", groups, [], False, None)
+    taken.clear()
+    frame._backend.broadcast(stats, groups)
+    assert taken == []
+    monkeypatch.setattr(np, "take", original)
+    out = (frame >> mutate(c=col("values") - mean(col("values")))).collect()
+    xr.testing.assert_identical(out, expected)
+    assert out["c"].values.tobytes() == expected["c"].values.tobytes()

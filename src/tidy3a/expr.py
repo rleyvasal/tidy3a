@@ -392,6 +392,13 @@ class Groups:
         self.codes = codes
         self.labels = list(labels)
         self._blocks: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+        self._counts: np.ndarray | None = None
+
+    def counts(self) -> np.ndarray:
+        """Positions in each group, counted once for the sort by group and for ``n()``."""
+        if self._counts is None:
+            self._counts = np.bincount(self.codes.values, minlength=len(self.labels))
+        return self._counts
 
     def blocks(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Positions sorted by group, keeping their order within a group, and each group's start and end."""
@@ -400,7 +407,7 @@ class Groups:
             # NumPy's stable sort is a radix sort for 8- and 16-bit integers, far faster than for int64.
             narrow = np.min_scalar_type(builtins.max(len(self.labels) - 1, 0))
             order = np.argsort(codes.astype(narrow, copy=False), kind="stable")
-            ends = np.cumsum(np.bincount(codes, minlength=len(self.labels)))
+            ends = np.cumsum(self.counts())
             self._blocks = (order, np.concatenate(([0], ends[:-1])), ends)
         return self._blocks
 
@@ -789,7 +796,7 @@ def _value_groups(key: ValueKey, axis: Hashable, values: Any, backend: Any) -> G
             f"{key.label}; filter them out first"
         )
     labels, codes = _factorize(raw)
-    return Groups(key.name, axis, backend.codes_like(codes, values), [_plain(label) for label in labels])
+    return Groups(key.name, axis, backend.codes_like(codes, values), _label_list(labels))
 
 
 def _pandas() -> Any:
@@ -906,6 +913,20 @@ def _format_edge(value: Any) -> str:
         return str(np.datetime_as_string(nanoseconds, unit="ns"))
     value = _plain(value)
     return f"{value:g}" if isinstance(value, float) else str(value)
+
+
+def _label_list(labels: np.ndarray) -> list:
+    """Group labels as ``_plain`` gives them, converted in one call where NumPy can.
+
+    ``tolist()`` gives the same Python values as converting each label; times
+    and durations stay NumPy scalars, and object arrays are checked one by one.
+    """
+    labels = np.asarray(labels)
+    if labels.dtype.kind in "mM":
+        return list(labels)
+    if labels.dtype.kind == "O":
+        return [_plain(label) for label in labels]
+    return labels.tolist()
 
 
 def _plain(value: Any) -> Any:

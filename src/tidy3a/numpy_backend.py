@@ -843,13 +843,16 @@ class NumpyBackend:
         return [_take(array, groups.axis, order[int(start):int(end)]) for start, end in zip(starts, ends)]
 
     def group_counts(self, groups: Any, per_position: int) -> NumpyArray:
-        counts = np.bincount(groups.codes.values, minlength=len(groups.labels)) * per_position
+        counts = groups.counts() * per_position
         # Plain NumPy labels, not objects: the xarray backend labels counts this way.
         return NumpyArray._make(counts, (groups.name,), {groups.name: _freeze(np.asarray(groups.labels))})
 
     def broadcast(self, stats: NumpyArray, groups: Any) -> NumpyArray:
         axis = stats.axis(groups.name)
-        data = np.take(stats.data, groups.codes.values, axis=axis)
+        codes = groups.codes.values
+        # Group results come with the group axis first (group_reduce). Indexing gathers them
+        # several times faster than np.take, into the same values and the same C-ordered layout.
+        data = stats.data[codes] if axis == 0 else np.take(stats.data, codes, axis=axis)
         dims = stats.dims[:axis] + (groups.axis,) + stats.dims[axis + 1:]
         coords = {d: c for d, c in stats.coords.items() if d != groups.name}
         if groups.axis in groups.codes.coords:

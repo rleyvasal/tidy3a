@@ -45,6 +45,10 @@
   and pandas. Without them, the default backend is NumPy, arrays from the
   calling code can be one-variable `read_array` results, and
   `TidyArray.to_dict()` returns NumPy arrays in xarray's `to_dict` layout.
+- Grouping with many groups or many points is faster on both backends:
+  group labels are converted in one call and group sizes counted once, and
+  the NumPy backend puts group results back on each point by indexing. 90,000
+  groups take about 12 ms instead of 31 ms; results are unchanged.
 - Durations in `bins()` are read by tidy3A itself, the same whether or not
   pandas is installed; `"1h30min"` and `"2 weeks"` work everywhere, and
   months, years, and clock or ISO forms are an error.
