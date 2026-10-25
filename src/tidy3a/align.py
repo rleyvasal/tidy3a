@@ -87,6 +87,12 @@ def _match_axis(
     state, only_left, only_right = backend.compare_labels(left, right, dim)
     if state == "same":
         return right
+    if not (backend.labels_unique(left, dim) and backend.labels_unique(right, dim)):
+        raise AlignError(
+            f"{dim} has repeated labels, in a different order in {left_text} and {right_text}; "
+            "repeated labels cannot be matched one to one.\n"
+            f'  Give {dim} unique labels, or attach values by position: bind_cols(..., along="{dim}")'
+        )
     if state == "reordered":
         before = "  ".join(str(label) for label in _shown(backend.label_list(right, dim)))
         after = "  ".join(str(label) for label in _shown(backend.label_list(left, dim)))

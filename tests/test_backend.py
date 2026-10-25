@@ -30,6 +30,7 @@ def _xarray_imports(tree: ast.AST) -> list[ast.AST]:
     return found
 
 
+@pytest.mark.backends("xarray", reason="reads source files; the backend does not matter")
 def test_only_the_backends_and_readers_import_xarray():
     for path in PACKAGE.glob("*.py"):
         tree = ast.parse(path.read_text())

@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 import xarray as xr
+from _backends import stored_encoding
 
 from tidy3a import col, full_join, inner_join, left_join, mean, mutate, select, slice, summarise, tidy, var
 
@@ -25,10 +26,10 @@ def measurements():
 def test_dataset_metadata_and_types_survive_wrapping(measurements, method):
     result = getattr(tidy(measurements), method)()
     xr.testing.assert_identical(result, measurements)
-    assert result.encoding == measurements.encoding
+    assert result.encoding == stored_encoding(measurements.encoding)
     for name in measurements.variables:
         assert result[name].dtype == measurements[name].dtype
-        assert result[name].encoding == measurements[name].encoding
+        assert result[name].encoding == stored_encoding(measurements[name].encoding)
     assert result.temperature.dtype == np.dtype("float32")  # Serialization dtype is not a cast.
 
 
@@ -36,8 +37,8 @@ def test_dataarray_metadata_belongs_to_its_variable(measurements):
     source = measurements.temperature
     result = tidy(source).to_xarray()
     xr.testing.assert_identical(result.temperature, source)
-    assert result.temperature.encoding == source.encoding
-    assert result.sample.encoding == source.sample.encoding
+    assert result.temperature.encoding == stored_encoding(source.encoding)
+    assert result.sample.encoding == stored_encoding(source.sample.encoding)
 
 
 def test_shallow_view_has_independent_metadata_dictionaries(measurements):
@@ -48,7 +49,7 @@ def test_shallow_view_has_independent_metadata_dictionaries(measurements):
     view.temperature.encoding["dtype"] = np.dtype("int8")
     assert measurements.attrs["title"] == "Sensor measurements"
     assert measurements.temperature.attrs["units"] == "K"
-    assert frame.to_xarray().temperature.encoding["dtype"] == np.dtype("int16")
+    assert frame.to_xarray().temperature.encoding == stored_encoding(measurements.temperature.encoding)
     assert np.shares_memory(view.temperature.data, measurements.temperature.data)
 
 
@@ -96,7 +97,7 @@ def test_computed_values_clear_variable_metadata(measurements, keep_attrs, targe
     assert result[target].values.tolist() == [0, 1, 2, 3]
     assert result[target].attrs == {} and result[target].encoding == {}
     assert result.attrs == measurements.attrs and result.sample.attrs == measurements.sample.attrs
-    assert result.sample.encoding == measurements.sample.encoding
+    assert result.sample.encoding == stored_encoding(measurements.sample.encoding)
     assert result.quality.attrs == measurements.quality.attrs
     assert measurements.temperature.attrs == {"units": "K"}
     assert measurements.temperature.encoding["dtype"] == np.dtype("int16")
@@ -108,7 +109,7 @@ def test_aliases_and_explicit_arrays_keep_attributes_but_clear_encoding(measurem
     result = (tidy(measurements) >> mutate(copied=value)).collect()
     assert result.copied.attrs == measurements.temperature.attrs
     assert result.copied.encoding == {} and measurements.temperature.encoding
-    assert result.sample.encoding == measurements.sample.encoding
+    assert result.sample.encoding == stored_encoding(measurements.sample.encoding)
     assert np.shares_memory(result.copied.data, measurements.temperature.data)
 
 

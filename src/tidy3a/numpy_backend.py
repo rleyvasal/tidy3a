@@ -19,6 +19,7 @@ the xarray backend, wrapping in-memory data shares it.
 from __future__ import annotations
 
 import builtins
+import operator
 import warnings
 import weakref
 from collections.abc import Callable, Hashable, Mapping, Sequence
@@ -37,6 +38,14 @@ CoreError = LabelError  # the label index below raises it under this name
 
 # Up to this many groups, scanning the axis once per group is cheaper than sorting it.
 _FEW_GROUPS = 8
+
+# Python's operators on xarray arrays run without NumPy's floating-point warnings
+# (division by zero, overflow); NumPy functions such as sqrt still warn. The same here.
+_QUIET = {
+    operator.add, operator.sub, operator.mul, operator.truediv, operator.floordiv, operator.mod,
+    operator.pow, operator.and_, operator.or_, operator.xor, operator.eq, operator.ne, operator.lt,
+    operator.le, operator.gt, operator.ge, operator.neg, operator.pos, operator.invert, operator.abs,
+}
 
 
 # ── Arrays and collections ──────────────────────────────────────────────────
@@ -739,7 +748,11 @@ class NumpyBackend:
         if not any(isinstance(item, NumpyArray) for item in operands):
             return op(*operands)
         raw, dims, coords = _broadcast(operands)
-        result = op(*raw)
+        if op in _QUIET:
+            with np.errstate(all="ignore"):
+                result = op(*raw)
+        else:
+            result = op(*raw)
         return NumpyArray._make(np.asarray(result), dims, coords)
 
     def where(self, condition: Any, true: Any, false: Any) -> Any:

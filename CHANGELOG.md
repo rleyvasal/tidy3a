@@ -7,7 +7,10 @@
 - Experimental NumPy backend for eager, in-memory data:
   `set_backend("numpy")`, or `backend="numpy"` on `tidy()`, `read_array()`,
   and `read_binary()`. Lazy, chunked, and memory-mapped data stay on xarray.
-  The NumPy backend keeps attributes but not xarray storage encodings.
+  The NumPy backend keeps attributes but not xarray storage encodings;
+  `docs/backends.md` lists the deliberate differences.
+- Repeated labels on an axis that must be matched in another order are an
+  `AlignError` naming the axis, instead of a pandas `InvalidIndexError`.
 
 ## 0.1.0 — 2026-10-24
 

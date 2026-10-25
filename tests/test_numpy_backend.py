@@ -1,5 +1,8 @@
 """The experimental NumPy backend (plan milestone 9, step 3): same verbs, same results."""
 
+import subprocess
+import sys
+
 import numpy as np
 import pytest
 import xarray as xr
@@ -18,6 +21,8 @@ RECORDS = np.array([[0, -48, 0, 10, 1], [0, -49, 0, 20, 2], [51, 1, 0, 30, 1], [
 R = xr.DataArray(np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]], "float32"), dims=("i", "feature"),
                  coords={"i": XYZ, "feature": XYZ})
 OFFSET = xr.DataArray(np.array([1, 0, 0], "float32"), dims="i", coords={"i": XYZ})
+# These tests name or compare backends themselves, so they run once.
+pytestmark = pytest.mark.backends("xarray", reason="names or compares backends itself")
 
 
 @pytest.fixture(autouse=True)
@@ -52,7 +57,9 @@ def test_section_7_gives_the_same_printouts_values_and_types_on_both_backends():
 
 
 def test_the_default_backend_and_backend_names():
-    assert get_backend() is XARRAY
+    fresh = subprocess.run([sys.executable, "-c", "import tidy3a.backend as b; print(b.get_backend().name)"],
+                           capture_output=True, text=True, check=True)
+    assert fresh.stdout.strip() == "xarray"  # the package's own default, before any set_backend()
     set_backend("numpy")
     assert get_backend() is NUMPY
     assert tidy(xr.Dataset({"a": ("t", [1.0, 2.0])}))._backend is NUMPY
