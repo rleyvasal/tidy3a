@@ -208,8 +208,10 @@ stars' Landsat scene) run against plain xarray; see
 [examples/sample_data.py](examples/sample_data.py) for the files, optional
 reader dependencies, and checks.
 
-From a checkout, install the development dependencies and run the tests
-(the suite runs every test on both backends):
+From a checkout, install the development dependencies and run the tests:
+tidy3a's suite in `tests/` runs every test on both backends, and the
+library's in `labelarray_tests/` imports nothing of tidy3a but
+`tidy3a.labelarray`. `python -m pytest -q` runs both.
 
 ```bash
 python -m pip install -e ".[dev]"

@@ -51,7 +51,7 @@ where = ["src"]
 tidy3a = ["py.typed"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "prototypes"]
+testpaths = ["tests", "labelarray_tests", "prototypes"]
 pythonpath = ["src"]
 filterwarnings = [
   # flox imports a NumPy NaT dtype with a deprecated generic unit.

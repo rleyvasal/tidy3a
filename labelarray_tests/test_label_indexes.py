@@ -1,27 +1,24 @@
-"""The label index protocol and its implementations (``tidy3a.labelarray.index``, plan milestone 10, step A4).
+"""The label index protocol and its implementations (``labelarray.index``, plan milestone 10, step A4).
 
 Every implementation answers the same two questions, the position of each
 wanted label and the positions of a label range, under the exact label rule
-(``tidy3a.labelarray.labels``): a label matches only one of the same kind
+(``labelarray.labels``): a label matches only one of the same kind
 that is exactly equal, so ``2**53 + 1`` never matches ``2**53``, a
 half-second never matches whole seconds, and ``True`` never matches 1. The
 regular-grid index answers both arithmetically; the tests check it against
 the search-based indexes, which are checked against pandas in
-``test_numpy_labels.py``.
+``test_label_lookups.py``.
 """
 
-import ast
-import inspect
 from decimal import Decimal
 from fractions import Fraction
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from tidy3a import labelarray
-from tidy3a.labelarray import index as index_module
+from tidy3a.labelarray import Array, Collection, label_index
 from tidy3a.labelarray.errors import LabelError
 from tidy3a.labelarray.index import (
     GridIndex,
@@ -31,7 +28,6 @@ from tidy3a.labelarray.index import (
     index_for,
     register_index,
 )
-from tidy3a.numpy_backend import NumpyArray, NumpyData, label_index
 
 IMPLEMENTATIONS = (GridIndex, SortedIndex, SortOnceIndex)
 HOURS = np.datetime64("2026-01-01T00", "s") + np.arange(4) * np.timedelta64(3600, "s")
@@ -90,7 +86,7 @@ def test_a_grid_index_holds_no_arrays():
 
 
 def test_backend_label_arrays_keep_the_factorys_index():
-    data = NumpyData({"v": NumpyArray(np.zeros(4), ("lat",))}, {"lat": [90.0, 89.75, 89.5, 89.25]})
+    data = Collection({"v": Array(np.zeros(4), ("lat",))}, {"lat": [90.0, 89.75, 89.5, 89.25]})
     assert isinstance(label_index(data.coords["lat"]), GridIndex)
     assert label_index(data.coords["lat"]) is label_index(data.coords["lat"])
 
@@ -363,16 +359,3 @@ def test_a_registered_class_must_answer_the_protocol():
 
 def test_registered_classes_are_told_the_exact_rule():
     assert "exact_cast" in register_index.__doc__ and "2**53 + 1" in register_index.__doc__
-
-
-# ── The library stands alone ────────────────────────────────────────────────
-
-
-def test_the_library_imports_nothing_else_of_tidy3a():
-    for path in Path(inspect.getfile(labelarray)).parent.glob("*.py"):
-        tree = ast.parse(path.read_text())
-        names = {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
-        names |= {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module}
-        outside = {name for name in names if name.startswith("tidy3a") and not name.startswith("tidy3a.labelarray")}
-        assert not outside, f"{path.name} imports {outside}"
-    assert index_module.__name__ == "tidy3a.labelarray.index"

@@ -17,7 +17,6 @@ import pytest
 from tidy3a.align import align_many
 from tidy3a.backend import get_backend
 from tidy3a.expr import Expr, col
-from tidy3a.labelarray.errors import AlignError
 from tidy3a.numpy_backend import NumpyArray
 
 LABELS = {
@@ -120,79 +119,6 @@ def test_where_equals_the_backends_where(seed, layout):
     _assert_same(np.where(condition, true, 0.0), _expected(np.where, condition, true, 0.0))
 
 
-def test_ufuncs_with_two_outputs_give_two_arrays():
-    a = NumpyArray([7.0, -7.5], ("x",), {"x": [1, 2]})
-    whole, part = np.modf(a)
-    assert whole.values.tolist() == [0.0, -0.5] and part.values.tolist() == [7.0, -7.0]
-    quotient, remainder = divmod(a, 2)
-    assert quotient.values.tolist() == [3.0, -4.0] and remainder.values.tolist() == [1.0, 0.5]
-    assert quotient.coords["x"].tolist() == [1, 2]
-
-
-def test_sqrt_keeps_axes_and_labels():
-    a = NumpyArray([1.0, 4.0, 9.0], ("x",), {"x": [3, 1, 2]}, attrs={"units": "m"}, name="v")
-    root = np.sqrt(a)
-    assert isinstance(root, NumpyArray) and root.dims == ("x",)
-    assert root.values.tolist() == [1.0, 2.0, 3.0] and root.coords["x"].tolist() == [3, 1, 2]
-
-
-def test_broadcasting_is_by_axis_name_not_position():
-    a = NumpyArray(np.arange(6.0).reshape(2, 3), ("i", "j"))
-    b = NumpyArray(np.array([10.0, 20.0]), ("i",))
-    total = np.add(a, b)
-    assert total.dims == ("i", "j") and total.values.tolist() == [[10, 11, 12], [23, 24, 25]]
-    assert (b + a).dims == ("i", "j")  # the first operand's axes first, as apply does
-    c = NumpyArray(np.arange(6.0).reshape(3, 2), ("j", "i"))
-    np.testing.assert_array_equal((a - c).values, a.values - c.values.T)
-
-
-def test_a_reorder_is_matched_by_label():
-    a = NumpyArray([1.0, 2.0, 3.0], ("x",), {"x": [0.5, np.nan, 1.5]})
-    b = NumpyArray([20.0, 10.0, 30.0], ("x",), {"x": [np.nan, 0.5, 1.5]})
-    total = a + b
-    assert total.values.tolist() == [11.0, 22.0, 33.0]
-    assert np.asarray(total.coords["x"]).tolist()[::2] == [0.5, 1.5]
-    hours = np.array(["2026-01-01T00", "2026-01-01T01"], dtype="datetime64[s]")
-    c = NumpyArray([1.0, 2.0], ("t",), {"t": hours})
-    d = NumpyArray([20.0, 10.0], ("t",), {"t": hours[::-1].astype("datetime64[ns]")})
-    assert np.add(c, d).values.tolist() == [11.0, 22.0]
-
-
-def test_what_alignment_refuses_is_an_align_error():
-    a = NumpyArray([1.0, 2.0], ("k",), {"k": [2**53 + 1, 3]})
-    with pytest.raises(AlignError, match="labels differ"):
-        np.add(a, NumpyArray([1.0, 2.0], ("k",), {"k": [float(2**53), 3.0]}))  # exact: 2**53 + 1 is not 2**53
-    with pytest.raises(AlignError, match="labelled on one operand"):
-        np.add(a, NumpyArray([1.0, 2.0], ("k",)))
-    with pytest.raises(AlignError, match="neither has labels"):
-        np.add(NumpyArray([1.0, 2.0], ("k",)), NumpyArray([1.0, 2.0, 3.0], ("k",)))
-    with pytest.raises(AlignError, match="repeated labels"):
-        np.add(NumpyArray([1.0, 2.0, 3.0], ("k",), {"k": [1, 1, 2]}), NumpyArray([1.0, 2.0, 3.0], ("k",), {"k": [1, 2, 1]}))
-    with pytest.raises(AlignError, match="labels differ"):
-        np.where(a > 0, a, NumpyArray([1.0, 2.0], ("k",), {"k": [True, False]}))  # True is not 1
-
-
-def test_repeated_labels_in_the_same_order_pair_by_position():
-    a = NumpyArray([1.0, 2.0, 3.0], ("k",), {"k": [1, 1, 2]})
-    assert (a + a).values.tolist() == [2.0, 4.0, 6.0]
-
-
-def test_what_has_no_meaning_by_axis_name_is_refused():
-    a = NumpyArray([1.0, 4.0], ("x",))
-    with pytest.raises(TypeError):
-        np.add(a, np.array([1.0, 2.0]))  # a plain array has no axis names
-    with pytest.raises(TypeError):
-        np.add.reduce(a)
-    with pytest.raises(TypeError):
-        np.sqrt(a, out=np.empty(2))
-    with pytest.raises(TypeError):
-        np.matmul(a, a)  # core dimensions are positions
-    with pytest.raises(TypeError):
-        np.mean(a)
-    with pytest.raises(TypeError):
-        np.where(a > 1)  # positions, not values
-
-
 def test_operators_defer_to_expressions_and_stay_quiet():
     a = NumpyArray([1.0, 0.0], ("x",))
     assert isinstance(a + col("x"), Expr) and isinstance(a * col("x"), Expr)
@@ -202,8 +128,3 @@ def test_operators_defer_to_expressions_and_stay_quiet():
             np.divide(a, 0.0)  # NumPy functions do
 
 
-def test_comparisons_give_arrays_so_arrays_are_not_hashable():
-    a, b = NumpyArray([1.0, 2.0], ("x",)), NumpyArray([1.0, 3.0], ("x",))
-    assert (a == b).values.tolist() == [True, False]
-    with pytest.raises(TypeError):
-        hash(a)

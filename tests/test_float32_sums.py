@@ -6,7 +6,9 @@ mean of the stored values, ties to even. The reference here is exact rational
 arithmetic on the stored float32 values and an independent rounding routine,
 not NumPy. Ungrouped reductions of fewer than 8 values per result (such as
 ``sum(p**2, over="i")`` over x, y, and z) add in float64 in a fixed order and
-round once. A zero result is +0.0, as NumPy gives it.
+round once. A zero result is +0.0, as NumPy gives it. These check the verbs
+on both backends; the kernel itself, compiled and not, is tested with the
+library (``labelarray_tests/test_sums.py``).
 """
 
 import builtins
@@ -180,28 +182,6 @@ def test_min_count_and_signed_zero():
     assert np.isnan(out["s"].values[1])  # one present value, fewer than min_count
 
 
-@pytest.mark.backends("xarray", reason="compares the two kernels directly")
-@pytest.mark.parametrize("na_rm", [False, True])
-def test_the_compiled_and_numpy_kernels_give_the_same_bits(na_rm, monkeypatch):
-    pytest.importorskip("numba")
-    from tidy3a.labelarray import sums
-
-    monkeypatch.setattr(sums, "COMPILED_FROM", 0)  # compiled kernels at every size, to compare them
-    values, keys, groups = corpus()
-    rng = np.random.default_rng(4)
-    table = np.stack([values, rng.permutation(values)], axis=1)  # two columns, as a field holder gives them
-    results = {}
-    for compiled in (True, False):
-        monkeypatch.setattr(sums, "COMPILED", compiled)
-        with np.errstate(all="ignore"):
-            results[compiled] = [sums.reduce(table, op, (0,), na_rm=na_rm, codes=keys, groups=len(groups))
-                                 for op in ("sum", "mean")]
-    for with_compiled, without in zip(results[True], results[False]):
-        assert same_bits(with_compiled, without)
-    want = np.array([expected(g, "mean", na_rm) for g in groups], F32)
-    assert same_bits(results[True][1][:, 0], want)
-
-
 @pytest.mark.backends("xarray", reason="checks imports only")
 def test_importing_tidy3a_does_not_import_numba():
     import subprocess
@@ -210,54 +190,3 @@ def test_importing_tidy3a_does_not_import_numba():
     code = "import sys, tidy3a; assert 'numba' not in sys.modules, 'numba imported'"
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
-
-
-@pytest.mark.backends("xarray", reason="compares the two kernels directly")
-@pytest.mark.parametrize("seed", range(30))
-def test_the_compiled_few_value_path_gives_the_same_bits(seed, monkeypatch):
-    pytest.importorskip("numba")
-    from tidy3a.labelarray import sums
-
-    monkeypatch.setattr(sums, "IN_ORDER_COMPILED_FROM", 0)  # compiled kernels at every size, to compare them
-    rng = np.random.default_rng(seed)
-    count = int(rng.integers(1, sums.FEW))
-    width = int(rng.integers(1, 20_000))
-    values = (rng.normal(size=(width, count)) * 10.0 ** rng.uniform(-30, 30, (width, count))).astype(F32)
-    for special, share in ((np.nan, 0.05), (np.inf, 0.01), (-np.inf, 0.01), (-0.0, 0.05)):
-        values[rng.random(values.shape) < share] = special
-    layouts = [(values, (1,)), (np.ascontiguousarray(values.T), (0,))]
-    if width == 1:
-        layouts.append((values[0], (0,)))  # one axis, reduced entirely
-    layouts.append((values[:0], (1,)))  # no results: every position removed, as a filter can leave it
-    for data, axes in layouts:
-        for op in ("sum", "mean"):
-            for na_rm in (False, True):
-                min_count = int(rng.integers(0, count + 1)) if op == "sum" and rng.random() < 0.5 else None
-                results = []
-                for compiled in (True, False):
-                    monkeypatch.setattr(sums, "COMPILED", compiled)
-                    with np.errstate(all="ignore"):
-                        results.append(sums.reduce(data, op, axes, na_rm=na_rm, min_count=min_count))
-                assert results[0].dtype == results[1].dtype == F32
-                assert same_bits(results[0], results[1]), (op, na_rm, min_count, axes)
-
-
-@pytest.mark.backends("xarray", reason="checks which kernel runs")
-def test_compiled_kernels_run_only_from_a_size_where_they_pay(monkeypatch):
-    pytest.importorskip("numba")
-    from tidy3a.labelarray import _compiled, sums
-
-    calls = []
-    for name in ("in_order", "grouped_estimate"):
-        original = getattr(_compiled, name)
-        monkeypatch.setitem(sums._KERNELS, name, lambda *a, _original=original, _name=name: calls.append(_name)
-                            or _original(*a))
-    rng = np.random.default_rng(0)
-    small = rng.normal(size=(3, 1000)).astype(F32)
-    sums.reduce(small, "sum", (0,))
-    sums.reduce(small[0], "mean", (0,), codes=rng.integers(0, 5, 1000), groups=5)
-    assert calls == []  # below the threshold, calling compiled code costs more than it saves
-    many = rng.normal(size=(3, sums.IN_ORDER_COMPILED_FROM // 3 + 1)).astype(F32)
-    sums.reduce(many, "sum", (0,))
-    sums.reduce(many[0, :sums.COMPILED_FROM], "mean", (0,), codes=rng.integers(0, 5, sums.COMPILED_FROM), groups=5)
-    assert calls == ["in_order", "grouped_estimate"]

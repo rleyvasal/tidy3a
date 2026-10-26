@@ -11,6 +11,10 @@
   or checks them keeps working, but `type(array).__name__` is now `"Array"`.
 - The library has its own public API and README
   (`src/tidy3a/labelarray/README.md`), whose examples are tested.
+- The library has its own test suite, `labelarray_tests/`, importing
+  nothing of tidy3a but the library; `tests/` remains tidy3a's, run on
+  both backends. `python -m pytest` runs both, and the source distribution
+  includes both.
 
 ## 0.3.0 — 2026-10-25
 

@@ -1,5 +1,7 @@
 """The experimental NumPy backend (plan milestone 9, step 3): same verbs, same results."""
 
+import ast
+import inspect
 import subprocess
 import sys
 
@@ -8,9 +10,27 @@ import pytest
 import xarray as xr
 
 import tidy3a
-from tidy3a import (ReadError, TidyError, dot, fields, filter, formula, group_by, infer, mean, mutate, n, pull,
-                    read_array, set_backend, summarise, tidy)
+import tidy3a.numpy_backend as adapter
+from tidy3a import (
+    ReadError,
+    TidyError,
+    dot,
+    fields,
+    filter,
+    formula,
+    group_by,
+    infer,
+    mean,
+    mutate,
+    n,
+    pull,
+    read_array,
+    set_backend,
+    summarise,
+    tidy,
+)
 from tidy3a.backend import XARRAY, get_backend
+from tidy3a.labelarray import Array, Collection
 from tidy3a.numpy_backend import NUMPY, NumpyData
 
 x, y, z, intensity, ring, distance = fields("x", "y", "z", "intensity", "ring", "distance")
@@ -100,3 +120,14 @@ def test_joins_bring_raw_xarray_data_onto_this_datas_backend():
     joined = left >> tidy3a.left_join(xr.Dataset({"b": ("t", [5.0, 6.0])}, coords={"t": [2, 3]}))
     assert joined._backend is NUMPY
     assert joined.collect()["b"].values.tolist()[1] == 5.0
+
+
+def test_the_backend_is_an_adapter_over_the_library():
+    """Plan milestone 10, step A5: the array code lives in ``tidy3a.labelarray``."""
+    assert adapter.NumpyArray is Array and adapter.NumpyData is Collection
+    tree = ast.parse(inspect.getsource(adapter))
+    functions = [node.name for node in tree.body if isinstance(node, ast.FunctionDef)]
+    classes = [node.name for node in tree.body if isinstance(node, ast.ClassDef)]
+    assert not functions and classes == ["NumpyBackend"]
+    imported = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module}
+    assert {"tidy3a.labelarray.array", "tidy3a.labelarray.collection", "tidy3a.labelarray"} <= imported

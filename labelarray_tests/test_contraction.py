@@ -1,11 +1,9 @@
-"""The shared contraction behind ``dot`` (``tidy3a.labelarray.contract``, plan milestone 10, step B3)."""
+"""The contraction behind ``dot`` (``labelarray.contract``, plan milestone 10, step B3)."""
 
 import numpy as np
 import pytest
 
 from tidy3a.labelarray.contract import contract
-
-pytestmark = pytest.mark.backends("xarray", reason="tests the NumPy-only module directly")
 
 
 def _einsum(left, left_dims, right, right_dims, over):
