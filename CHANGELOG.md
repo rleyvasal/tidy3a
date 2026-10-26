@@ -1,6 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 — 2026-10-26
+
+Grouping by several keys (voxels), plans with `explain()` and reusable
+pipelines, and tables to and from Polars and tidy3; the array layer is now
+the package labelarray. Changes that can alter code written for 0.3.0:
+
+- On the NumPy backend, `where(...)` predicates receive a
+  `labelarray.Array`, whose type name is `Array`; `NumpyArray` and
+  `NumpyData` remain importable from `tidy3a.numpy_backend` as names for
+  the same classes, and `tidy3a.labelarray` still imports the library.
+- `group_by` accepts several value keys instead of refusing them, and
+  `axis` is a reserved keyword there, as `dropna` is.
 
 - Grouping by several value keys: `group_by(cells(x, 1), cells(y, 1),
   cells(z, 1))` makes one group per combination that occurs, sorted by
@@ -27,7 +38,8 @@
   Polars is optional (`tidy3a[polars]`), and neither it nor tidy3 is
   imported until a table is made or read.
 - tidy3a now depends on [labelarray](https://pypi.org/project/labelarray/)
-  0.1.0 or later, its array layer released as a package of its own, and no
+  0.1.1 or later (0.1.1 makes float32 sums and means over many small
+  groups, such as voxels, about 18 times faster, with the same bits), its array layer released as a package of its own, and no
   longer carries a copy: `pip install tidy3a` installs NumPy and
   labelarray. The `fast` extra installs `labelarray[fast]`. Results are
   unchanged. `tidy3a.labelarray` remains as another name for the package
