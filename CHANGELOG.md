@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- The §7 pipeline (rotate, measure, filter) is as fast as in 0.2.0 again,
+  and faster on the NumPy backend: 0.377 ms against 0.414 in 0.2.0 and
+  0.455 in 0.4.1 on 34,688 points; on the xarray backend 1.212 ms against
+  1.195 and 1.317. The NumPy backend now checks whether a name is one of a
+  few text labels (field axes) by comparing text directly instead of
+  through the label index, 0.35 µs instead of 9, a check that runs several
+  times per verb; the xarray backend builds float32 sums' and means'
+  results directly instead of reducing a slice to get their axes,
+  coordinates, and attributes. Results are unchanged. Grouped summaries
+  are 5–8% faster than in 0.4.1 too.
+
 ## 0.4.1 — 2026-10-26
 
 - Times with a time zone stored as values, not only as labels, stay on the

@@ -50,6 +50,9 @@ _QUIET = {
     operator.le, operator.gt, operator.ge, operator.neg, operator.pos, operator.invert, operator.abs,
 }
 
+# Up to this many text labels, has_label compares them directly rather than through the label index.
+_FEW_LABELS = 64
+
 __all__ = ["NUMPY", "LabelError", "NumpyArray", "NumpyBackend", "NumpyData", "label_index"]
 
 
@@ -215,6 +218,10 @@ class NumpyBackend:
     def has_label(self, obj: Any, dim: Hashable, label: Any) -> bool:
         labels = obj.coords[dim]
         index = label_index(labels, "look up", dim)
+        if index.kind == "text" and len(labels) <= _FEW_LABELS:
+            # Text labels match only text, and equality of text is exact, so a few of them need no
+            # index; field axes are short and their labels are looked up several times per verb.
+            return isinstance(label, str) and label in labels.tolist()
         if not index.unique:
             return bool(np.any(labels == label))
         try:

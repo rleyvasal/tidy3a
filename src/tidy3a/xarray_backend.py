@@ -19,11 +19,28 @@ import xarray as xr
 from labelarray import grouped, sums
 from labelarray import labels as exact
 from labelarray.contract import contract
+from xarray.indexes import PandasIndex
 
 from tidy3a.backend import kept_positions
 from tidy3a.errors import TidyError
 
 _EXACT = {"arithmetic_join": "exact"}
+
+
+_KEEPS_ATTRS: dict[Any, bool] = {}
+
+
+def _reductions_keep_attrs() -> bool:
+    """Whether xarray's reductions keep attributes, under the current ``keep_attrs`` setting.
+
+    The default changed across xarray versions, so one tiny reduction answers
+    it, once per setting.
+    """
+    setting = xr.get_options()["keep_attrs"]
+    if setting not in _KEEPS_ATTRS:
+        probe = xr.DataArray(np.zeros(1, dtype=np.float32), dims="d", attrs={"probe": 1})
+        _KEEPS_ATTRS[setting] = bool(probe.sum("d").attrs)
+    return _KEEPS_ATTRS[setting]
 
 
 def label_index(labels: Sequence[Any], name: Hashable) -> pd.Index:
@@ -309,13 +326,21 @@ class XarrayBackend:
                  min_count: int | None) -> xr.DataArray:
         """A float32 sum or mean from the shared kernel (``labelarray.sums``).
 
-        The reduction of a one-position slice gives the result's axes,
-        coordinates, name, and attributes, as xarray would give them.
+        The result carries what xarray's reduction would: the kept axes, the
+        coordinates on them, the name, and the attributes when reductions keep
+        them. It is built directly, which costs a few microseconds where
+        reducing a one-position slice to get it cost more than the sum; arrays
+        with indexes other than pandas' still take that slice.
         """
         numbers = tuple(array.get_axis_num(a) for a in axes)
         values = sums.reduce(array.values, op, numbers, na_rm=na_rm, min_count=min_count)
-        template = getattr(array.isel({a: slice(0, 1) for a in axes}), op)(dim=list(axes))
-        return template.copy(data=values)
+        if any(type(index) is not PandasIndex for index in array.xindexes.values()):
+            template = getattr(array.isel({a: slice(0, 1) for a in axes}), op)(dim=list(axes))
+            return template.copy(data=values)
+        kept = tuple(dim for dim in array.dims if dim not in axes)
+        coords = {name: coord.variable for name, coord in array.coords.items() if set(coord.dims) <= set(kept)}
+        attrs = dict(array.attrs) if _reductions_keep_attrs() else {}
+        return xr.DataArray(values, dims=kept, coords=coords, name=array.name, attrs=attrs)
 
     def group_reduce(self, array: xr.DataArray, op: str, groups: Any, others: Sequence[Hashable],
                      na_rm: bool, min_count: int | None) -> xr.DataArray:
