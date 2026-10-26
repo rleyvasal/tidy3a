@@ -140,6 +140,40 @@ are matched by label (and the change is noted), and different labels need a
 join (`left_join`, `inner_join`, `full_join`). The integer label `2**53 + 1`
 never matches the float `2**53`.
 
+## Tables: Polars and tidy3
+
+With [Polars](https://pola.rs) installed (`pip install "tidy3a[polars]"`),
+`as_table()` gives data with one observation axis as a Polars DataFrame,
+one row per position, and `tidy(table, axis=...)` reads a table back:
+
+```python
+import numpy as np
+from tidy3a import as_table, col, filter, infer, pull, read_array, tidy
+
+points = np.array([[3, 4, 0], [0, 0, 50], [60, 0, 0]], dtype="float32")
+cloud = read_array(points, dims={"point": infer, "feature": 3},
+                   labels={"feature": ["x", "y", "z"]}, field_axis="feature")
+table = cloud >> filter(col("x") < 10) >> as_table()
+print(table.columns)  # ['point', 'x', 'y', 'z']
+print(table["point"].to_list())  # [1, 2]
+
+back = tidy(table, axis="point", field_axis="feature", fields=["x", "y", "z"])
+print(back >> pull("z"))  # [ 0. 50.]
+```
+
+The axis's labels become a column named after it (original positions after
+a filter, as `pull` gives them), and field-axis labels and the other
+variables along the axis become columns. Data with more than one
+observation axis needs `as_table(long=True)`, one row per cell. Reading a
+table, each column becomes a variable along `axis=`, a column of that name
+becomes its labels, and `fields=` packs columns into one array along
+`field_axis=`. A LazyFrame is collected, with a note; Polars nulls become
+NaN, promoting integer and boolean columns to floats, also with a note.
+
+With [tidy3](https://github.com/rleyvasal/tidy3) installed, `tidy3.tidy(cloud)`
+gives a tidy3 frame (tidy3a defines the `__tidy__` hook tidy3 calls), and
+`tidy(frame, axis="point")` reads one back.
+
 ## Backends
 
 New data uses the NumPy backend wherever it holds the data without loss, and
@@ -163,14 +197,14 @@ first (`nir * 1.0 - red`) when a result can be negative.
 
 | | |
 |---|---|
-| Reading | `read_array` (raw files, `.npy`, NumPy arrays, `lazy=True` to memory-map), `read_binary` (fixed-width mixed records), `fixed_text`, `infer`, `tidy()` |
+| Reading | `read_array` (raw files, `.npy`, NumPy arrays, `lazy=True` to memory-map), `read_binary` (fixed-width mixed records), `fixed_text`, `infer`, `tidy()` (xarray objects, or Polars and tidy3 tables with `axis=`) |
 | Verbs | `select`, `filter`, `slice`, `slice_head`, `slice_tail`, `mutate`, `group_by`, `ungroup`, `summarise`, `left_join`, `inner_join`, `full_join`, `bind_cols`, `pull` |
 | Grouping keys | a field or an axis name, `bins`, `rounded`, `cells` |
 | Reductions | `mean`, `sum`, `min`, `max`, `median`, `std`, `var`, `any`, `all`, `n`, with `over=` and `na_rm=` |
 | Expressions | `fields`, `col`, `variable`, `label`, `env`, `if_else`, `[x, y, z]` vectors, `assign`, `formula` (plain maths or a strict LaTeX dialect) |
 | Arrays | `dot`, `pack`, `rename_axes`, `conj`, `real`, `imag`, `angle`, `sqrt`, `exp`, `log`, trigonometric functions, … |
 | Selecting fields | `where`, `starts_with`, `ends_with`, `contains`, `matches`, `everything`, `is_numeric`, … |
-| Results | `pull`, `collect()` (an xarray `Dataset`), `to_xarray()`, `to_dict()` (NumPy arrays, no xarray needed) |
+| Results | `pull`, `collect()` (an xarray `Dataset`), `to_xarray()`, `to_dict()` (NumPy arrays, no xarray needed), `as_table()` (a Polars DataFrame) |
 | Settings | `set_backend` |
 
 An array from the calling code, such as a rotation matrix, can be an xarray

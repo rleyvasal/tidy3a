@@ -78,6 +78,7 @@ from tidy3a.selectors import (
     starts_with,
     where,
 )
+from tidy3a.tables import as_table
 from tidy3a.verbs import (
     assign,
     bind_cols,
@@ -102,7 +103,7 @@ nan = float("nan")
 __all__ = [
     "AlignError", "FilterError", "GroupError", "MutateError", "ReadError", "RefError",
     "SelectError", "SliceError", "SummariseError", "TidyArray", "TidyError", "__version__",
-    "all", "all_of", "any", "any_of", "assign", "bind_cols", "bins", "cells", "col", "contains",
+    "all", "all_of", "any", "any_of", "as_table", "assign", "bind_cols", "bins", "cells", "col", "contains",
     "ends_with", "env", "everything", "fields", "filter", "fixed_text", "full_join", "group_by", "if_else",
     "infer", "inner_join", "is_numeric", "label", "last_col", "left_join", "matches", "max",
     "mean", "median", "min", "mutate", "n", "nan", "num_range", "pull", "read_array", "read_binary", "rounded",

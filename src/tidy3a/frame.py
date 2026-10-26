@@ -115,6 +115,12 @@ class TidyArray:
             )
         return verb(self)
 
+    def __tidy__(self, **options: Any) -> Any:
+        """tidy3's ``tidy()`` calls this: the frame's ``as_table()`` as a tidy3 frame."""
+        from tidy3a.tables import to_tidy3
+
+        return to_tidy3(self, **options)
+
     def _apply_verb(self, verb: Any) -> Any:
         """Execute a verb; experimental frames may override this private boundary."""
         return verb._apply(self)
@@ -125,8 +131,9 @@ class TidyArray:
 
 
 @translating
-def tidy(data: Any, *, field_axis: str | None = None, backend: str | None = None) -> TidyArray:
-    """Wrap an xarray ``DataArray`` or ``Dataset`` for tidy3a verbs.
+def tidy(data: Any, *, axis: str | None = None, field_axis: str | None = None,
+         fields: Sequence[str] | None = None, backend: str | None = None) -> TidyArray:
+    """Wrap an xarray ``DataArray`` or ``Dataset``, or read a table, for tidy3a verbs.
 
     An unnamed DataArray becomes the variable ``values``. ``field_axis=``
     declares the axis whose labels act as column names, as in
@@ -139,7 +146,20 @@ def tidy(data: Any, *, field_axis: str | None = None, backend: str | None = None
     ``backend=`` is ``"xarray"`` or ``"numpy"``; without it, the default
     from ``set_backend()`` is used, or with none chosen, NumPy where it holds
     the data without loss (``docs/backends.md``).
+
+    A Polars DataFrame or LazyFrame, or a tidy3 frame, is read as a table:
+    ``axis=`` names the axis the rows run along, each column becomes a
+    variable along it, and a column of that name becomes its labels.
+    ``fields=`` packs the named columns into one array along ``field_axis=``,
+    whose labels they become, as ``read_array(..., field_axis=)`` gives.
     """
+    from tidy3a.tables import from_table, is_table
+
+    if is_table(data):
+        return from_table(data, axis=axis, field_axis=field_axis, fields=fields, backend=backend)
+    if axis is not None or fields is not None:
+        raise TidyError("axis= and fields= are for tables (Polars DataFrames and tidy3 frames), "
+                        f"not {type(data).__name__}")
     if isinstance(data, TidyArray):
         if backend is not None and get_backend(backend) is not data._backend:
             source = data.to_xarray()
@@ -162,8 +182,8 @@ def tidy(data: Any, *, field_axis: str | None = None, backend: str | None = None
         dataset, source = holder.wrap(data)
     else:
         raise TypeError(
-            f"tidy() wraps xarray DataArray and Dataset objects, not {type(data).__name__}; "
-            "use read_array() for NumPy arrays and files"
+            f"tidy() wraps xarray DataArray and Dataset objects and reads Polars and tidy3 tables, "
+            f"not {type(data).__name__}; use read_array() for NumPy arrays and files"
         )
     if field_axis is not None:
         check_field_axis(dataset, field_axis, TidyError, holder)

@@ -6,6 +6,7 @@ checks that ``expr`` prints as ``text``, whitespace aside.
 """
 
 import contextlib
+import importlib.util
 import io
 import re
 from pathlib import Path
@@ -33,6 +34,11 @@ def test_the_readme_has_its_examples():
 def test_each_readme_example_runs_and_prints_what_it_says(number, monkeypatch):
     monkeypatch.setattr(backend_module, "_default", None)  # no set_backend(), as for a new reader
     code = BLOCKS[number]
+    needs = set(re.findall(r"^(?:import|from) (\w+)", code, re.MULTILINE))
+    needs |= {"polars"} if "as_table(" in code else set()  # as_table() gives a Polars DataFrame
+    for module in sorted(needs):
+        if importlib.util.find_spec(module) is None:
+            pytest.skip(f"README example {number + 1} needs {module}, an optional dependency")
     namespace: dict = {}
     with contextlib.redirect_stdout(io.StringIO()):
         exec(compile(code, f"README example {number + 1}", "exec"), namespace)  # noqa: S102 - the README's own code

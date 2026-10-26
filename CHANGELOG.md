@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Tables: `as_table()` gives data with one observation axis as a Polars
+  DataFrame, one row per position (`long=True` for one row per cell of a
+  grid), and `tidy(table, axis=...)` reads a Polars DataFrame or LazyFrame,
+  or a tidy3 frame, back, with `fields=` packing columns along a field
+  axis. `tidy3.tidy()` accepts tidy3a data through the `__tidy__` hook.
+  Polars is optional (`tidy3a[polars]`), and neither it nor tidy3 is
+  imported until a table is made or read.
 - tidy3a now depends on [labelarray](https://pypi.org/project/labelarray/)
   0.1.0 or later, its array layer released as a package of its own, and no
   longer carries a copy: `pip install tidy3a` installs NumPy and
