@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- A verb that removes the field axis (a summary over every observation
+  axis, for instance) ends it: the result names no field axis,
+  `explain()` says `field axis: feature → none`, and `tidy(...,
+  field_axis=)` can declare a new one. Results are unchanged; expressions
+  already ignored a field axis that no longer existed.
+- Grouping by several keys builds each group's key values with NumPy
+  indexing instead of a Python loop: a voxel count and float32 mean of
+  200,000 points in 96,846 voxels takes 22 ms on the NumPy backend instead
+  of 33.
+
 ## 0.4.2 — 2026-10-26
 
 - The §7 pipeline (rotate, measure, filter) is as fast as in 0.2.0 again,

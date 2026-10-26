@@ -192,6 +192,7 @@ print(len(per_ring.plan()))  # 4
      - d
      + points (ring: 2) int64
      + m (ring: 2) float32
+     field axis: feature → none
      groups: none
 ```
 

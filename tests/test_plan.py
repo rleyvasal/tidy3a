@@ -66,6 +66,7 @@ def test_explain_lists_the_source_and_each_step_with_its_effect():
         "     - d",
         "     + points (ring: 2) int64",
         "     + m (ring: 2) float32",
+        "     field axis: feature → none",
         "     groups: none",
     ])
 

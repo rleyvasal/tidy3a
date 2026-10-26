@@ -450,7 +450,7 @@ class Groups(Grouping):
         self.codes_array = codes_array
         self.dropped = dropped
         self.note = note
-        # For several keys (MultiKey): each key's name and its value for each shown group.
+        # For several keys (MultiKey): each key's name and its values, an array with one per shown group.
         self.keys = tuple(keys)
 
     @property
@@ -915,8 +915,8 @@ def _multi_groups(key: MultiKey, frame: Any, group_axes: Sequence[Hashable]) -> 
         chosen, found = rows.T, rows
     codes = np.full(len(missing), len(found), dtype=np.intp)
     codes[present] = inverse.reshape(-1)
-    keys = [(name, [part.labels[int(code)] for code in where])
-            for name, part, where in zip(names, parts, chosen)]
+    # Each key's labels are few (its groups); as an array once, indexed by every combination's code.
+    keys = [(name, _label_array(part.labels)[np.asarray(where)]) for name, part, where in zip(names, parts, chosen)]
     labels = list(range(1, len(found) + 1))
     codes_array = backend.codes_like(codes, parts[0].codes_array)
     count = int(missing.sum())
@@ -925,6 +925,11 @@ def _multi_groups(key: MultiKey, frame: Any, group_axes: Sequence[Hashable]) -> 
     note = (f"changed: group_by({key.label}) dropped {count:,} position{'' if count == 1 else 's'} "
             f"with a missing {' or '.join(lacking)}; dropna=False keeps them as groups")
     return Groups(key.name, axis, codes_array, [*labels, 0], dropped=count, note=note, keys=keys)
+
+
+def _label_array(labels: list) -> np.ndarray:
+    """Group labels as one array: text as objects, other labels as NumPy makes them (numbers, times)."""
+    return np.asarray(labels, dtype=object if any(isinstance(label, str) for label in labels) else None)
 
 
 def _missing_keys(raw: np.ndarray) -> np.ndarray | None:

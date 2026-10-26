@@ -77,10 +77,13 @@ class TidyArray:
         for note in notes:
             if note not in new_notes:
                 new_notes.append(note)
+        field_axis = changes.pop("field_axis", self._field_axis)
+        if field_axis is not None and not backend.has_axis(data, field_axis):
+            field_axis = None  # the verb removed the axis, so there is no field axis to name
         return TidyArray(
             data,
             backend=backend,
-            field_axis=changes.pop("field_axis", self._field_axis),
+            field_axis=field_axis,
             origins=origins,
             source=changes.pop("source", self._source),
             notes=new_notes,

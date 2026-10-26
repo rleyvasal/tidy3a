@@ -691,8 +691,7 @@ def summarise(*, groups: str | None = None, **named: Any) -> Verb:
                 if key_name in named:
                     raise SummariseError(f'"{key_name}" is a key of the groups, so summarise() gives it; '
                                          "name the summary something else")
-                results[key_name] = backend.array(np.asarray(values, dtype=object if _is_text_list(values) else None),
-                                                  dims=(found.name,))
+                results[key_name] = backend.array(values, dims=(found.name,))
         for name, expr in named.items():
             node = as_expr(expr)
             value = evaluate(node, ctx)
@@ -722,10 +721,6 @@ def summarise(*, groups: str | None = None, **named: Any) -> Verb:
 
 
 summarize = summarise
-
-
-def _is_text_list(values: list) -> bool:
-    return any(isinstance(value, str) for value in values)
 
 
 def _per_group(value: Any, ctx: Context) -> Any:
