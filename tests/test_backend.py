@@ -151,6 +151,7 @@ def test_every_protocol_method_is_used_by_the_shared_modules():
     """The protocol holds what the verbs, expressions, rules, and readers call, and nothing more."""
     source = Path(__file__).resolve().parents[1] / "src" / "tidy3a"
     shared = "".join((source / name).read_text() for name in
-                     ("verbs.py", "expr.py", "formula.py", "align.py", "frame.py", "io.py", "linalg.py", "backend.py"))
+                     ("verbs.py", "expr.py", "formula.py", "align.py", "frame.py", "io.py", "linalg.py", "backend.py",
+                      "plan.py", "tables.py"))
     unused = sorted(name for name in _public_methods(Backend) if f".{name}(" not in shared)
     assert unused == []

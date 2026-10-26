@@ -16,6 +16,7 @@ import numpy as np
 
 from tidy3a.backend import backend_for, get_backend, is_xarray_object, xarray_backend
 from tidy3a.errors import TidyError, translating
+from tidy3a.plan import Pipeline, Plan, recorded, start
 
 # Long label lists are shortened in the inspection output.
 _LABELS_SHOWN = 6
@@ -128,23 +129,18 @@ class TidyArray:
 
     def _apply_verb(self, verb: Any) -> Any:
         """Execute a verb and record it on the result (``tidy3a.plan``); experimental frames may override this."""
-        from tidy3a.plan import recorded
-
-        return recorded(self, verb, verb._apply(self))
+        result = verb._apply(self)
+        return recorded(self, verb, result) if isinstance(result, TidyArray) else result
 
     def explain(self) -> Any:
         """The source and each verb since, with what it changed: axes, variables, groups, and notes.
 
         Recorded as the verbs ran, so nothing is computed. It prints as text.
         """
-        from tidy3a.plan import Plan, start
-
         return Plan(start(self))
 
     def plan(self) -> Any:
         """The verbs that made this data, as a pipeline to run on other data: ``other >> nearby.plan()``."""
-        from tidy3a.plan import Pipeline
-
         return Pipeline(() if self._record is None else (step.verb for step in self._record.steps))
 
     @translating

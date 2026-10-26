@@ -22,7 +22,7 @@ from typing import Any
 class Snapshot:
     """What a frame holds, without its values: enough to describe a step's effect."""
 
-    variables: tuple[tuple[Hashable, tuple[Hashable, ...], tuple[int, ...], str], ...]
+    variables: tuple[tuple[Hashable, tuple[Hashable, ...], tuple[int, ...], Any], ...]  # name, axes, shape, type
     sizes: tuple[tuple[Hashable, int], ...]
     field_axis: Hashable | None
     groups: tuple[str, ...]
@@ -53,12 +53,11 @@ class Record:
 
 def snapshot(frame: Any) -> Snapshot:
     backend, data = frame._backend, frame._data
-    variables = tuple((name, tuple(value.dims), tuple(value.shape), str(value.dtype))
-                      for name, value in backend.variables(data).items())
-    from tidy3a.frame import _axes_in_order
-
+    variables = tuple(backend.layout(data))
     held = backend.sizes(data)
-    sizes = tuple((dim, held[dim]) for dim in _axes_in_order(data, backend))  # as the inspection output orders them
+    # Axes in the order the inspection output shows them: as variables first use them, then the rest.
+    order = dict.fromkeys(dim for _, dims, _, _ in variables for dim in dims)
+    sizes = tuple((dim, held[dim]) for dim in (*order, *(dim for dim in held if dim not in order)))
     resolved = frame._resolved
     counts = {}
     if resolved is not None and resolved[0] is data:
@@ -69,18 +68,14 @@ def snapshot(frame: Any) -> Snapshot:
 
 
 def start(frame: Any, preview: str | None = None) -> Record:
-    """The record a frame's first step begins: its own source and contents."""
-    if frame._record is not None:
-        return frame._record
-    return Record(frame._source or "data", snapshot(frame), preview=preview)
+    """The record a frame's first step begins: its own source and contents, kept on the frame once made."""
+    if frame._record is None:
+        frame._record = Record(frame._source or "data", snapshot(frame), preview=preview)
+    return frame._record
 
 
 def recorded(before: Any, verb: Any, result: Any) -> Any:
-    """*result* with *verb*'s step added to *before*'s record; values other than frames are returned as they are."""
-    from tidy3a.frame import TidyArray
-
-    if not isinstance(result, TidyArray):
-        return result
+    """*result*, a frame *verb* made from *before*, with the verb's step added to *before*'s record."""
     if result is before:  # frames are shared; the result gets its own copy to record on
         result = result._evolve(resolved=result._resolved)
     result._record = start(before).then(Step(verb, snapshot(result)))
@@ -122,7 +117,7 @@ class Plan:
 
 
 def _variable(entry: tuple) -> str:
-    name, dims, shape, dtype = entry
+    name, dims, shape, dtype = entry  # the type is a NumPy dtype, printed as its name
     return f"{name} ({', '.join(f'{dim}: {size}' for dim, size in zip(dims, shape))}) {dtype}"
 
 
@@ -195,8 +190,7 @@ class Pipeline:
         if head is not None:
             frame, preview = _head(frame, head)
         frame = frame._evolve(record=None)
-        frame._record = start(frame, preview)
-        record = frame._record
+        record = start(frame, preview)
         for verb in self.verbs:
             result = verb(frame)
             if not isinstance(result, TidyArray):

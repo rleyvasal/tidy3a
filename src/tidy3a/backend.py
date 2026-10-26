@@ -134,6 +134,9 @@ class Backend(Protocol):
     def variables(self, data: Any) -> Mapping[Hashable, Any]:
         """Every variable as an array, by name."""
 
+    def layout(self, data: Any) -> list[tuple[Hashable, tuple[Hashable, ...], tuple[int, ...], Any]]:
+        """Each variable's name, axes, shape, and NumPy type, read from storage without building arrays."""
+
     def sizes(self, obj: Any) -> Mapping[Hashable, int]:
         """Axis name to size, for a collection or an array."""
 

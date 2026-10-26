@@ -157,6 +157,9 @@ class NumpyBackend:
     def variables(self, data: Collection) -> dict[Hashable, Array]:
         return {name: data.array(name) for name in data.variables}
 
+    def layout(self, data: Collection) -> list[tuple[Hashable, tuple[Hashable, ...], tuple[int, ...], Any]]:
+        return [(name, value.dims, value.data.shape, value.data.dtype) for name, value in data.variables.items()]
+
     def sizes(self, obj: Any) -> Mapping[Hashable, int]:
         return obj.sizes
 

@@ -9,7 +9,9 @@
   (`mutate(...) >> filter(...)`), run with `data >> steps` and previewed
   on the first positions with `steps.explain(data, head=1000)`; a result's
   `plan()` gives its verbs back as a pipeline to run on other data.
-  Recording adds about 12 µs per verb. The inspection output is unchanged.
+  Recording reads names, sizes, and types only, a few microseconds per
+  verb; on 34,688-point pipelines `main` is within 3% of 0.3.0. The
+  inspection output is unchanged.
 - Tables: `as_table()` gives data with one observation axis as a Polars
   DataFrame, one row per position (`long=True` for one row per cell of a
   grid), and `tidy(table, axis=...)` reads a Polars DataFrame or LazyFrame,

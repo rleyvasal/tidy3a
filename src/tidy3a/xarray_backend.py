@@ -95,6 +95,10 @@ class XarrayBackend:
     def variables(self, data: xr.Dataset) -> Mapping[Hashable, xr.DataArray]:
         return data.data_vars
 
+    def layout(self, data: xr.Dataset) -> list[tuple[Hashable, tuple[Hashable, ...], tuple[int, ...], Any]]:
+        stored = data.variables  # xarray Variables: no DataArray is built per variable
+        return [(name, stored[name].dims, stored[name].shape, stored[name].dtype) for name in data.data_vars]
+
     def sizes(self, obj: Any) -> Mapping[Hashable, int]:
         """Axis sizes of a collection or an array, in axis order."""
         return obj.sizes
