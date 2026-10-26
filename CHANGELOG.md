@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.2 — 2026-10-26
 
 - The §7 pipeline (rotate, measure, filter) is as fast as in 0.2.0 again,
   and faster on the NumPy backend: 0.377 ms against 0.414 in 0.2.0 and
