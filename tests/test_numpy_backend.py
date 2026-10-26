@@ -8,6 +8,7 @@ import sys
 import numpy as np
 import pytest
 import xarray as xr
+from labelarray import Array, Collection
 
 import tidy3a
 import tidy3a.numpy_backend as adapter
@@ -30,7 +31,6 @@ from tidy3a import (
     tidy,
 )
 from tidy3a.backend import XARRAY, get_backend
-from tidy3a.labelarray import Array, Collection
 from tidy3a.numpy_backend import NUMPY, NumpyData
 
 x, y, z, intensity, ring, distance = fields("x", "y", "z", "intensity", "ring", "distance")
@@ -123,11 +123,25 @@ def test_joins_bring_raw_xarray_data_onto_this_datas_backend():
 
 
 def test_the_backend_is_an_adapter_over_the_library():
-    """Plan milestone 10, step A5: the array code lives in ``tidy3a.labelarray``."""
+    """Plan milestone 10, steps A5 and A7: the array code lives in the ``labelarray`` package."""
     assert adapter.NumpyArray is Array and adapter.NumpyData is Collection
     tree = ast.parse(inspect.getsource(adapter))
     functions = [node.name for node in tree.body if isinstance(node, ast.FunctionDef)]
     classes = [node.name for node in tree.body if isinstance(node, ast.ClassDef)]
     assert not functions and classes == ["NumpyBackend"]
     imported = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module}
-    assert {"tidy3a.labelarray.array", "tidy3a.labelarray.collection", "tidy3a.labelarray"} <= imported
+    assert {"labelarray.array", "labelarray.collection", "labelarray"} <= imported
+
+
+def test_tidy3a_labelarray_names_the_labelarray_package_and_its_modules():
+    """tidy3a 0.3.0 shipped the library as ``tidy3a.labelarray``; the name stays."""
+    import labelarray
+    import labelarray.sums
+    import tidy3a.labelarray.sums
+    from tidy3a.labelarray.index import index_for
+
+    import tidy3a.labelarray
+    from tidy3a.labelarray import grouped, sums
+
+    assert tidy3a.labelarray is labelarray and tidy3a.labelarray.sums is labelarray.sums
+    assert sums is labelarray.sums and grouped is labelarray.grouped and index_for is labelarray.index_for

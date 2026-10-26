@@ -1,9 +1,9 @@
 """Exceptions raised by tidy3a.
 
 Every tidy3a error is a ``ValueError``, so code that already catches bad
-input keeps working; the subclasses say which step rejected it. The NumPy
-modules that are becoming a library (``tidy3a.labelarray``) raise their
-own family, ``LabelArrayError``; tidy3a's ``LabelError``, ``AlignError``, and
+input keeps working; the subclasses say which step rejected it. The array
+library tidy3a builds on, ``labelarray``, raises its own family,
+``LabelArrayError``; tidy3a's ``LabelError``, ``AlignError``, and
 ``GroupError`` inherit from both, and ``translating`` raises a library
 error that escapes through a verb, a reader, ``tidy()``, or ``collect()``
 again as tidy3a's class.
@@ -15,7 +15,7 @@ from collections.abc import Callable
 from functools import wraps
 from typing import Any
 
-from tidy3a.labelarray import errors as labelarray
+from labelarray import errors as labelarray
 
 
 class TidyError(ValueError):

@@ -4,8 +4,9 @@ Tidy-style verbs for labelled multidimensional arrays: point clouds,
 gridded climate data, images, sensor measurements, and complex-valued
 arrays. Pipelines of `select`, `filter`, `mutate`, `group_by`, and
 `summarise` work on named axes and labels, in the spirit of
-[tidy3](https://github.com/rleyvasal/tidy3) and dplyr. NumPy is the only
-requirement; xarray is optional.
+[tidy3](https://github.com/rleyvasal/tidy3) and dplyr. It needs only NumPy
+(and [labelarray](https://github.com/rleyvasal/labelarray), its array layer,
+which needs only NumPy too); xarray is optional.
 
 **Status:** version `0.3.0`, on [PyPI](https://pypi.org/project/tidy3a/).
 What changed in each release is in [CHANGELOG.md](CHANGELOG.md); the design
@@ -17,7 +18,7 @@ is in [docs/plan.md](docs/plan.md), and the rules fit on one page in
 Requires Python 3.11 or newer.
 
 ```bash
-pip install tidy3a                  # NumPy only
+pip install tidy3a                  # NumPy and labelarray only
 pip install "tidy3a[xarray]"        # with xarray and pandas: xarray inputs and outputs, lazy and file-backed data
 pip install "tidy3a[xarray,fast]"   # also Numba, for compiled grouped sums and means
 ```
@@ -208,10 +209,8 @@ stars' Landsat scene) run against plain xarray; see
 [examples/sample_data.py](examples/sample_data.py) for the files, optional
 reader dependencies, and checks.
 
-From a checkout, install the development dependencies and run the tests:
-tidy3a's suite in `tests/` runs every test on both backends, and the
-library's in `labelarray_tests/` imports nothing of tidy3a but
-`tidy3a.labelarray`. `python -m pytest -q` runs both.
+From a checkout, install the development dependencies and run the tests
+(the suite runs every test on both backends):
 
 ```bash
 python -m pip install -e ".[dev]"
@@ -228,9 +227,10 @@ scripts/check.sh
 `scripts/bench.sh` times both backends on the reference workloads in a
 pinned environment (`--fast` adds the compiled kernels). The
 [release procedure](docs/releasing.md) describes the GitHub Release
-workflow. The NumPy layer is becoming a library of its own, `labelarray`,
-for now the subpackage `tidy3a.labelarray`, with
-[its own README](src/tidy3a/labelarray/README.md).
+workflow. tidy3a's arrays, exact labels, grouped reductions, and float32
+sums come from [labelarray](https://github.com/rleyvasal/labelarray), a
+library of their own that needs only NumPy and has its own tests; the name
+`tidy3a.labelarray` still imports it.
 
 ## License
 

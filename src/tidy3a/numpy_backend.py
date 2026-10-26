@@ -1,7 +1,7 @@
 """The NumPy backend (plan milestone 9, step 3; the default since milestone 10, decision 16).
 
 An adapter: it implements tidy3a's backend protocol (``backend.Backend``)
-with the labelled arrays of ``tidy3a.labelarray``. Collections are
+with the labelled arrays of the ``labelarray`` package. Collections are
 ``labelarray.Collection`` objects and arrays ``labelarray.Array`` objects,
 with one label array per labelled axis shared by every variable on it,
 compared under one exact rule. The rules and messages stay in the shared
@@ -21,12 +21,9 @@ from collections.abc import Callable, Hashable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
-
-from tidy3a.backend import is_xarray, kept_positions, memory_mapped
-from tidy3a.errors import TidyError
-from tidy3a.labelarray import grouped
-from tidy3a.labelarray import labels as exact
-from tidy3a.labelarray.array import (
+from labelarray import grouped
+from labelarray import labels as exact
+from labelarray.array import (
     Array,
     broadcast,
     concat,
@@ -35,8 +32,11 @@ from tidy3a.labelarray.array import (
     plain,
     positions_of,
 )
-from tidy3a.labelarray.collection import Collection
-from tidy3a.labelarray.errors import LabelError
+from labelarray.collection import Collection
+from labelarray.errors import LabelError
+
+from tidy3a.backend import is_xarray, kept_positions, memory_mapped
+from tidy3a.errors import TidyError
 
 # The names tidy3a used before the library had them; arrays in where() predicates are these.
 NumpyArray = Array

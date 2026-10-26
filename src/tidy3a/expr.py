@@ -20,14 +20,9 @@ from fractions import Fraction
 from typing import Any
 
 import numpy as np
-
-from tidy3a.align import align_many, align_pair
-from tidy3a.backend import is_xarray, xarray_backend
-from tidy3a.errors import GroupError, RefError, TidyError
-from tidy3a.frame import TidyArray, tidy
-from tidy3a.labelarray import errors as labelarray_errors
-from tidy3a.labelarray.grouped import Grouping
-from tidy3a.labelarray.transforms import (
+from labelarray import errors as labelarray_errors
+from labelarray.grouped import Grouping
+from labelarray.transforms import (
     ZONES,
     Bins,
     Duration,
@@ -36,6 +31,11 @@ from tidy3a.labelarray.transforms import (
     Transform,
     parse_duration,
 )
+
+from tidy3a.align import align_many, align_pair
+from tidy3a.backend import is_xarray, xarray_backend
+from tidy3a.errors import GroupError, RefError, TidyError
+from tidy3a.frame import TidyArray, tidy
 
 # ── Nodes ───────────────────────────────────────────────────────────────────
 
@@ -389,7 +389,7 @@ class ValueKey:
     """``group_by(ring)`` or ``group_by(bins(distance, edges))``: group positions by value.
 
     ``transform`` is applied to the values before they are grouped by exact
-    equality: a record from ``tidy3a.labelarray.transforms`` (``bins()``,
+    equality: a record from ``labelarray.transforms`` (``bins()``,
     ``rounded()``, and ``cells()`` make them), or None. ``label`` is how the
     key prints in ``group_by(...)`` and the ``groups:`` line, and ``call``
     is the helper's call with its settings, for messages.

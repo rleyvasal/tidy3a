@@ -1,8 +1,7 @@
 """The library's errors and tidy3a's (milestone 10, step A3).
 
 The library raises its own errors, a family of ``ValueError`` under
-``labelarray.errors.LabelArrayError`` (tested with the library, in
-``labelarray_tests``). tidy3a's ``LabelError`` and ``AlignError`` inherit from
+``labelarray.errors.LabelArrayError`` (tested in labelarray's own tests). tidy3a's ``LabelError`` and ``AlignError`` inherit from
 both ``TidyError`` and the library's classes, and a library error that
 escapes through a verb, a reader, ``tidy()``, or ``collect()`` is raised
 again as tidy3a's class, so ``except TidyError`` and ``except
@@ -14,10 +13,10 @@ import inspect
 import numpy as np
 import pytest
 import xarray as xr
+from labelarray import errors as labelarray
 
 from tidy3a import AlignError, TidyError, col, mutate, read_array, tidy
 from tidy3a import errors as tidy_errors
-from tidy3a.labelarray import errors as labelarray
 
 
 def test_tidy3as_label_and_align_errors_inherit_from_both():

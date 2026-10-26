@@ -8,7 +8,7 @@ not NumPy. Ungrouped reductions of fewer than 8 values per result (such as
 ``sum(p**2, over="i")`` over x, y, and z) add in float64 in a fixed order and
 round once. A zero result is +0.0, as NumPy gives it. These check the verbs
 on both backends; the kernel itself, compiled and not, is tested with the
-library (``labelarray_tests/test_sums.py``).
+library, in labelarray's own tests.
 """
 
 import builtins

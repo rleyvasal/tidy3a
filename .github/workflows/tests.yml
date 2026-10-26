@@ -74,7 +74,7 @@ jobs:
         run: |
           python -m venv /tmp/fast
           /tmp/fast/bin/pip install "$(ls dist/*.whl)[fast]"
-          cd /tmp && /tmp/fast/bin/python -c "import numpy as np, tidy3a; from tidy3a.labelarray import sums; v = np.ones(200_000, np.float32); assert sums._compiled('grouped_estimate') is not None, 'compiled kernel not loaded'; print(sums.reduce(v, 'mean', (0,), codes=np.zeros(200_000, np.intp), groups=1))"
+          cd /tmp && /tmp/fast/bin/python -c "import numpy as np, tidy3a; from labelarray import sums; v = np.ones(200_000, np.float32); assert sums._compiled('grouped_estimate') is not None, 'compiled kernel not loaded'; print(sums.reduce(v, 'mean', (0,), codes=np.zeros(200_000, np.intp), groups=1))"
       - name: Save validated distributions
         uses: actions/upload-artifact@v7
         with:

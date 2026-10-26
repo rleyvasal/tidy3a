@@ -3,5 +3,3 @@ include scripts/check.sh
 recursive-include docs *.md
 recursive-include examples *.py
 recursive-include prototypes *.py
-recursive-include labelarray_tests *.py
-include src/tidy3a/labelarray/README.md

@@ -16,12 +16,12 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import xarray as xr
+from labelarray import grouped, sums
+from labelarray import labels as exact
+from labelarray.contract import contract
 
 from tidy3a.backend import kept_positions
 from tidy3a.errors import TidyError
-from tidy3a.labelarray import grouped, sums
-from tidy3a.labelarray import labels as exact
-from tidy3a.labelarray.contract import contract
 
 _EXACT = {"arithmetic_join": "exact"}
 
@@ -243,7 +243,7 @@ class XarrayBackend:
         return value.isin(choices)
 
     def dot(self, left: xr.DataArray, right: xr.DataArray, over: Sequence[Hashable]) -> xr.DataArray:
-        """In memory, the shared contraction (``tidy3a.labelarray.contract``), as the NumPy backend does.
+        """In memory, the shared contraction (``labelarray.contract``), as the NumPy backend does.
 
         Lazy arrays use ``xr.dot`` with NumPy's einsum: with ``opt_einsum``
         installed, xarray would use it, which changes results in the last
@@ -303,7 +303,7 @@ class XarrayBackend:
 
     def _float32(self, array: xr.DataArray, op: str, axes: Sequence[Hashable], na_rm: bool,
                  min_count: int | None) -> xr.DataArray:
-        """A float32 sum or mean from the shared kernel (``tidy3a.labelarray.sums``).
+        """A float32 sum or mean from the shared kernel (``labelarray.sums``).
 
         The reduction of a one-position slice gives the result's axes,
         coordinates, name, and attributes, as xarray would give them.

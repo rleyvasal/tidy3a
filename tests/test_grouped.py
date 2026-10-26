@@ -11,6 +11,7 @@ reference these tests compare with.
 import numpy as np
 import pytest
 import xarray as xr
+from labelarray import grouped
 
 from tidy3a import (
     all,
@@ -30,7 +31,6 @@ from tidy3a import (
     summarise,
     tidy,
 )
-from tidy3a.labelarray import grouped
 
 REDUCERS = {"sum": sum, "mean": mean, "min": min, "max": max, "any": any, "all": all, "std": std, "median": median}
 

@@ -2,13 +2,13 @@
 
 Grouping is on exact equality only; domain meaning lives in a transform
 applied to the key before it is factorized. The built-in transforms in
-``tidy3a.labelarray.transforms`` are small records holding their settings
+``labelarray.transforms`` are small records holding their settings
 (``Bins``, ``Duration``, ``Round``, ``GridCells``): they give group codes and
 readable labels in sorted order, compare equal when their settings do, and
 print those settings. Plain functions are transforms too, equal only to
 themselves. In tidy3a, ``bins()`` is built on ``Bins`` and ``Duration``, and
 ``rounded()`` and ``cells()`` expose the other two to ``group_by``; the
-transforms themselves are tested with the library (``labelarray_tests``).
+transforms themselves are tested in labelarray's own tests.
 """
 
 import math
@@ -17,6 +17,13 @@ import numpy as np
 import pandas as pd
 import pytest
 import xarray as xr
+from labelarray import errors as library_errors
+from labelarray.transforms import (
+    Bins,
+    Duration,
+    GridCells,
+    Round,
+)
 
 from tidy3a import (
     GroupError,
@@ -33,13 +40,6 @@ from tidy3a import (
     tidy,
 )
 from tidy3a import errors as tidy_errors
-from tidy3a.labelarray import errors as library_errors
-from tidy3a.labelarray.transforms import (
-    Bins,
-    Duration,
-    GridCells,
-    Round,
-)
 
 NAN = float("nan")
 

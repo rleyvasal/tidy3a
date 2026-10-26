@@ -2,19 +2,21 @@
 
 ## Unreleased
 
-- The NumPy backend's arrays and collections moved into the library,
-  `tidy3a.labelarray`, as `Array` and `Collection`, with the grouped
-  reductions (`labelarray.grouped`), and the backend became a thin adapter
-  over them. Results are unchanged. `where(...)` predicates on the NumPy
-  backend now receive a `labelarray.Array`; `tidy3a.numpy_backend.NumpyArray`
-  and `NumpyData` remain as names for the two classes, so code that imports
-  or checks them keeps working, but `type(array).__name__` is now `"Array"`.
-- The library has its own public API and README
-  (`src/tidy3a/labelarray/README.md`), whose examples are tested.
-- The library has its own test suite, `labelarray_tests/`, importing
-  nothing of tidy3a but the library; `tests/` remains tidy3a's, run on
-  both backends. `python -m pytest` runs both, and the source distribution
-  includes both.
+- tidy3a now depends on [labelarray](https://pypi.org/project/labelarray/)
+  0.1.0 or later, its array layer released as a package of its own, and no
+  longer carries a copy: `pip install tidy3a` installs NumPy and
+  labelarray. The `fast` extra installs `labelarray[fast]`. Results are
+  unchanged. `tidy3a.labelarray` remains as another name for the package
+  and its modules (`tidy3a.labelarray.sums` is `labelarray.sums`), so code
+  written against 0.3.0 keeps working.
+- The NumPy backend is a thin adapter over `labelarray.Array` and
+  `labelarray.Collection`. `where(...)` predicates on the NumPy backend now
+  receive a `labelarray.Array`; `tidy3a.numpy_backend.NumpyArray` and
+  `NumpyData` remain as names for the two classes, so code that imports or
+  checks them keeps working, but `type(array).__name__` is now `"Array"`.
+- The library's own tests, README, and changelog are in its repository,
+  [rleyvasal/labelarray](https://github.com/rleyvasal/labelarray); `tests/`
+  remains tidy3a's suite, run on both backends.
 
 ## 0.3.0 — 2026-10-25
 

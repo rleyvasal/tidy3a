@@ -12,10 +12,10 @@ from collections.abc import Hashable, Sequence
 from typing import Any
 
 import numpy as np
+from labelarray import labels
 
 from tidy3a.backend import xarray_backend
 from tidy3a.errors import AlignError
-from tidy3a.labelarray import labels
 
 
 def align_pair(

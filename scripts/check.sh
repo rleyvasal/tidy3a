@@ -60,7 +60,7 @@ if [[ $# -eq 0 ]]; then
       uv venv -q --python 3.12 "$work/fast" &&
       uv pip install -q --python "$work/fast/bin/python" "$(ls "$work"/dist/*.whl)[fast]" &&
       (cd "$work" && "$work/fast/bin/python" -c \
-        "import numpy as np, tidy3a; from tidy3a.labelarray import sums; v = np.ones(200_000, np.float32); assert sums._compiled('grouped_estimate') is not None, 'compiled kernel not loaded'; print(sums.reduce(v, 'mean', (0,), codes=np.zeros(200_000, np.intp), groups=1))")
+        "import numpy as np, tidy3a; from labelarray import sums; v = np.ones(200_000, np.float32); assert sums._compiled('grouped_estimate') is not None, 'compiled kernel not loaded'; print(sums.reduce(v, 'mean', (0,), codes=np.zeros(200_000, np.intp), groups=1))")
   }
   run "source distribution, metadata, and installed wheel (plain, with the xarray extra, and with the fast extra)" distribution_job
 fi

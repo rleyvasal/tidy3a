@@ -1,7 +1,7 @@
 """Alignment on the NumPy backend through ``tidy3a.align``, with tidy3a's notes and messages.
 
-The label lookups themselves are tested with the library, against pandas
-(``labelarray_tests/test_label_lookups.py``); here, alignment of NumPy
+The label lookups themselves are tested in labelarray's own tests, against
+pandas; here, alignment of NumPy
 backend arrays reports what it reordered in tidy3a's words, NaN labels
 included, and names both operands when labels differ.
 """
