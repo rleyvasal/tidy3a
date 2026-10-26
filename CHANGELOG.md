@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Float32 sums and means on lazy, chunked (Dask) data are correctly
+  rounded, the same bits as in memory whatever the chunking (decision 10,
+  stage (b), the measured gap). Each chunk's estimate is one Dask task
+  (`labelarray.sums.chunk_estimate`), the pieces add across chunks in any
+  order, and one last task settles the results; the few the error bound
+  cannot settle, if any, get a second pass over the chunks for their exact
+  sums. The result stays lazy, in one chunk, and each source chunk is read
+  once, shared with everything else collected. Needs labelarray 0.1.2.
 - A verb that removes the field axis (a summary over every observation
   axis, for instance) ends it: the result names no field axis,
   `explain()` says `field axis: feature → none`, and `tidy(...,

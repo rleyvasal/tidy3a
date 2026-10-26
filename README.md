@@ -251,7 +251,10 @@ lists the few differences.
 Float32 sums and means add in float64 and round once. Every grouped one, and
 every ungrouped one over 8 or more values, is correctly rounded: the float32
 nearest the exact result, the same for any memory layout, on either backend,
-with or without `fast`. Float64 data follows NumPy. Integer arithmetic
+with or without `fast`, and on lazy, chunked (Dask) data whatever the
+chunking: each chunk is summed in its own task, the chunk sums combine in
+any order, and the few results an error bound cannot settle get a second
+pass for their exact sums. Float64 data follows NumPy. Integer arithmetic
 follows NumPy too, including unsigned subtraction wrapping around: convert
 first (`nir * 1.0 - red`) when a result can be negative.
 

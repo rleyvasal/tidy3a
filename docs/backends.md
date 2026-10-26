@@ -43,7 +43,7 @@ Behaviour that is the same on both, once easy to get wrong:
   `AlignError`; so is a join on repeated labels, unless both sides have the
   very same labels. Gaps promote types as xarray does: integers of up to 16
   bits to `float32`, wider integers and booleans to `float64`.
-- Results are bit-identical on both backends for in-memory data. Float32 sums
+- Results are bit-identical on both backends. Float32 sums
   and means go through one shared kernel (`labelarray.sums`): every
   grouped one, and every ungrouped one adding 8 or more values per result, is
   correctly rounded (the float32 nearest the exact result), so it is the same
@@ -51,9 +51,14 @@ Behaviour that is the same on both, once easy to get wrong:
   of threads; ungrouped reductions of fewer than 8 values per result add in
   float64 in a fixed order and round once. `dot` goes through one shared
   contraction (`labelarray.contract`, NumPy's `matmul`) whose result
-  does not depend on layout. Other reductions keep NumPy's per-group results,
-  indexed as a mask would index each group; lazy (Dask) values keep xarray's
-  and Dask's own arithmetic, which can round differently.
+  does not depend on layout. On lazy, chunked (Dask) float32 values the
+  sums and means get the kernel's bits for any chunking: one task estimates
+  each chunk, the pieces combine in any order, one last task settles the
+  results, and the few the error bound cannot settle get a second pass for
+  their exact sums; the result stays lazy, in one chunk. Other reductions
+  keep NumPy's per-group results, indexed as a mask would index each group,
+  and on lazy values xarray's and Dask's own arithmetic, which can round
+  differently.
 - Python's operators run without NumPy's floating-point warnings (division by
   zero); NumPy functions such as `sqrt` and `log` warn, as they do on xarray
   arrays.

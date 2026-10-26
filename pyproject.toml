@@ -24,7 +24,7 @@ classifiers = [
 # pipelines run on the NumPy backend without xarray.
 dependencies = [
   "numpy>=2.0",
-  "labelarray>=0.1.1",
+  "labelarray>=0.1.2",
 ]
 
 [project.optional-dependencies]
@@ -33,7 +33,7 @@ dependencies = [
 # older wheels fail to import alongside numpy>=2.0.
 xarray = ["xarray>=2024.6", "pandas>=2.2.2"]
 # Compiled grouped float32 sums and means (labelarray.sums); the same results as without it, faster.
-fast = ["labelarray[fast]>=0.1.1"]
+fast = ["labelarray[fast]>=0.1.2"]
 # as_table() and tidy(table, axis=): Polars DataFrames, and through them tidy3 frames.
 polars = ["polars>=1.0"]
 # opt_einsum: xarray uses it for dot when installed; the tests check tidy3a's results do not change.

@@ -9,6 +9,7 @@ does not need xarray or pandas.
 from __future__ import annotations
 
 import builtins
+import math
 import warnings
 from collections.abc import Callable, Hashable, Mapping, Sequence
 from typing import Any
@@ -28,6 +29,11 @@ _EXACT = {"arithmetic_join": "exact"}
 
 
 _KEEPS_ATTRS: dict[Any, bool] = {}
+
+
+def _dask_backed(array: xr.DataArray) -> bool:
+    """Whether *array* holds a Dask array (chunked data from another library takes xarray's arithmetic)."""
+    return array.chunks is not None and type(array.data).__module__.split(".")[0] == "dask"
 
 
 def _reductions_keep_attrs() -> bool:
@@ -313,8 +319,12 @@ class XarrayBackend:
                 return result.where(array.notnull().all(dim=axes))
             if op == "count":
                 return array.notnull().sum(dim=axes)
-            if op in ("sum", "mean") and array.dtype == np.float32 and array.chunks is None:
-                return self._float32(array, op, axes, na_rm, min_count)
+            if op in ("sum", "mean") and array.dtype == np.float32:
+                if array.chunks is None:
+                    return self._float32(array, op, axes, na_rm, min_count)
+                if _dask_backed(array):
+                    values = self._float32_chunked(array, op, axes, na_rm, min_count)
+                    return self._reduced_like(array, axes, values, op)
             options = {"skipna": na_rm} if array.dtype.kind in "fcmM" else {}
             result = getattr(array, op)(dim=axes, **options)
             if op == "sum" and min_count is not None:
@@ -334,6 +344,10 @@ class XarrayBackend:
         """
         numbers = tuple(array.get_axis_num(a) for a in axes)
         values = sums.reduce(array.values, op, numbers, na_rm=na_rm, min_count=min_count)
+        return self._reduced_like(array, axes, values, op)
+
+    def _reduced_like(self, array: xr.DataArray, axes: Sequence[Hashable], values: Any, op: str) -> xr.DataArray:
+        """*values* as the result of reducing *array* over *axes* with *op*: its kept axes, coordinates, name, attributes."""
         if any(type(index) is not PandasIndex for index in array.xindexes.values()):
             template = getattr(array.isel({a: slice(0, 1) for a in axes}), op)(dim=list(axes))
             return template.copy(data=values)
@@ -342,13 +356,82 @@ class XarrayBackend:
         attrs = dict(array.attrs) if _reductions_keep_attrs() else {}
         return xr.DataArray(values, dims=kept, coords=coords, name=array.name, attrs=attrs)
 
+    def _float32_chunked(self, array: xr.DataArray, op: str, axes: Sequence[Hashable], na_rm: bool,
+                         min_count: int | None, groups: Any = None) -> Any:
+        """A float32 sum or mean of Dask-backed data: the bits of the in-memory kernel, for any chunking, still lazy.
+
+        One task per chunk estimates its sums (``labelarray.sums.chunk_estimate``);
+        the pieces add across chunks in Dask's order, which the error bound
+        allows; one last task settles the results (``sums.from_chunks``). The
+        few groups the bound cannot settle, if any, get a second pass over the
+        chunks for their exact sums (``sums.chunk_exact``), computed from inside
+        that task. The result is a one-chunk Dask array, ``(groups, *kept)``
+        with *groups*, else the kept axes.
+        """
+        import dask.array as da
+
+        data = array.data
+        numbers = tuple(array.get_axis_num(a) for a in axes)
+        letters = tuple(f"x{a}" for a in range(data.ndim))  # Dask's index labels, one per axis
+        kept_shape = tuple(data.shape[a] for a in range(data.ndim) if a not in numbers)
+        count = len(groups) if groups is not None else 1
+        sources: tuple = (data, letters)
+        if groups is not None:
+            codes = da.from_array(np.asarray(groups.codes), chunks=(data.chunks[numbers[0]],))
+            sources += (codes, (letters[numbers[0]],))
+
+        def block_shape(block):  # the kept axes' block sizes, with each reduced axis back as size 1
+            return tuple(1 if a in numbers else block.shape[a] for a in range(block.ndim))
+
+        def estimate(block, codes=None):
+            pieces = sums.chunk_estimate(block, numbers, na_rm=na_rm, codes=codes, groups=count)
+            return pieces.reshape((sums.PIECES, count, *block_shape(block)))
+
+        pieces = da.blockwise(estimate, ("p", "g", *letters), *sources, new_axes={"p": sums.PIECES, "g": count},
+                              adjust_chunks={letters[a]: 1 for a in numbers}, dtype=np.float64,
+                              meta=np.empty((0,) * (data.ndim + 2), dtype=np.float64))
+        blocks = math.prod(data.numblocks[a] for a in numbers)
+
+        def combine(x, axis=None, keepdims=False, **_):  # one consumer of the pieces, so each chunk is read once
+            return np.concatenate([x[:sums.TERMS].sum(axis=axis, keepdims=keepdims),
+                                   x[sums.TERMS:].max(axis=axis, keepdims=keepdims)])
+
+        combined = da.reduction(pieces, chunk=lambda x, **_: x, combine=combine, aggregate=combine,
+                                axis=tuple(2 + a for a in numbers), dtype=np.float64, concatenate=True)
+
+        def exact(chosen):
+            def buckets(block, codes=None):
+                out = sums.chunk_exact(block, numbers, chosen, codes=codes, groups=count)
+                return out.reshape((len(chosen), *block_shape(block), sums.BUCKETS))
+
+            stacked = da.blockwise(buckets, ("c", *letters, "b"), *sources,
+                                   new_axes={"c": len(chosen), "b": sums.BUCKETS},
+                                   adjust_chunks={letters[a]: 1 for a in numbers}, dtype=np.int64,
+                                   meta=np.empty((0,) * (data.ndim + 2), dtype=np.int64))
+            return stacked.sum(axis=tuple(1 + a for a in numbers), dtype=np.int64).compute()
+
+        def finish(pieces):
+            values = sums.from_chunks(pieces, blocks, op, exact, na_rm=na_rm, min_count=min_count)
+            return values if groups is not None else values.reshape(kept_shape)
+
+        # One block holding every group, so the last task settles them all; the result shares the source's
+        # tasks with everything else collected, unlike a dask.delayed call, which would wrap them.
+        whole = combined.rechunk({axis: -1 for axis in range(combined.ndim)})
+        shape = (count, *kept_shape) if groups is not None else kept_shape
+        return da.map_blocks(finish, whole, drop_axis=[0] if groups is not None else [0, 1],
+                             chunks=tuple((n,) for n in shape), dtype=np.float32,
+                             meta=np.empty((0,) * len(shape), dtype=np.float32))
+
     def group_reduce(self, array: xr.DataArray, op: str, groups: Any, others: Sequence[Hashable],
                      na_rm: bool, min_count: int | None) -> xr.DataArray:
         """*op* per group of *groups* (``tidy3a.expr.Groups``), over its axis and *others*."""
-        if op in ("sum", "mean") and array.dtype == np.float32 and array.chunks is None:
-            axes = (array.get_axis_num(groups.axis), *(array.get_axis_num(o) for o in others))
-            values = sums.reduce(array.values, op, axes, na_rm=na_rm, min_count=min_count, codes=groups.codes,
-                                 groups=len(groups), sizes=groups.counts())
+        if op in ("sum", "mean") and array.dtype == np.float32 and (array.chunks is None or _dask_backed(array)):
+            if array.chunks is None:
+                axes = (array.get_axis_num(groups.axis), *(array.get_axis_num(o) for o in others))
+                values = sums.reduce(array.values, op, axes, na_rm=na_rm, min_count=min_count, codes=groups.codes,
+                                     groups=len(groups), sizes=groups.counts())
+            else:
+                values = self._float32_chunked(array, op, [groups.axis, *others], na_rm, min_count, groups)
             template = self.reduce(array.isel({groups.axis: slice(0, 1)}), op, [groups.axis, *others], na_rm,
                                    min_count)
             coords = dict(template.coords.items())
