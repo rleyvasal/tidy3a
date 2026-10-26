@@ -70,6 +70,11 @@ jobs:
           python -m venv /tmp/full
           /tmp/full/bin/pip install "$(ls dist/*.whl)[xarray]"
           cd /tmp && /tmp/full/bin/python -c "import tidy3a, xarray as xr; print(tidy3a.tidy(xr.Dataset({'a': ('t', [1.0])})).collect())"
+      - name: Install it with the fast extra and use the compiled kernels
+        run: |
+          python -m venv /tmp/fast
+          /tmp/fast/bin/pip install "$(ls dist/*.whl)[fast]"
+          cd /tmp && /tmp/fast/bin/python -c "import numpy as np, tidy3a; from tidy3a.labelarray import sums; v = np.ones(200_000, np.float32); assert sums._compiled('grouped_estimate') is not None, 'compiled kernel not loaded'; print(sums.reduce(v, 'mean', (0,), codes=np.zeros(200_000, np.intp), groups=1))"
       - name: Save validated distributions
         uses: actions/upload-artifact@v7
         with:

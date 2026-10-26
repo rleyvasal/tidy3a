@@ -56,9 +56,13 @@ if [[ $# -eq 0 ]]; then
       uv venv -q --python 3.12 "$work/full" &&
       uv pip install -q --python "$work/full/bin/python" "$(ls "$work"/dist/*.whl)[xarray]" &&
       (cd "$work" && "$work/full/bin/python" -c \
-        "import tidy3a, xarray as xr; print(tidy3a.tidy(xr.Dataset({'a': ('t', [1.0])})).collect())")
+        "import tidy3a, xarray as xr; print(tidy3a.tidy(xr.Dataset({'a': ('t', [1.0])})).collect())") &&
+      uv venv -q --python 3.12 "$work/fast" &&
+      uv pip install -q --python "$work/fast/bin/python" "$(ls "$work"/dist/*.whl)[fast]" &&
+      (cd "$work" && "$work/fast/bin/python" -c \
+        "import numpy as np, tidy3a; from tidy3a.labelarray import sums; v = np.ones(200_000, np.float32); assert sums._compiled('grouped_estimate') is not None, 'compiled kernel not loaded'; print(sums.reduce(v, 'mean', (0,), codes=np.zeros(200_000, np.intp), groups=1))")
   }
-  run "source distribution, metadata, and installed wheel (plain and with the xarray extra)" distribution_job
+  run "source distribution, metadata, and installed wheel (plain, with the xarray extra, and with the fast extra)" distribution_job
 fi
 
 printf '\n'

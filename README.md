@@ -4,7 +4,7 @@ Tidy-style verbs for named multidimensional arrays: point clouds, images,
 sensor measurements, scientific and complex-valued arrays. Built on xarray
 and NumPy, in the spirit of [tidy3](https://github.com/rleyvasal/tidy3).
 
-**Status:** version `0.2.0`; `0.1.0` is on [PyPI](https://pypi.org/project/tidy3a/).
+**Status:** version `0.3.0`; `0.2.0` is on [PyPI](https://pypi.org/project/tidy3a/).
 The design decisions are in [docs/plan.md](docs/plan.md); the rules fit on one page in
 [docs/decisions.md](docs/decisions.md).
 

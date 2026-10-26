@@ -1,11 +1,23 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — 2026-10-25
 
-Float32 sums and means change in their last bits: they now add in float64
-and round once, and most are correctly rounded. Labels, shapes, output
-types, and missing-value rules are unchanged. Filters on a value close to a
-threshold can keep or drop a point differently from 0.2.0.
+The NumPy backend becomes the default, float32 sums and means become
+correctly rounded, and grouping gains missing keys, rounding, and grid
+cells. Changes that can alter results or code written for 0.2.0:
+
+- Float32 sums and means change in their last bits (they add in float64
+  and round once), so a filter on a value close to a threshold can keep or
+  drop a point differently. `dot` can differ in the last bits for general
+  matrices. Float64 data is unchanged.
+- In-memory data uses the NumPy backend unless a backend is chosen; results
+  are the same, but `where(...)` predicates receive a `NumpyArray` instead
+  of an xarray `DataArray`. `set_backend("xarray")` keeps 0.2.0's behaviour.
+- Missing group keys are dropped by default (`dropna=True`); NaT keys formed
+  a group in 0.2.0.
+- `NumpyArray` is no longer hashable, since `==` compares values.
+
+### Numbers
 
 - Every grouped float32 `sum` and `mean`, and every ungrouped one adding 8 or
   more values per result, is correctly rounded: the float32 nearest the exact
@@ -14,56 +26,63 @@ threshold can keep or drop a point differently from 0.2.0.
   of float32 steps on data that cancels, or give `inf` for a mean whose sum
   overflows float32. Ungrouped reductions of fewer than 8 values per result,
   such as `sum(p**2, over="i")` over x, y, z, add in float64 in a fixed order.
-  Float64 data is unchanged.
-- The NumPy backend is the default: without `set_backend()` or `backend=`,
-  in-memory data uses it, and data it cannot hold or would lose something of
-  stays on xarray: lazy, chunked, and memory-mapped values, other
-  coordinates, multi-level labels, time zones, and data with xarray storage
-  encodings, so a netCDF file read and written back keeps them. Results are
-  the same on both backends; what differs is that selection predicates
-  (`where(...)`) receive a `NumpyArray` (with `dims`, `sizes`, `shape`,
-  `ndim`, `dtype`, `values`, `attrs`) instead of an xarray `DataArray`.
-  `set_backend("xarray")` keeps the behaviour of 0.2.0.
+- `dot` multiplies with NumPy's `matmul`, arranging the operands the same way
+  for every layout: a 3 x 3 rotation of 10M points takes 6.5 ms instead of
+  13.3 (68.7 on row-major input). An overflow in `dot` shows as infinity
+  without a warning, since BLAS libraries do not report it reliably.
+
+### Backends
+
+- The NumPy backend is the default where it holds the data without loss.
+  Data it cannot hold or would lose something of stays on xarray: lazy,
+  chunked, and memory-mapped values, other coordinates, multi-level labels,
+  time zones, and data with xarray storage encodings, so a netCDF file read
+  and written back keeps them.
+- `NumpyArray` supports NumPy's ufuncs, `np.where`, and Python's operators,
+  broadcasting by axis name under the exact alignment rule.
+
+### Grouping
+
 - `group_by` on a value with missing values no longer raises: every NaN is
   one group, and every NaT. `dropna=True`, the default as in pandas, leaves
   those positions out of every group, with a note saying how many;
   `dropna=False` keeps them as a group labelled NaN (NaT for times), last.
-  `bins()` follows the same rule. NaT keys formed a group before and are
-  now dropped unless `dropna=False`.
+  `bins()` follows the same rule.
 - `rounded(field, step, origin=0)` and `cells(field, size, origin=0)` group
   by a value rounded to a step or by the grid cell it falls in, as
   `group_by(rounded(distance, 0.5))` or `group_by(cells(x, 0.2))`. Edges are
   where the printed settings put them: with size 0.1, 0.3 is in
   [0.3, 0.4). `bins()` takes `origin=` for durations; its results are
   unchanged.
+
+### Speed
+
+- Grouped float32 sums and means take one pass instead of one step per
+  group: about 1.1 times faster on 10M points in 32 groups with NumPy alone.
+- The `fast` extra, `pip install 'tidy3a[fast]'`, adds Numba: grouped float32
+  sums and means, and sums over a few values such as x, y, z, in one
+  compiled, parallel pass, with the same results. Numba is imported on the
+  first such reduction, not with tidy3a. Measured against 0.2.0 on 10M
+  points: grouped means about 1.8 times faster, the rotate, distance, and
+  filter pipeline about 1.2 times on the NumPy backend. Compiled kernels
+  run only from the sizes where they pay (100,000 values for grouped sums,
+  300,000 for few-value sums).
+- Without `fast`, the xarray backend's 10M-point rotate, distance, and
+  filter pipelines are about 15 to 20% slower than in 0.2.0, the cost of
+  adding x, y, and z in float64.
 - Label lookups on evenly spaced labels (grid latitude, longitude, time)
   are arithmetic, with no sort and no index held.
-- `NumpyArray`, the NumPy backend's array, supports NumPy's ufuncs,
-  `np.where`, and Python's operators, broadcasting by axis name under the
-  exact alignment rule. It is no longer hashable, since `==` compares values.
-- Fixed: `read_array` and `read_binary` converted labels that mix kinds:
+
+### Fixes
+
+- `read_array` and `read_binary` converted labels that mix kinds:
   `[1, "a"]` became the text labels "1" and "a", and `[True, 2]` the
   numbers 1 and 2; others raised a raw `TypeError`. Labels mixing booleans,
   numbers, times, durations, text, bytes, or `None` are now a `ReadError`
   naming them, and integers and floats are joined only when float64 holds
   every label exactly.
-- Fixed: on ARM, a float equal to `2**63` was treated as an exact int64
-  label, since the cast saturates.
-- The compiled kernels run only from the sizes where they pay (100,000
-  values for grouped sums, 300,000 for few-value sums), below which calling
-  them costs more than it saves; results are the same either way.
-- Grouped float32 sums and means take one pass instead of one step per
-  group: about 2 times faster on 10M points in 32 groups with NumPy alone.
-- The `fast` extra, `pip install 'tidy3a[fast]'`, adds Numba: grouped float32
-  sums and means, and sums over a few values such as x, y, z, in one
-  compiled, parallel pass, with the same results. Numba is imported on the
-  first such reduction, not with tidy3a. With it, the 10M-point rotate,
-  distance, and filter pipeline takes 49 ms instead of 56.
-- `dot` multiplies with NumPy's `matmul`, arranging the operands the same way
-  for every layout: a 3 x 3 rotation of 10M points takes 6.5 ms instead of
-  13.3 (68.7 on row-major input). Results can differ from 0.2.0 in the last
-  bits for general matrices. An overflow in `dot` shows as infinity without
-  a warning, since BLAS libraries do not report it reliably.
+- On ARM, a float equal to `2**63` was treated as an exact int64 label,
+  since the cast saturates.
 
 ## 0.2.0 — 2026-10-25
 
