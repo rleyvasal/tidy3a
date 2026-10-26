@@ -140,6 +140,55 @@ are matched by label (and the change is noted), and different labels need a
 join (`left_join`, `inner_join`, `full_join`). The integer label `2**53 + 1`
 never matches the float `2**53`.
 
+## Explaining and reusing pipelines
+
+Each verb records what it did as it runs. `explain()` lists the source and
+every step with its effect, from those records, computing nothing; verbs
+also compose before any data into a pipeline to run, preview, or reuse:
+
+```python
+import numpy as np
+from tidy3a import fields, filter, group_by, infer, mean, mutate, n, pull, read_array, summarise
+
+points = np.array([[3, 4, 0, 10, 1], [0, 0, 50, 20, 2], [60, 0, 0, 30, 1], [1, 1, 1, 40, 2]], dtype="float32")
+cloud = read_array(points, dims={"point": infer, "feature": 5},
+                   labels={"feature": ["x", "y", "z", "intensity", "ring"]}, field_axis="feature")
+x, y, z, intensity, ring, d = fields("x", "y", "z", "intensity", "ring", "d")
+
+steps = mutate(d=x + y + z) >> filter(d <= 50) >> group_by(ring) >> summarise(points=n(), m=mean(intensity))
+per_ring = cloud >> steps
+print(per_ring >> pull("m"))  # [10. 30.]
+print(len(per_ring.plan()))  # 4
+```
+
+`print(per_ring.explain())` shows:
+
+```text
+<plan source: NumPy array>
+  values (point: 4, feature: 5) float32
+1. mutate(d = (x + y) + z)
+     + d (point: 4) float32
+2. filter(d <= 50)
+     point: 4 → 3
+3. group_by(ring)
+     groups: ring (2)
+4. summarise(points = n(), m = mean(intensity))
+     - axis point
+     - axis feature
+     + axis ring: 2
+     - values
+     - d
+     + points (ring: 2) int64
+     + m (ring: 2) float32
+     groups: none
+```
+
+`steps.explain(cloud, head=1000)` runs a pipeline on the first 1,000
+positions of each observation axis and explains that, to check a long
+pipeline on a large array quickly. `per_ring.plan()` gives the verbs that
+made a result as a pipeline, so `other_cloud >> per_ring.plan()` repeats
+them on other data.
+
 ## Tables: Polars and tidy3
 
 With [Polars](https://pola.rs) installed (`pip install "tidy3a[polars]"`),
@@ -204,6 +253,7 @@ first (`nir * 1.0 - red`) when a result can be negative.
 | Expressions | `fields`, `col`, `variable`, `label`, `env`, `if_else`, `[x, y, z]` vectors, `assign`, `formula` (plain maths or a strict LaTeX dialect) |
 | Arrays | `dot`, `pack`, `rename_axes`, `conj`, `real`, `imag`, `angle`, `sqrt`, `exp`, `log`, trigonometric functions, … |
 | Selecting fields | `where`, `starts_with`, `ends_with`, `contains`, `matches`, `everything`, `is_numeric`, … |
+| Plans | `explain()` (each step and its effect), `plan()` (the verbs as a pipeline), `verb >> verb` (a `Pipeline`), `Pipeline.explain(data, head=)` |
 | Results | `pull`, `collect()` (an xarray `Dataset`), `to_xarray()`, `to_dict()` (NumPy arrays, no xarray needed), `as_table()` (a Polars DataFrame) |
 | Settings | `set_backend` |
 

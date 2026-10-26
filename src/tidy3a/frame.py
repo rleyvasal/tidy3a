@@ -25,7 +25,8 @@ _ANNOTATION_COLUMN = 40
 class TidyArray:
     """Named arrays with tidy3a's axis roles; build one with ``tidy()`` or ``read_array()``."""
 
-    __slots__ = ("_data", "_backend", "_field_axis", "_origins", "_source", "_notes", "_groups", "_resolved")
+    __slots__ = ("_data", "_backend", "_field_axis", "_origins", "_source", "_notes", "_groups", "_resolved",
+                 "_record")
 
     def __init__(
         self,
@@ -38,6 +39,7 @@ class TidyArray:
         notes: Sequence[str] = (),
         groups: Sequence[Any] = (),
         resolved: tuple[Any, Any, Any] | None = None,
+        record: Any = None,
     ):
         self._data = data
         self._backend = xarray_backend() if backend is None else backend
@@ -50,6 +52,8 @@ class TidyArray:
         self._groups = tuple(groups)
         # (data, value key, tidy3a.expr.Groups): the key's groups, found once and valid for that data
         self._resolved = resolved
+        # the source and the verbs that made this frame (tidy3a.plan.Record), or None before any verb
+        self._record = record
 
     def _evolve(self, data: Any = None, *, notes: Sequence[str] = (), **changes: Any) -> TidyArray:
         """A copy with *data* and other parts replaced; *notes* are appended."""
@@ -81,6 +85,7 @@ class TidyArray:
             notes=new_notes,
             groups=changes.pop("groups", self._groups),
             resolved=changes.pop("resolved", None),
+            record=changes.pop("record", self._record),
         )
 
     @translating
@@ -122,8 +127,25 @@ class TidyArray:
         return to_tidy3(self, **options)
 
     def _apply_verb(self, verb: Any) -> Any:
-        """Execute a verb; experimental frames may override this private boundary."""
-        return verb._apply(self)
+        """Execute a verb and record it on the result (``tidy3a.plan``); experimental frames may override this."""
+        from tidy3a.plan import recorded
+
+        return recorded(self, verb, verb._apply(self))
+
+    def explain(self) -> Any:
+        """The source and each verb since, with what it changed: axes, variables, groups, and notes.
+
+        Recorded as the verbs ran, so nothing is computed. It prints as text.
+        """
+        from tidy3a.plan import Plan, start
+
+        return Plan(start(self))
+
+    def plan(self) -> Any:
+        """The verbs that made this data, as a pipeline to run on other data: ``other >> nearby.plan()``."""
+        from tidy3a.plan import Pipeline
+
+        return Pipeline(() if self._record is None else (step.verb for step in self._record.steps))
 
     @translating
     def __repr__(self) -> str:
@@ -167,6 +189,7 @@ def tidy(data: Any, *, axis: str | None = None, field_axis: str | None = None,
             data = TidyArray(
                 target.wrap(source)[0], backend=target, field_axis=data._field_axis,
                 origins=data._origins, source=data._source, notes=data._notes, groups=data._groups,
+                record=data._record,
             )
         if field_axis is None or field_axis == data._field_axis:
             return data

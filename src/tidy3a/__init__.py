@@ -65,6 +65,7 @@ from tidy3a.linalg import (
     tan,
     tanh,
 )
+from tidy3a.plan import Pipeline, Plan
 from tidy3a.selectors import (
     all_of,
     any_of,
@@ -102,7 +103,7 @@ nan = float("nan")
 
 __all__ = [
     "AlignError", "FilterError", "GroupError", "MutateError", "ReadError", "RefError",
-    "SelectError", "SliceError", "SummariseError", "TidyArray", "TidyError", "__version__",
+    "Pipeline", "Plan", "SelectError", "SliceError", "SummariseError", "TidyArray", "TidyError", "__version__",
     "all", "all_of", "any", "any_of", "as_table", "assign", "bind_cols", "bins", "cells", "col", "contains",
     "ends_with", "env", "everything", "fields", "filter", "fixed_text", "full_join", "group_by", "if_else",
     "infer", "inner_join", "is_numeric", "label", "last_col", "left_join", "matches", "max",

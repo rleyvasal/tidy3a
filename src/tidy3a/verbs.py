@@ -70,6 +70,12 @@ class Verb:
             )
         return frame._apply_verb(self)
 
+    def __rshift__(self, other: Any) -> Any:
+        """``mutate(...) >> filter(...)``: verbs composed into a pipeline, to run on data later."""
+        from tidy3a.plan import Pipeline
+
+        return Pipeline((self,)) >> other
+
     def __repr__(self) -> str:
         return f"<verb {self.text}>"
 
