@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.1 — 2026-10-26
 
 - Requires labelarray 0.1.3: summaries by several keys pass their groups'
   labels as an array, which labelarray now keeps, so a voxel summary of
