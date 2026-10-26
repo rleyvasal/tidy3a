@@ -1,6 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 — 2026-10-26
+
+Float32 sums and means are now correctly rounded on lazy, chunked (Dask)
+data too, a removed field axis ends, and summaries by several keys are
+faster. Changes that can alter results or code written for 0.4:
+
+- Float32 sums and means on chunked data change in their last bits: they
+  now equal the in-memory, correctly rounded results whatever the chunking,
+  where they used Dask's own arithmetic before. Requires labelarray 0.1.2.
+- After a verb removes the field axis, the result names no field axis;
+  `tidy(result, field_axis="feature")` naming the removed axis is an error
+  instead of returning the data unchanged.
 
 - Float32 sums and means on lazy, chunked (Dask) data are correctly
   rounded, the same bits as in memory whatever the chunking (decision 10,
