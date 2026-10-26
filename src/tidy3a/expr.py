@@ -917,14 +917,14 @@ def _multi_groups(key: MultiKey, frame: Any, group_axes: Sequence[Hashable]) -> 
     codes[present] = inverse.reshape(-1)
     # Each key's labels are few (its groups); as an array once, indexed by every combination's code.
     keys = [(name, _label_array(part.labels)[np.asarray(where)]) for name, part, where in zip(names, parts, chosen)]
-    labels = list(range(1, len(found) + 1))
+    labels = np.arange(1, len(found) + 1)  # an array: labelarray 0.1.3 keeps it, saving a list of Python ints
     codes_array = backend.codes_like(codes, parts[0].codes_array)
     count = int(missing.sum())
     if not count:
         return Groups(key.name, axis, codes_array, labels, keys=keys)
     note = (f"changed: group_by({key.label}) dropped {count:,} position{'' if count == 1 else 's'} "
             f"with a missing {' or '.join(lacking)}; dropna=False keeps them as groups")
-    return Groups(key.name, axis, codes_array, [*labels, 0], dropped=count, note=note, keys=keys)
+    return Groups(key.name, axis, codes_array, np.append(labels, 0), dropped=count, note=note, keys=keys)
 
 
 def _label_array(labels: list) -> np.ndarray:

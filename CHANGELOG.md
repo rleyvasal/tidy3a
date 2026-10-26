@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Requires labelarray 0.1.3: summaries by several keys pass their groups'
+  labels as an array, which labelarray now keeps, so a voxel summary of
+  200,000 points takes 20 ms instead of 22; and float32 sums of a few
+  values per result (`sum(p**2, over="i")`) take about 10 µs less, with
+  the same bits.
+
 ## 0.5.0 — 2026-10-26
 
 Float32 sums and means are now correctly rounded on lazy, chunked (Dask)
