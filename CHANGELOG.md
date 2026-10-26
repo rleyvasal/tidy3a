@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.1 — 2026-10-26
+
+- Times with a time zone stored as values, not only as labels, stay on the
+  xarray backend. With xarray 2024.6 and pandas 2.2.2, such a variable
+  reached the NumPy backend as integer nanoseconds, so its zone was lost
+  without a word and `bins()` on it said "a duration needs time values";
+  with recent xarray, `backend="numpy"` called it lazy, chunked, or
+  memory-mapped. Now the NumPy backend refuses it ("has times with a time
+  zone"), so by default it stays on xarray, and `bins()`, `rounded()`, and
+  `cells()` give the time-zone message on both backends.
+
 ## 0.4.0 — 2026-10-26
 
 Grouping by several keys (voxels), plans with `explain()` and reusable
