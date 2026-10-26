@@ -88,7 +88,19 @@ print(per_cell >> pull("x_cell"))  # ['[-4, -2)' '[0, 2)']
 
 heights = cloud >> group_by(rounded(z, 0.5)) >> summarise(points=n())
 print(heights >> pull("points"))  # [1 3 1]
+
+voxels = cloud >> group_by(cells(x, 2.0), rounded(z, 0.5), axis="voxel") >> summarise(points=n())
+print(voxels >> pull("x_cell"))  # ['[-4, -2)' '[-4, -2)' '[0, 2)' '[0, 2)']
+print(voxels >> pull("z_rounded"))  # [0.  0.5 0.5 1. ]
+print(voxels >> pull("points"))  # [1 1 2 1]
 ```
+
+Several value keys make one group per combination that occurs, as dplyr,
+pandas, and Polars do, sorted by the first key and then the next. The
+groups lie along one new axis, `group` unless `axis=` names it, and
+`summarise` gives each key's value per group as a variable named after the
+key. Empty combinations are never made, so voxels cost what is occupied,
+not the bounding box.
 
 `bins(field, edges)` groups by explicit edges, or by a duration for times
 (`bins(col("time"), "1 day")`). Cell and bin edges fall where the printed

@@ -35,6 +35,7 @@ from tidy3a.expr import (
     Context,
     Expr,
     Literal,
+    MultiKey,
     Ref,
     UnaryOp,
     ValueKey,
@@ -127,8 +128,8 @@ def select(*items: Any) -> Verb:
                         chosen.append(column)
 
         notes: list[str] = []
-        for key in frame._groups:
-            if isinstance(key, ValueKey) and isinstance(key.expr, Ref):
+        for key in _value_keys(frame._groups):
+            if isinstance(key.expr, Ref):
                 kept = any(c.name == key.expr.name for c in chosen)
                 match = [c for c in columns if c.name == key.expr.name]
                 if not kept and match:
@@ -151,6 +152,12 @@ def select(*items: Any) -> Verb:
         return frame._evolve(result, notes=notes)
 
     return Verb(_call_text("select", items), apply, operation="select", arguments=items)
+
+
+def _value_keys(keys: Sequence[Any]) -> list[ValueKey]:
+    """The value keys among group_by's keys, those of a MultiKey one by one."""
+    return [part for key in keys if isinstance(key, ValueKey)
+            for part in (key.keys if isinstance(key, MultiKey) else (key,))]
 
 
 def _holders(data: Any, field_axis: Hashable | None, backend: Any = None) -> list[Hashable]:
@@ -600,15 +607,22 @@ def _store_vector(frame: TidyArray, target: Vector, value: Any, text: str, notes
 # ── grouping ────────────────────────────────────────────────────────────────
 
 
-def group_by(*keys: Any, dropna: bool = True, **named: Any) -> Verb:
-    """Group by axes (kept), a value field, or a transform of one: ``bins(...)``, ``rounded(...)``, ``cells(...)``.
+def group_by(*keys: Any, dropna: bool = True, axis: str | None = None, **named: Any) -> Verb:
+    """Group by axes (kept), value fields, or transforms of them: ``bins(...)``, ``rounded(...)``, ``cells(...)``.
 
     Positions whose value is missing (NaN or NaT) are one group. ``dropna``
     leaves them out of every group, with a note saying how many, as pandas
     does by default; ``dropna=False`` keeps them as a group labelled NaN, last.
+
+    Several value keys make one group per combination that occurs, sorted by
+    the first key, then the next, along one new axis: ``group``, or the name
+    ``axis=`` gives (``axis="voxel"``). ``summarise`` gives each key's value
+    per group as a variable named after the key.
     """
     if not isinstance(dropna, (bool, np.bool_)):
         raise GroupError(f"group_by(): dropna must be True or False, not {dropna!r}")
+    if axis is not None and (not isinstance(axis, str) or not axis):
+        raise GroupError(f"group_by(): axis= names the groups' axis, not {axis!r}")
 
     def apply(frame: TidyArray) -> TidyArray:
         data, backend = frame._data, frame._backend
@@ -632,11 +646,12 @@ def group_by(*keys: Any, dropna: bool = True, **named: Any) -> Verb:
         for name, expr in named.items():
             resolved.append(ValueKey(name, as_expr(expr), dropna=bool(dropna)))
         values = [key for key in resolved if isinstance(key, ValueKey)]
+        if axis is not None and len(values) < 2:
+            own = f"; {values[0].label} groups along its own axis, {values[0].name}" if values else ""
+            raise GroupError(f"axis= names the axis of several value keys{own}")
         if len(values) > 1:
-            raise GroupError(
-                "grouping by more than one value field is not supported yet; "
-                f"got {', '.join(key.label for key in values)}"
-            )
+            values = [MultiKey(values, axis or "group", bool(dropna))]
+            resolved = [key for key in resolved if not isinstance(key, ValueKey)] + values
         if values:
             found = resolve_value_key(values[0], frame, [k.axis for k in resolved if isinstance(k, AxisKey)])
             # The next verb reuses these groups while the data is unchanged.
@@ -644,7 +659,10 @@ def group_by(*keys: Any, dropna: bool = True, **named: Any) -> Verb:
             return frame._evolve(groups=resolved, notes=notes, resolved=(frame._data, values[0], found))
         return frame._evolve(groups=resolved)
 
-    text = _call_text("group_by", keys, named if dropna else {**named, "dropna": False})
+    options = {} if dropna else {"dropna": False}
+    if axis is not None:
+        options["axis"] = axis
+    text = _call_text("group_by", keys, {**named, **options})
     return Verb(text, apply, operation="group_by", arguments=(keys, named))
 
 
@@ -667,6 +685,14 @@ def summarise(*, groups: str | None = None, **named: Any) -> Verb:
         if ctx.value_key is not None:
             allowed.add(ctx.groups().name)
         results: dict[Hashable, Any] = {}
+        if isinstance(ctx.value_key, MultiKey):  # each key's value per group, before the summaries
+            found = ctx.groups()
+            for key_name, values in found.keys:
+                if key_name in named:
+                    raise SummariseError(f'"{key_name}" is a key of the groups, so summarise() gives it; '
+                                         "name the summary something else")
+                results[key_name] = backend.array(np.asarray(values, dtype=object if _is_text_list(values) else None),
+                                                  dims=(found.name,))
         for name, expr in named.items():
             node = as_expr(expr)
             value = evaluate(node, ctx)
@@ -696,6 +722,10 @@ def summarise(*, groups: str | None = None, **named: Any) -> Verb:
 
 
 summarize = summarise
+
+
+def _is_text_list(values: list) -> bool:
+    return any(isinstance(value, str) for value in values)
 
 
 def _per_group(value: Any, ctx: Context) -> Any:

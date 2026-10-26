@@ -35,6 +35,7 @@ from tidy3a import (
     mean,
     mutate,
     n,
+    pull,
     rounded,
     summarise,
     tidy,
@@ -172,7 +173,7 @@ def test_helpers_refuse_values_they_cannot_place():
         ranges([1.0, math.inf]) >> group_by(cells(col("distance"), 1))
 
 
-def test_several_transformed_keys_are_still_one_too_many():
-    frame = tidy(xr.Dataset({"x": ("point", [0.1, 0.2]), "y": ("point", [0.3, 0.4])}))
-    with pytest.raises(GroupError, match=r"more than one value field is not supported yet; got cells\(x\), cells\(y\)"):
-        frame >> group_by(cells(col("x"), 1), cells(col("y"), 1))
+def test_several_transformed_keys_combine():
+    frame = tidy(xr.Dataset({"x": ("point", [0.1, 0.2, 1.5]), "y": ("point", [0.3, 0.4, 0.3])}))
+    out = frame >> group_by(cells(col("x"), 1), cells(col("y"), 1)) >> summarise(k=n())
+    assert (out >> pull("x_cell")).tolist() == ["[0, 1)", "[1, 2)"] and (out >> pull("k")).tolist() == [2, 1]

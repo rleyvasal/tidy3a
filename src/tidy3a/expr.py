@@ -411,6 +411,25 @@ class ValueKey:
         return ValueKey(self.name, self.expr, self.transform, dropna, label=self.label, call=self.call)
 
 
+class MultiKey(ValueKey):
+    """``group_by(cells(x, 1), cells(y, 1), cells(z, 1))``: positions grouped by several values at once.
+
+    One group per combination that occurs, as dplyr, pandas, and Polars give
+    them, sorted by the first key, then the next. The groups lie along one new
+    axis, ``name`` (``"group"`` unless ``group_by(axis=)`` names it), and
+    ``summarise`` gives each key's value per group as a variable named after
+    the key. With ``dropna``, a position missing any key is in no group.
+    """
+
+    def __init__(self, keys: Sequence[ValueKey], name: Hashable = "group", dropna: bool = True):
+        self.keys = tuple(keys)
+        label = ", ".join(key.label for key in self.keys)
+        super().__init__(name, Vector([key.expr for key in self.keys]), None, dropna, label=label)
+
+    def with_dropna(self, dropna: bool) -> MultiKey:
+        return MultiKey(self.keys, self.name, dropna)
+
+
 class Groups(Grouping):
     """A value key resolved against current data: a grouping of the positions on ``axis``.
 
@@ -424,13 +443,15 @@ class Groups(Grouping):
     """
 
     def __init__(self, name: Hashable, axis: Hashable, codes_array: Any, labels: Sequence[Any],
-                 dropped: int = 0, note: str | None = None):
+                 dropped: int = 0, note: str | None = None, keys: Sequence[tuple[Hashable, list]] = ()):
         super().__init__(codes_array.values, labels)
         self.name = name
         self.axis = axis
         self.codes_array = codes_array
         self.dropped = dropped
         self.note = note
+        # For several keys (MultiKey): each key's name and its value for each shown group.
+        self.keys = tuple(keys)
 
     @property
     def shown(self) -> list[Any]:
@@ -820,6 +841,8 @@ def _count(ctx: Context) -> Any:
 
 def resolve_value_key(key: ValueKey, frame: Any, group_axes: Sequence[Hashable]) -> Groups:
     """Evaluate a value key on current data and give each position a group code."""
+    if isinstance(key, MultiKey):
+        return _multi_groups(key, frame, group_axes)
     ctx = Context(frame, verb="group_by", error=GroupError, grouped=False)
     values = evaluate(key.expr, ctx)
     if not ctx.backend.is_array(values) or values.ndim != 1:
@@ -852,6 +875,56 @@ def _value_groups(key: ValueKey, axis: Hashable, values: Any, backend: Any) -> G
     missing_label = np.array(["NaT" if raw.dtype.kind in "mM" else "nan"], raw.dtype)
     labels = _label_list(present) + _label_list(missing_label)
     return _with_missing(key, axis, backend.codes_like(codes, values), labels, int(missing.sum()))
+
+
+def _multi_groups(key: MultiKey, frame: Any, group_axes: Sequence[Hashable]) -> Groups:
+    """One group per combination of the keys' groups that occurs, in the keys' order."""
+    names = [part.name for part in key.keys]
+    repeated = next((name for name in names if names.count(name) > 1), None)
+    if repeated is not None:
+        raise GroupError(f"group_by({key.label}) has two keys named {repeated}; name one with group_by(name = ...)")
+    if key.name in names:
+        raise GroupError(f'group_by({key.label}, axis="{key.name}"): a key is named "{key.name}" too; '
+                         "name the groups' axis something else")
+    parts = [resolve_value_key(part.with_dropna(key.dropna), frame, group_axes) for part in key.keys]
+    axes = [part.axis for part in parts]
+    if len(set(axes)) > 1:
+        along = ", ".join(f"{name} along {axis}" for name, axis in zip(names, axes))
+        raise GroupError(f"group_by({key.label}) needs keys along one axis; {along.replace(' along ', ' varies along ', 1)}")
+    axis = axes[0]
+    backend = frame._backend
+    if key.name != axis and backend.has_axis(frame._data, key.name):
+        raise GroupError(f'group_by({key.label}): axis="{key.name}" is already an axis of this data; '
+                         "name the groups' axis with axis=")
+    # A position is missing when any key is: each key's missing group is its last (dropped) one.
+    missing = np.zeros(len(parts[0].codes), dtype=bool)
+    lacking = []
+    for part, part_key in zip(parts, key.keys):
+        if part.dropped:
+            missing |= part.codes == len(part) - 1
+            lacking.append(part_key.label if part_key.transform is None else part_key.expr.text())
+    sizes = [len(part) for part in parts]
+    present = ~missing
+    if float(np.prod(sizes, dtype=np.float64)) < 2.0**62:
+        combined = np.ravel_multi_index([part.codes[present] for part in parts], sizes)
+        found, inverse = _factorize(combined)  # sorted, so combinations sort by key in turn
+        chosen = np.unravel_index(found, sizes)
+    else:  # too many combinations to number: sort the rows of codes instead
+        rows, inverse = np.unique(np.stack([part.codes[present] for part in parts], axis=1), axis=0,
+                                  return_inverse=True)
+        chosen, found = rows.T, rows
+    codes = np.full(len(missing), len(found), dtype=np.intp)
+    codes[present] = inverse.reshape(-1)
+    keys = [(name, [part.labels[int(code)] for code in where])
+            for name, part, where in zip(names, parts, chosen)]
+    labels = list(range(1, len(found) + 1))
+    codes_array = backend.codes_like(codes, parts[0].codes_array)
+    count = int(missing.sum())
+    if not count:
+        return Groups(key.name, axis, codes_array, labels, keys=keys)
+    note = (f"changed: group_by({key.label}) dropped {count:,} position{'' if count == 1 else 's'} "
+            f"with a missing {' or '.join(lacking)}; dropna=False keeps them as groups")
+    return Groups(key.name, axis, codes_array, [*labels, 0], dropped=count, note=note, keys=keys)
 
 
 def _missing_keys(raw: np.ndarray) -> np.ndarray | None:
