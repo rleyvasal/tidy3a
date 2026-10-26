@@ -227,7 +227,8 @@ scripts/check.sh
 pinned environment (`--fast` adds the compiled kernels). The
 [release procedure](docs/releasing.md) describes the GitHub Release
 workflow. The NumPy layer is becoming a library of its own, `labelarray`,
-for now the subpackage `tidy3a.labelarray`.
+for now the subpackage `tidy3a.labelarray`, with
+[its own README](src/tidy3a/labelarray/README.md).
 
 ## License
 

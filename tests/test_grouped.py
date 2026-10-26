@@ -1,6 +1,6 @@
 """Grouped reductions in one pass give the same bits as reducing each group on its own.
 
-``tidy3a.grouped`` reduces every group at once where that is exact: min,
+``labelarray.grouped`` reduces every group at once where that is exact: min,
 max, count, any, all, and integer sums in any order; float sums and means
 of groups with fewer than 8 positions, which NumPy adds one after another
 starting from 0.0. Other groups and reductions are reduced one by one, as
@@ -19,7 +19,6 @@ from tidy3a import (
     col,
     expr,
     group_by,
-    grouped,
     max,
     mean,
     median,
@@ -31,6 +30,7 @@ from tidy3a import (
     summarise,
     tidy,
 )
+from tidy3a.labelarray import grouped
 
 REDUCERS = {"sum": sum, "mean": mean, "min": min, "max": max, "any": any, "all": all, "std": std, "median": median}
 
@@ -224,14 +224,14 @@ def test_grouping_holds_plain_codes_and_labels_and_caches_its_derived_arrays():
     assert len(empty) == 0 and empty.counts().tolist() == [] and empty.blocks()[0].tolist() == []
 
 
-def test_grouping_needs_nothing_from_tidy3a():
+def test_grouping_needs_nothing_from_tidy3a_outside_the_library():
     import ast
     import inspect
 
     tree = ast.parse(inspect.getsource(grouped))
     imported = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
     imported |= {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
-    assert not {name for name in imported if name and name.startswith("tidy3a")}
+    assert not {name for name in imported if name and name.startswith("tidy3a") and not name.startswith("tidy3a.labelarray")}
 
 
 def test_groups_is_a_grouping_with_tidy3as_name_axis_and_backend_codes():

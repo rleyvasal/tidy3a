@@ -29,7 +29,7 @@ deliberate; each is tested in `tests/test_backend_contract.py`.
 | Lazy, chunked, and memory-mapped values | Held lazily | Not held. When NumPy is only the default, such data stays on xarray; asking for `backend="numpy"` is an error saying why |
 | Lazy, chunked, or memory-mapped arrays from the calling code in an expression (a Dask `DataArray`) | Combined lazily | An error naming the array, raised before anything is computed |
 | Coordinates other than an axis's own labels (a scalar `station`, an auxiliary `lat` along `point`), multi-level labels, time labels with a time zone | Held | Not held: the data stays on xarray, or `backend="numpy"` is an error |
-| Arrays passed to a `where(predicate)` selection helper | xarray `DataArray` | The backend's `NumpyArray`, with `dims`, `sizes`, `shape`, `ndim`, `dtype`, and `values` |
+| Arrays passed to a `where(predicate)` selection helper | xarray `DataArray` | A `labelarray.Array` (also importable as `tidy3a.numpy_backend.NumpyArray`), with `dims`, `sizes`, `shape`, `ndim`, `dtype`, and `values` |
 
 Behaviour that is the same on both, once easy to get wrong:
 

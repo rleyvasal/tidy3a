@@ -25,10 +25,17 @@ from tidy3a.align import align_many, align_pair
 from tidy3a.backend import is_xarray, xarray_backend
 from tidy3a.errors import GroupError, RefError, TidyError
 from tidy3a.frame import TidyArray, tidy
-from tidy3a.grouped import Grouping
 from tidy3a.labelarray import errors as labelarray_errors
-from tidy3a.labelarray.transforms import ZONES, Bins, Duration, GridCells, Round, Transform, parse_duration
-
+from tidy3a.labelarray.grouped import Grouping
+from tidy3a.labelarray.transforms import (
+    ZONES,
+    Bins,
+    Duration,
+    GridCells,
+    Round,
+    Transform,
+    parse_duration,
+)
 
 # ── Nodes ───────────────────────────────────────────────────────────────────
 

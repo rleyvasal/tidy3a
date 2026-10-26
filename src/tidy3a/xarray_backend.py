@@ -17,17 +17,13 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from tidy3a import grouped
 from tidy3a.backend import kept_positions
 from tidy3a.errors import TidyError
+from tidy3a.labelarray import grouped, sums
 from tidy3a.labelarray import labels as exact
-from tidy3a.labelarray import sums
 from tidy3a.labelarray.contract import contract
 
 _EXACT = {"arithmetic_join": "exact"}
-
-# Up to this many groups, scanning the axis once per group is cheaper than sorting it.
-_FEW_GROUPS = 8
 
 
 def label_index(labels: Sequence[Any], name: Hashable) -> pd.Index:
@@ -345,12 +341,12 @@ class XarrayBackend:
 
     def _one_pass(self, array: xr.DataArray, op: str, groups: Any, others: Sequence[Hashable],
                   na_rm: bool, min_count: int | None) -> xr.DataArray | None:
-        """Every group at once where that is exact (``tidy3a.grouped``); the rest one by one.
+        """Every group at once where that is exact (``labelarray.grouped``); the rest one by one.
 
         One group's result, reduced as before, gives the result's axes,
         coordinates, and name.
         """
-        if array.chunks is not None or others or len(groups.labels) <= _FEW_GROUPS:
+        if array.chunks is not None or others or len(groups.labels) <= grouped.FEW_GROUPS:
             return None
         order, starts, ends = groups.blocks()
         axis = groups.axis
@@ -392,7 +388,7 @@ class XarrayBackend:
         """
         codes = groups.codes
         count = len(groups.labels)
-        if array.chunks is not None or count <= _FEW_GROUPS:
+        if array.chunks is not None or count <= grouped.FEW_GROUPS:
             return [array.isel({groups.axis: codes == code}) for code in range(count)]
         order, starts, ends = groups.blocks()
         ordered = array.isel({groups.axis: order})

@@ -54,7 +54,7 @@ def test_selection_predicates_receive_the_backends_arrays():
         types = []
         tidy(data, backend=name) >> select(where(lambda array: types.append(type(array).__name__) or True))
         seen[name] = set(types)
-    assert seen == {"xarray": {"DataArray"}, "numpy": {"NumpyArray"}}
+    assert seen == {"xarray": {"DataArray"}, "numpy": {"Array"}}  # labelarray.Array
 
 
 # ── The same on both ────────────────────────────────────────────────────────

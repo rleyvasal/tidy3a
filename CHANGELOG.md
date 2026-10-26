@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- The NumPy backend's arrays and collections moved into the library,
+  `tidy3a.labelarray`, as `Array` and `Collection`, with the grouped
+  reductions (`labelarray.grouped`), and the backend became a thin adapter
+  over them. Results are unchanged. `where(...)` predicates on the NumPy
+  backend now receive a `labelarray.Array`; `tidy3a.numpy_backend.NumpyArray`
+  and `NumpyData` remain as names for the two classes, so code that imports
+  or checks them keeps working, but `type(array).__name__` is now `"Array"`.
+- The library has its own public API and README
+  (`src/tidy3a/labelarray/README.md`), whose examples are tested.
+
 ## 0.3.0 — 2026-10-25
 
 The NumPy backend becomes the default, float32 sums and means become
