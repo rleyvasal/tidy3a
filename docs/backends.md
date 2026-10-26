@@ -6,7 +6,7 @@ only stores the data and computes with it (plan milestones 9 and 10).
 Without a choice, new data uses the NumPy backend wherever it holds the data
 without loss, and the xarray backend for the rest: lazy, chunked, and
 memory-mapped values, coordinates other than an axis's own labels,
-multi-level labels, time labels with a time zone, and data with xarray
+multi-level labels, times with a time zone, and data with xarray
 storage encodings (as `xr.open_dataset` gives them), so a file read and
 written back keeps its encodings. Choosing a backend decides:
 
@@ -28,7 +28,7 @@ deliberate; each is tested in `tests/test_backend_contract.py`.
 | Storage encodings (`dtype`, `scale_factor`, `_FillValue`, `unlimited_dims`, …) | Kept from the source as the milestone 6 rules describe | Not kept: they describe how xarray writes files, and the NumPy backend does not write files. Attributes are kept by the same rules on both |
 | Lazy, chunked, and memory-mapped values | Held lazily | Not held. When NumPy is only the default, such data stays on xarray; asking for `backend="numpy"` is an error saying why |
 | Lazy, chunked, or memory-mapped arrays from the calling code in an expression (a Dask `DataArray`) | Combined lazily | An error naming the array, raised before anything is computed |
-| Coordinates other than an axis's own labels (a scalar `station`, an auxiliary `lat` along `point`), multi-level labels, time labels with a time zone | Held | Not held: the data stays on xarray, or `backend="numpy"` is an error |
+| Coordinates other than an axis's own labels (a scalar `station`, an auxiliary `lat` along `point`), multi-level labels, times with a time zone (as labels or values) | Held | Not held: the data stays on xarray, or `backend="numpy"` is an error |
 | Arrays passed to a `where(predicate)` selection helper | xarray `DataArray` | A `labelarray.Array` (also importable as `tidy3a.numpy_backend.NumpyArray`), with `dims`, `sizes`, `shape`, `ndim`, `dtype`, and `values` |
 
 Behaviour that is the same on both, once easy to get wrong:

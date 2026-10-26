@@ -115,3 +115,17 @@ def test_time_zone_labels_stay_on_xarray():
     assert tidy(data)._backend.name == "xarray"
     with pytest.raises(TidyError, match="time labels with a time zone"):
         tidy(data, backend="numpy")
+
+
+def test_time_zone_values_stay_on_xarray():
+    # xarray 2024.6 hands zoned values over as integer nanoseconds in an object array, with no
+    # zone in sight; held by the NumPy backend, they would lose it without a word.
+    pd = pytest.importorskip("pandas")
+    stamps = pd.date_range("2026-01-01", periods=2, tz="UTC")
+    data = xr.Dataset({"a": ("p", [1.0, 2.0]), "s": ("p", stamps)})
+    set_backend("numpy")  # the test fixture restores the default afterwards
+    assert tidy(data)._backend.name == "xarray"
+    with pytest.raises(TidyError, match="s has times with a time zone"):
+        tidy(data, backend="numpy")
+    with pytest.raises(TidyError, match="values has times with a time zone"):
+        tidy(xr.DataArray(stamps, dims="p"), backend="numpy")

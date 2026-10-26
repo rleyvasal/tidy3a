@@ -35,7 +35,7 @@ from labelarray.array import (
 from labelarray.collection import Collection
 from labelarray.errors import LabelError
 
-from tidy3a.backend import is_xarray, kept_positions, memory_mapped
+from tidy3a.backend import is_xarray, kept_positions, memory_mapped, time_zoned
 from tidy3a.errors import TidyError
 
 # The names tidy3a used before the library had them; arrays in where() predicates are these.
@@ -70,6 +70,9 @@ class NumpyBackend:
         dataset = data.to_dataset(name=data.name if data.name is not None else "values") \
             if isinstance(data, xr.DataArray) else data
         for name, value in dataset.data_vars.items():
+            # Before the storage check: zoned values are not an ndarray on recent xarray.
+            if time_zoned(value):
+                return f"{name} has times with a time zone"
             if not value.variable._in_memory or not isinstance(value.data, np.ndarray) \
                     or memory_mapped(value.data):
                 return f"{name} is lazy, chunked, or memory-mapped"

@@ -92,6 +92,13 @@ def test_bins_refuse_times_with_a_time_zone():
         tidy(ds) >> group_by(bins(col("t"), "2 days"))
 
 
+def test_bins_refuse_zoned_times_in_a_variable_too():
+    stamps = pd.date_range("2026-01-01", periods=3, tz="UTC")
+    ds = xr.Dataset({"v": ("p", [1.0, 2.0, 3.0]), "s": ("p", stamps)})
+    with pytest.raises(GroupError, match="time zone"):
+        tidy(ds) >> group_by(bins(col("s"), "2 days"))
+
+
 # ── rounded() and cells() through group_by ──────────────────────────────────
 
 

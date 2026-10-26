@@ -49,6 +49,23 @@ def is_xarray_object(value: Any) -> bool:
     return xr is not None and isinstance(value, (xr.DataArray, xr.Dataset))
 
 
+def time_zoned(array: Any) -> bool:
+    """Whether an xarray array holds times with a time zone.
+
+    xarray hands such times over without their zone: as naive datetimes
+    (recent versions, whose dtype still names the zone), or as integer
+    nanoseconds in an object array (2024.6). The zone is kept in the pandas
+    index the values are stored in, so that is where to look; looking costs
+    nothing for zoned times and a pass over other object values.
+    """
+    if getattr(array.dtype, "tz", None) is not None:
+        return True
+    variable = getattr(array, "variable", None)
+    if variable is None or array.dtype.kind != "O" or array.ndim != 1:
+        return False
+    return getattr(variable.to_index_variable().to_index(), "tz", None) is not None
+
+
 def memory_mapped(array: Any) -> bool:
     """Whether *array* views a memory-mapped file, however many views lie between.
 
