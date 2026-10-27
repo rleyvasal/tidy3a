@@ -50,15 +50,18 @@ bit-identical with the in-memory results. Anything else is refused with a
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import math
-from collections.abc import Callable, Hashable, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 from labelarray import sums
+from labelarray.errors import LabelArrayError
 from labelarray.transforms import Bins, Duration, GridCells
 
 from tidy3a.errors import BlockError, FilterError, MutateError, ReadError, SummariseError, TidyError, translating
@@ -91,7 +94,11 @@ WHOLE_AXIS = "read the data with lazy=True, which memory-maps a file, or load it
 
 
 class Source:
-    """Where blocks come from: ``size`` positions on ``axis``, a block of them as a frame, and natural chunks."""
+    """Where blocks come from: ``size`` positions on ``axis``, a block of them as a frame, and natural chunks.
+
+    ``empty()`` is a block of no positions with the source's schema, every variable, axis, and type, built without
+    reading the data (plan decision 4: the verbs are checked on it).
+    """
 
     axis: str
     size: int
@@ -100,13 +107,21 @@ class Source:
     def block(self, start: int, stop: int) -> TidyArray:
         raise NotImplementedError
 
+    def empty(self) -> TidyArray:
+        raise NotImplementedError
+
 
 class FileSource(Source):
     """A file memory-mapped again for each block; the block is a copy, and the map closes with it."""
 
     def __init__(self, reopen: Callable[[], np.ndarray], size: int, axis: str,
-                 build: Callable[[np.ndarray, int, int], TidyArray]):
+                 build: Callable[[np.ndarray, int, int], TidyArray], row: tuple[np.dtype, tuple[int, ...]]):
         self.reopen, self.size, self.axis, self.build = reopen, size, axis, build
+        self.row = row  # the values' type, in native byte order, and the shape of one position
+
+    def empty(self) -> TidyArray:
+        dtype, shape = self.row
+        return self.build(np.empty((0, *shape), dtype), 0, 0)
 
     def block(self, start: int, stop: int) -> TidyArray:
         mapped = self.reopen()
@@ -125,6 +140,9 @@ class ArraySource(Source):
 
     def block(self, start: int, stop: int) -> TidyArray:
         return self.build(self.values[start:stop], start, stop)
+
+    def empty(self) -> TidyArray:
+        return self.build(self.values[0:0], 0, 0)
 
 
 class DatasetSource(Source):
@@ -150,6 +168,25 @@ class DatasetSource(Source):
 
         return tidy(self.data.isel({self.axis: slice(start, stop)}).compute(), field_axis=self.field_axis,
                     backend=self.backend)
+
+    def empty(self) -> TidyArray:
+        """No positions on the axis: each lazy value along it an empty NumPy array of its type, since slicing lazy
+        data to no positions and computing it still computes a chunk; nothing along the axis is computed."""
+        from tidy3a.frame import tidy
+
+        sliced = self.data.isel({self.axis: slice(0, 0)})
+        dataset = hasattr(sliced, "data_vars")
+        held = sliced.variables if dataset else sliced.coords.variables
+        empty = {name: variable.copy(deep=False, data=np.empty(variable.shape, variable.dtype))
+                 for name, variable in held.items()
+                 if self.axis in variable.dims and name not in sliced.indexes
+                 and not isinstance(variable.data, np.ndarray)}
+        coords = {name: variable for name, variable in empty.items() if name in sliced.coords}
+        if dataset:
+            sliced = sliced.assign({name: variable for name, variable in empty.items() if name not in coords})
+        elif not isinstance(sliced.variable.data, np.ndarray):  # a DataArray's own values
+            sliced = sliced.copy(deep=False, data=np.empty(sliced.shape, sliced.dtype))
+        return tidy(sliced.assign_coords(coords), field_axis=self.field_axis, backend=self.backend)
 
 
 def _chunks_along(data: Any, axis: str) -> list[tuple[int, int]] | None:
@@ -690,6 +727,21 @@ def _walk(node: _Node, frame: TidyArray, visit: Callable[[_Leaf, TidyArray], Non
         _walk(child, frame >> verb, visit)
 
 
+@contextmanager
+def _naming(blocks: Blocks, span: tuple[int, int]) -> Iterator[None]:
+    """An error raised while a block runs, of its own class, with the block named after its message: a value the
+    first block did not have can fail any block, and the verb's message alone does not say where."""
+    try:
+        yield
+    except (TidyError, LabelArrayError) as error:
+        spans = blocks.spans
+        where = (f"in block {spans.index(span) + 1:,} of {len(spans):,} "
+                 f"(positions {span[0] + 1:,}–{span[1]:,} on {blocks.axis})")
+        named = copy.copy(error)
+        named.args = (f"{error.args[0]}\n  {where}" if error.args else where, *error.args[1:])
+        raise named.with_traceback(error.__traceback__) from None
+
+
 def _in_order(pool: ThreadPoolExecutor, work: Callable[[Any], Any], items: Sequence[Any]):
     """*work* on each item, *threads* + 1 at most started ahead of the one whose result is given next, so the results
     waiting to be taken in order stay bounded however unevenly the blocks take."""
@@ -718,7 +770,8 @@ def _scan(frames: Sequence[ChunkedFrame]) -> None:
             else:
                 found.append((leaf, _partial(leaf.table.plan, frame, blocks.axis)))
 
-        _walk(root, blocks.load(*span), visit)
+        with _naming(blocks, span):
+            _walk(root, blocks.load(*span), visit)
         return found
 
     with ThreadPoolExecutor(blocks.threads) as pool:
@@ -781,7 +834,8 @@ def _exact_pass(leaves: Sequence[_Leaf], blocks: Blocks, pool: ThreadPoolExecuto
                                                             codes=codes if each == 1 else np.repeat(codes, each),
                                                             groups=len(leaf.table.keys))))
 
-            _walk(root, blocks.load(*span), visit)
+            with _naming(blocks, span):
+                _walk(root, blocks.load(*span), visit)
             return buckets
 
         totals: dict[int, np.ndarray] = {}

@@ -314,8 +314,9 @@ def read_array(
                 return _load_stored(source, kind, path, True)
 
         size = int(shape[0])
+        stored = values.dtype if values.dtype.isnative else values.dtype.newbyteorder("=")  # as FileSource.block gives
         del values  # the map closes; each block reopens the file
-        return ChunkedFrame.open(FileSource(reopen, size, axis, build), blocks, threads)
+        return ChunkedFrame.open(FileSource(reopen, size, axis, build, (stored, tuple(shape[1:]))), blocks, threads)
     return _frame(values, names, coords, field_axis, variables_from, name, backend, source_text, notes)
 
 

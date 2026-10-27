@@ -783,6 +783,7 @@ def _evaluate_reduce(node: Reduce, ctx: Context) -> Any:
     array = evaluate(node.arg, ctx)
     if not backend.is_array(array):
         raise error(f"{node.text()} reduces a constant; reductions need data, e.g. {node.op}(intensity)")
+    _check_reducible(node, array.dtype, error)
     if ctx.keys:
         _check_has_group_axes(node, array, ctx)
     if node.over is not None:
@@ -808,6 +809,21 @@ def _evaluate_reduce(node: Reduce, ctx: Context) -> Any:
     others = [axis for axis in axes if axis != groups.axis]
     stats = backend.group_reduce(array, node.op, groups, others, node.na_rm, node.min_count)
     return group_result(stats, groups, ctx)
+
+
+# Reductions no backend can take for a kind of value, refused with the reduction's name rather than NumPy's error.
+_TEXT_REFUSED = ("sum", "mean", "std", "var", "median")
+_TIME_REFUSED = ("sum", "std", "var", "median", "any", "all")
+
+
+def _check_reducible(node: Reduce, dtype: np.dtype, error: type[TidyError]) -> None:
+    """Refuse a reduction of text or times that would fail inside NumPy, naming what the value holds."""
+    if dtype.kind in "US" and node.op in _TEXT_REFUSED:
+        raise error(f"{node.text()}: {node.arg.text()} holds text, which {node.op}() cannot reduce; "
+                    f"n() counts positions, and group_by({node.arg.text()}) groups by the text")
+    if dtype.kind == "M" and node.op in _TIME_REFUSED:
+        raise error(f"{node.text()}: {node.arg.text()} holds times, which {node.op}() cannot reduce; "
+                    f"min() and max() take times, and max({node.arg.text()}) - min({node.arg.text()}) is their span")
 
 
 def group_result(stats: Any, groups: Groups, ctx: Context) -> Any:

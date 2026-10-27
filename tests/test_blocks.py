@@ -884,3 +884,98 @@ def test_exact_sums_are_finished_as_each_pass_ends(npy, monkeypatch):
     assert len(finished) == 2  # each request's buckets finished within its pass, not kept until the end
     assert same_bits(got >> pull("total"), in_memory(npy[1], group_by(ring) >> summarise(total=sum(intensity)),
                                                      ["total"])["total"])
+
+
+# ── Decision 4, step 4: an error while a block runs names the block ─────────
+
+
+@pytest.mark.parametrize("threads", [1, 3])
+def test_an_error_in_a_later_block_names_the_block(tmp_path, threads):
+    """The first block passes every check; a value only block 3 holds fails there, and the error says where."""
+    values = cloud(4_000)
+    values[:, 2] = np.clip(values[:, 2], -50, 50)
+    values[2_500, 2] = 500  # outside every bin, in positions 2,001-3,000
+    path = tmp_path / "late.npy"
+    np.save(path, values)
+    frame = read_array(path, dims={"point": infer, "feature": 5}, labels={"feature": NAMES}, field_axis="feature",
+                       blocks=1_000, threads=threads)
+    summary = frame >> group_by(bins(z, [-100, 0, 100])) >> summarise(points=n())  # the first block is fine
+    with pytest.raises(GroupError, match=r"(?s)fall outside every bin.*\n  in block 3 of 4 \(positions 2,001–3,000 on point\)"):
+        summary >> pull("points")
+    rows = frame >> mutate(cell=formula(r"x")) >> group_by(bins(z, [-100, 0, 100])) >> summarise(points=n())
+    with pytest.raises(GroupError, match="in block 3 of 4"):
+        scan(rows, frame >> summarise(points=n()))
+
+
+# ── Decision 4, step 1: an empty block from each source, without a read ─────
+
+
+def schema(frame):
+    """Each variable's axes and type, and the axes' sizes, of a frame."""
+    backend = frame._backend
+    return ({str(name): (tuple(map(str, variable.dims)), variable.dtype.str)
+             for name, variable in backend.variables(frame._data).items()},
+            {str(axis): size for axis, size in backend.sizes(frame._data).items()})
+
+
+def test_an_empty_file_block_reads_nothing_and_has_the_file_s_schema(npy, tmp_path):
+    path, values = npy
+    big_endian = tmp_path / "big.npy"
+    np.save(big_endian, values.astype(">f4"))
+    for source_path in (path, big_endian):
+        frame = read_array(source_path, dims={"point": infer, "feature": 5}, labels={"feature": NAMES},
+                           field_axis="feature", blocks=3_000)
+        source = frame._blocks.source
+        opened = []
+        reopen = source.reopen
+        source.reopen = lambda: opened.append(1) or reopen()
+        empty = source.empty()
+        assert opened == []  # the file is not even mapped
+        variables, sizes = schema(empty)
+        first_variables, first_sizes = schema(source.block(0, 3_000))
+        assert variables == first_variables and sizes == {**first_sizes, "point": 0}
+
+
+def test_an_empty_array_block_has_the_array_s_schema(npy):
+    _, values = npy
+    frame = read_array(values, dims={"point": infer, "feature": 5}, labels={"feature": NAMES}, field_axis="feature",
+                       blocks=3_000)
+    variables, sizes = schema(frame._blocks.source.empty())
+    assert variables == schema(frame)[0] and sizes == {"point": 0, "feature": 5}
+
+
+@pytest.mark.parametrize("as_array", [False, True])
+def test_an_empty_dask_block_computes_no_chunk(npy, as_array):
+    xr = pytest.importorskip("xarray")
+    _, values = npy
+    source, reads = chunked_dataset(values, 3_000)
+    source = source.assign_coords(when=("point", source["x"].data * 0))  # a lazy coordinate along the axis
+    data = source["x"] if as_array else source
+    frame = tidy(data, blocks="chunks")
+    del reads[:]
+    empty = frame._blocks.source.empty()
+    assert reads == []  # isel(point=slice(0, 0)).compute() would read the first chunk
+    variables, sizes = schema(empty)
+    want = schema(frame._blocks.source.block(0, 3_000))
+    assert variables == want[0] and sizes == {**want[1], "point": 0}
+    assert isinstance(xr, object)
+
+
+def test_the_block_verbs_on_an_empty_block_give_the_types_of_a_run(npy):
+    """What decision 4 checks verbs on: a summary's type on no positions is its type on data, with two exceptions
+    recorded in the plan (decision 4) and pinned here, so fixing either fails this test until it is tightened: a text
+    key's labels are numbers on no positions, and min() and max() of float32 are float64 there (labelarray's
+    _reduce_data and the xarray backend fill an empty min or max with a float64 NaN), in memory as on blocks."""
+    path, values = npy
+    frame = read_array(path, dims={"point": infer, "feature": 5}, labels={"feature": NAMES}, field_axis="feature",
+                       blocks=3_000)
+    empty, first = frame._blocks.source.empty(), frame._blocks.source.block(0, 3_000)
+    for pipeline, labels, extremes in ((PIPELINE, set(), {"low", "high"}), (ROWS, set(), set()),
+                                       (VOXELS, {"x_cell", "z_cell"}, {"top"})):
+        on_nothing, on_data = schema(empty >> pipeline)[0], schema(first >> pipeline)[0]
+        assert {name: kind for name, kind in on_nothing.items() if name not in labels | extremes} == \
+            {name: kind for name, kind in on_data.items() if name not in labels | extremes}
+        for name in labels:
+            assert on_data[name][1] == "|O" and on_nothing[name][1] != "|O"
+        for name in extremes:
+            assert on_data[name][1] == "<f4" and on_nothing[name][1] == "<f8"

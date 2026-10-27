@@ -726,3 +726,42 @@ def test_writing_a_field_of_a_read_only_array_does_not_claim_a_memory_map():
     out = frame >> mutate(x=col("x") * 2)
     assert not any("memory-mapped" in note for note in out._notes)
     assert values.tolist() == [[0.0, 1.0], [2.0, 3.0], [4.0, 5.0]]  # the source is never written
+
+
+# ── Reductions of text and times ────────────────────────────────────────────
+
+
+def _labelled():
+    return xr.Dataset({
+        "name": ("point", np.array(["a", "b", "c", "a"])),
+        "group": ("point", [1, 1, 2, 2]),
+        "when": ("point", np.array(["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"], dtype="datetime64[ns]")),
+    })
+
+
+@pytest.mark.parametrize("op", [sum, mean, std, var], ids=lambda op: op.__name__)
+@pytest.mark.parametrize("grouped", [False, True])
+def test_reductions_of_text_are_refused_by_name(op, grouped):
+    """NumPy's own TypeError named neither the summary nor the variable."""
+    name, group = fields("name", "group")
+    frame = tidy(_labelled()) >> group_by(group) if grouped else tidy(_labelled())
+    with pytest.raises(SummariseError, match=rf"{op.__name__}\(name\): name holds text, which {op.__name__}\(\) "
+                                             r"cannot reduce; n\(\) counts positions"):
+        frame >> summarise(s=op(name))
+
+
+@pytest.mark.parametrize("op", [sum, std, var, any, all], ids=lambda op: op.__name__)
+def test_reductions_of_times_are_refused_by_name(op):
+    when, group = fields("when", "group")
+    with pytest.raises(SummariseError, match=rf"when holds times, which {op.__name__}\(\) cannot reduce; "
+                                             r"min\(\) and max\(\) take times"):
+        tidy(_labelled()) >> group_by(group) >> summarise(s=op(when))
+    with pytest.raises(MutateError, match="holds times"):
+        tidy(_labelled()) >> group_by(group) >> mutate(s=op(when))
+
+
+def test_times_still_take_min_and_max():
+    when, group = fields("when", "group")
+    out = tidy(_labelled()) >> group_by(group) >> summarise(first=min(when), last=max(when))
+    assert np.array_equal(out >> pull("first"), np.array(["2024-01-01", "2024-01-03"], dtype="datetime64[ns]"))
+    assert np.array_equal(out >> pull("last"), np.array(["2024-01-02", "2024-01-04"], dtype="datetime64[ns]"))

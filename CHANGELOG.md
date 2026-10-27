@@ -17,6 +17,11 @@
 - `any_of()` given a generator selected nothing (the generator was read
   twice); a `select()` with `~selector` showed the exclusion as an object
   address in its text.
+- Reductions of text (`sum`, `mean`, `std`, `var`, `median`) and of times
+  (`sum`, `std`, `var`, `median`, `any`, `all`) raise a `SummariseError`
+  naming the reduction and the variable, instead of NumPy's `TypeError`.
+- An error raised while a block runs names the block: "in block 3 of 4
+  (positions 2,001–3,000 on point)".
 - Blocks over any source: `read_array(array, ..., blocks=rows)` runs an
   in-memory array block by block, so the verbs' intermediates stay
   block-sized, and `tidy(dataset, blocks={"time": 100})` runs an xarray
