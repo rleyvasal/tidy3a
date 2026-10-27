@@ -21,7 +21,8 @@
   reduction inside `mutate` or `filter`) is refused with a `BlockError`
   when the verb is called (plan decision 10, stage (b), phases 1 to 3). On nuScenes Mini's 122.6M lidar points, a distance
   filter and 1 m voxels took 8.0 s at 1.65 GB in blocks against 36.5 s at
-  7.14 GB in memory.
+  7.14 GB in memory; the same data as a 29.4 GB file on a 24 GB machine
+  ran at the drive's read speed with a peak of 1.85 GB and the same bits.
 
 ## 0.5.1 — 2026-10-26
 

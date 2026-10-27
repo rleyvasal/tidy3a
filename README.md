@@ -255,8 +255,11 @@ which memory-maps the file, as the whole-axis alternative. Measured on all
 122.6M points of nuScenes Mini's lidar sweeps (2.45 GB) through a distance
 filter and 1 m voxels (`cells(x, 1), cells(y, 1), cells(z, 1)`, 84,475 of
 them), blocks of 2M points on four threads took 8.0 s at a peak of
-1.65 GB, against 36.5 s and 7.14 GB in memory, with identical results; the
-plan has the measurements (decision 10, stage (b)).
+1.65 GB, against 36.5 s and 7.14 GB in memory, with identical results. The
+same file written twelve times (29.4 GB, on a 24 GB machine, from a USB
+drive reading at 36 MB/s) ran at the drive's speed with a peak of 1.85 GB
+and the same voxels and mean bits; the plan has the measurements
+(decision 10, stage (b)).
 
 ## Tables: Polars and tidy3
 
