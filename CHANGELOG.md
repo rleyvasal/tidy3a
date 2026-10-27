@@ -1,7 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 — 2026-10-27
 
+- On blocks, `any()` and `all()` of floats and durations count a missing
+  value as in memory: left out (False for `any`, True for `all`), where
+  it was cast to True; and without `na_rm` a group that had one is
+  missing (float64, NaN), as in memory, where blocks gave bool.
+- `write()` stores text index coordinates (field labels) in a Zarr store
+  as variable-length strings, as it does other text: fixed-width text has
+  no Zarr 3 specification, so other Zarr libraries might not read it.
 - `select(where(predicate))` with a predicate of the caller's, which
   picks columns by their values, is refused on data read with `blocks=`,
   when the verb is called: since 0.6.0 such a frame is checked on a block
