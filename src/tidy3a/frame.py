@@ -153,7 +153,8 @@ class TidyArray:
 
 @translating
 def tidy(data: Any, *, axis: str | None = None, field_axis: str | None = None,
-         fields: Sequence[str] | None = None, backend: str | None = None) -> TidyArray:
+         fields: Sequence[str] | None = None, backend: str | None = None,
+         blocks: Mapping[str, Any] | str | None = None, threads: int = 1) -> TidyArray:
     """Wrap an xarray ``DataArray`` or ``Dataset``, or read a table, for tidy3a verbs.
 
     An unnamed DataArray becomes the variable ``values``. ``field_axis=``
@@ -163,6 +164,13 @@ def tidy(data: Any, *, axis: str | None = None, field_axis: str | None = None,
 
     Wrapping preserves metadata and backing storage without reading
     measurement values. Keep file-backed sources open until collection.
+
+    ``blocks={"time": 100}`` runs the verbs block by block along that axis,
+    each block computed and wrapped on its own, so lazy, file-backed, and
+    Dask-backed data is read a block at a time (``read_array``'s
+    ``blocks=``, for datasets); ``{"time": "chunks"}``, or ``"chunks"``
+    alone when one axis is chunked, takes the data's own Dask chunks as the
+    blocks, so each is computed once. ``threads`` blocks run at a time.
 
     ``backend=`` is ``"xarray"`` or ``"numpy"``; without it, the default
     from ``set_backend()`` is used, or with none chosen, NumPy where it holds
@@ -181,6 +189,12 @@ def tidy(data: Any, *, axis: str | None = None, field_axis: str | None = None,
     if axis is not None or fields is not None:
         raise TidyError("axis= and fields= are for tables (Polars DataFrames and tidy3 frames), "
                         f"not {type(data).__name__}")
+    if blocks is not None:
+        from tidy3a.chunked import ChunkedFrame, DatasetSource
+
+        source = data.to_xarray() if isinstance(data, TidyArray) else data
+        blocked, rows = _blocked_axis(blocks, source)
+        return ChunkedFrame.open(DatasetSource(source, blocked, field_axis, backend), rows, threads)
     if isinstance(data, TidyArray):
         if backend is not None and get_backend(backend) is not data._backend:
             source = data.to_xarray()
@@ -210,6 +224,25 @@ def tidy(data: Any, *, axis: str | None = None, field_axis: str | None = None,
     if field_axis is not None:
         check_field_axis(dataset, field_axis, TidyError, holder)
     return TidyArray(dataset, backend=holder, field_axis=field_axis, source=source)
+
+
+def _blocked_axis(blocks: Any, data: Any) -> tuple[str, Any]:
+    """The axis ``blocks=`` names and its block size: one axis mapped to positions or "chunks", or "chunks" alone."""
+    if blocks == "chunks":
+        from tidy3a.chunked import _chunks_along
+
+        chunked = [str(dim) for dim in getattr(data, "dims", ()) if _chunks_along(data, dim) is not None]
+        if len(chunked) != 1:
+            listed = ", ".join(chunked) or "none"
+            raise TidyError(f'blocks="chunks" needs one Dask-chunked axis to block along (chunked: {listed}); '
+                            'name it: blocks={"time": "chunks"}')
+        return chunked[0], "chunks"
+    if isinstance(blocks, Mapping) and len(blocks) == 1:
+        (axis, rows), = blocks.items()
+        if isinstance(axis, str):
+            return axis, rows
+    raise TidyError('blocks= maps one axis to a number of positions or "chunks", e.g. blocks={"time": 100}, '
+                    f"not {blocks!r}")
 
 
 def check_field_axis(data: Any, axis: Any, error: type[TidyError], backend: Any = None) -> None:

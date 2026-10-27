@@ -17,6 +17,7 @@ from tidy3a import (
     MutateError,
     ReadError,
     SummariseError,
+    TidyError,
     all,
     any,
     bins,
@@ -40,6 +41,7 @@ from tidy3a import (
     std,
     sum,
     summarise,
+    tidy,
     var,
 )
 from tidy3a import slice as take
@@ -264,8 +266,6 @@ def test_block_options_are_checked(npy, options, message):
     options = {"field_axis": "feature", **options}
     with pytest.raises(ReadError, match=message):
         read_array(path, dims={"point": infer, "feature": 5}, labels={"feature": NAMES}, **options)
-    with pytest.raises(ReadError, match="already loaded"):
-        read_array(np.zeros((4, 5), "float32"), dims={"point": infer, "feature": 5}, blocks=2)
 
 
 def test_an_empty_file_gives_an_empty_summary(tmp_path):
@@ -435,3 +435,138 @@ def test_a_block_cannot_answer_median_or_over(npy):
         frame >> group_by(ring) >> summarise(middle=median(intensity))
     with pytest.raises(BlockError, match="names axes"):
         frame >> summarise(total=sum(intensity, over="point"))
+
+
+# ── Milestone 11, step 1: blocks over any source ────────────────────────────
+
+
+def dataset(values):
+    import xarray as xr
+
+    return xr.Dataset({name: ("point", values[:, column]) for column, name in enumerate(NAMES)})
+
+
+def test_an_array_in_memory_runs_in_blocks(npy):
+    _, values = npy
+    frame = read_array(values, dims={"point": infer, "feature": 5}, labels={"feature": NAMES}, field_axis="feature",
+                       blocks=3_000, threads=2)
+    assert "blocks: 7 of 3,000 positions on point" in repr(frame)
+    want = in_memory(values, PIPELINE, COLUMNS)
+    out = frame >> PIPELINE
+    for name in COLUMNS:
+        assert same_bits(out >> pull(name), want[name]), name
+    rows = frame >> ROWS
+    assert same_bits(rows >> pull("point"), in_memory(values, ROWS, ["point"])["point"])
+
+
+def test_a_dataset_runs_in_blocks(npy):
+    _, values = npy
+    pytest.importorskip("xarray")
+    source = dataset(values)
+    pipeline = (mutate(distance=sqrt(x * x + y * y + z * z)) >> filter(distance <= 60) >> group_by(ring)
+                >> summarise(points=n(), brightness=mean(intensity), low=min(z)))
+    columns = ["ring", "points", "brightness", "low"]
+    want = tidy(source) >> pipeline
+    frame = tidy(source, blocks={"point": 3_000}, threads=2)
+    assert "the first of 7 blocks of 3,000 positions on point" in str(frame.explain())
+    out = frame >> pipeline
+    for name in columns:
+        assert same_bits(out >> pull(name), want >> pull(name)), name
+    joined = tidy(source, blocks={"point": 3_000}) >> filter(x > 0) >> select("x", "ring")
+    assert same_bits(joined >> pull("x"), tidy(source) >> filter(x > 0) >> pull("x"))
+
+
+def chunked_dataset(values, chunk):
+    """Each variable in Dask chunks of *chunk* rows, each chunk read from a delayed function that counts its reads."""
+    da = pytest.importorskip("dask.array")
+    import xarray as xr
+    from dask import delayed
+
+    reads = []
+
+    @delayed
+    def read(name, start, stop):
+        reads.append((name, start))
+        return values[start:stop, NAMES.index(name)]
+
+    variables = {}
+    for name in NAMES:
+        blocks = [da.from_delayed(read(name, start, min(start + chunk, len(values))),
+                                  shape=(min(start + chunk, len(values)) - start,), dtype=values.dtype)
+                  for start in range(0, len(values), chunk)]
+        variables[name] = ("point", da.concatenate(blocks))
+    return xr.Dataset(variables), reads
+
+
+@pytest.mark.parametrize("threads", [1, 3])
+@pytest.mark.parametrize("blocks", [{"point": "chunks"}, "chunks"])
+def test_a_dask_backed_dataset_reads_each_chunk_once(npy, blocks, threads):
+    _, values = npy
+    source, reads = chunked_dataset(values, 3_000)
+    pipeline = filter(x > 0) >> group_by(ring) >> summarise(points=n(), brightness=mean(intensity))
+    frame = tidy(source, blocks=blocks, threads=threads)
+    assert "blocks: 7 on point, the data's own chunks" in repr(frame)
+    assert len(reads) == 5  # the first block: one chunk of each variable
+    out = frame >> pipeline
+    brightness = out >> pull("brightness")
+    from collections import Counter
+
+    every = Counter((name, start) for name in NAMES for start in range(0, 20_000, 3_000))
+    assert Counter(reads) == every + Counter((name, 0) for name in NAMES)  # each chunk once, the first block's twice
+    want = in_memory(values, pipeline, ["brightness"])["brightness"]
+    assert same_bits(brightness, want)
+
+
+def test_unequal_chunks(npy):
+    da = pytest.importorskip("dask.array")
+    _, values = npy
+    source, _ = chunked_dataset(values, 7_000)
+    source = source.chunk({"point": (5_000, 9_000, 6_000)})
+    assert source.chunks["point"] == (5_000, 9_000, 6_000)
+    out = tidy(source, blocks="chunks") >> group_by(ring) >> summarise(points=n(), brightness=mean(intensity))
+    for name in ("points", "brightness"):
+        assert same_bits(out >> pull(name), in_memory(values, group_by(ring) >> summarise(
+            points=n(), brightness=mean(intensity)), [name])[name]), name
+
+
+def test_gridded_data_blocked_along_time():
+    xr = pytest.importorskip("xarray")
+    rng = np.random.default_rng(3)
+    temperature = (rng.normal(size=(40, 5, 6)) * 10 + 280).astype("float32")
+    temperature[3, 2, 2] = np.nan
+    day = np.repeat(np.arange(8), 5)
+    source = xr.Dataset({"temperature": (("time", "lat", "lon"), temperature), "day": ("time", day)},
+                        coords={"lat": np.arange(5), "lon": np.arange(6) * 10})
+    t, d = fields("temperature", "day")
+    grouped = filter(d < 6) >> group_by(d) >> summarise(points=n(), warmth=mean(t, na_rm=True), top=max(t),
+                                                         spread=std(t, na_rm=True))
+    whole = summarise(points=n(), warmth=mean(t, na_rm=True), coldest=min(t, na_rm=True))
+    for pipeline, columns in ((grouped, ["day", "points", "warmth", "top", "spread"]),
+                              (whole, ["points", "warmth", "coldest"])):
+        want = tidy(source) >> pipeline
+        out = tidy(source, blocks={"time": 7}) >> pipeline
+        for name in columns:
+            got, expected = out >> pull(name), want >> pull(name)
+            if name == "spread":
+                assert got.dtype == expected.dtype and np.allclose(got, expected, rtol=1e-5), name
+            else:
+                assert same_bits(got, expected), name
+
+
+def test_block_options_on_datasets_are_checked(npy):
+    xr = pytest.importorskip("xarray")
+    _, values = npy
+    source = dataset(values)
+    with pytest.raises(ReadError, match="not chunked along point"):
+        tidy(source, blocks={"point": "chunks"})
+    with pytest.raises(TidyError, match="one Dask-chunked axis"):
+        tidy(source, blocks="chunks")
+    with pytest.raises(TidyError, match='"row", which is not an axis'):
+        tidy(source, blocks={"row": 100})
+    with pytest.raises(TidyError, match="maps one axis"):
+        tidy(source, blocks={"point": 100, "feature": 5})
+    with pytest.raises(ReadError, match="positions"):
+        tidy(source, blocks={"point": 0})
+    path = npy[0]
+    with pytest.raises(ReadError, match='blocks="chunks" takes'):
+        read_array(path, dims={"point": infer, "feature": 5}, blocks="chunks")

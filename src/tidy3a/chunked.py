@@ -1,48 +1,57 @@
-"""A file read in blocks, and the verbs run over every block (plan milestone 10, decision 10, stage b).
+"""Data read in blocks, and the verbs run over every block (plan milestone 10, decision 10, stage b; milestone 11).
 
-``read_array(path, ..., blocks=rows)`` gives a ``ChunkedFrame``: a frame
-holding the file's first block of ``rows`` positions on its first axis.
-Each verb runs on that block as it is called, so its checks, notes,
-errors, and ``explain()`` appear at once, as they do in memory, and the
-frame records the verb. When a result is asked for (``collect()``,
-``pull``, ``to_dict()``, or a verb that needs the whole axis), the recorded
-verbs run over every block, ``threads`` blocks at a time: a pipeline ending
-in ``summarise`` merges the blocks' summaries into one table, so memory is
-the blocks in flight and the groups, not the file; any other pipeline
+``read_array(path, ..., blocks=rows)``, ``read_array(array, ..., blocks=rows)``,
+and ``tidy(dataset, blocks={axis: rows})`` give a ``ChunkedFrame``: a frame
+holding the data's first block of ``rows`` positions on one axis. Each verb
+runs on that block as it is called, so its checks, notes, errors, and
+``explain()`` appear at once, as they do in memory, and the frame records
+the verb. When a result is asked for (``collect()``, ``pull``,
+``to_dict()``, or a verb that needs the whole axis), the recorded verbs run
+over every block, ``threads`` blocks at a time: a pipeline ending in
+``summarise`` merges the blocks' summaries into one table, so memory is the
+blocks in flight and the groups, not the data; any other pipeline
 concatenates the blocks' rows, for data that fits once filtered.
+
+The blocks come from a source (``FileSource``, ``ArraySource``,
+``DatasetSource``): a file reopened per block, an in-memory array sliced
+per block, or an xarray dataset, lazy or not, whose block is computed and
+wrapped as ``tidy()`` wraps it; ``"chunks"`` takes a Dask-backed dataset's
+own chunk boundaries as the blocks, so each chunk is computed once. The
+blocked axis is an observation axis, and a block holds every other axis
+whole, so a block of time steps is that many whole grids.
 
 What a block can answer: ``select``, ``filter``, and ``mutate`` of
 row-wise expressions; one ``group_by`` of value keys (plain fields,
 ``cells``, ``bins``, ``rounded``, several at once, with or without
 ``dropna``); and a ``summarise`` of ``n()``, ``sum``, ``mean``, ``min``,
-and ``max`` of row-wise expressions, or expressions of those
-(``mean(x) / n()``). Each key's groups are merged across blocks in the
-order the key gives them (a cell's low edge, a bin's place among the
-edges, a value's order), the missing group last, and several keys combine
-as one code per occurring combination, as ``group_by`` does in memory.
-Float32 sums and means are the same bits as in memory whatever the block
-size (``labelarray.sums``: the blocks' estimates add, and the groups the
-error bound cannot settle get a second pass over the file for their exact
-sums). Float64 and integer sums and means add per block in float64 or
-int64 and are repeatable, not bit-identical with the in-memory results.
-Anything else is refused with a ``BlockError`` when the verb is called,
-naming what needs the whole axis.
+``max``, ``std``, ``var``, ``any``, and ``all`` of row-wise expressions, or
+expressions of those (``mean(x) / n()``). Each key's groups are merged
+across blocks in the order the key gives them (a cell's low edge, a bin's
+place among the edges, a value's order), the missing group last, and
+several keys combine as one code per occurring combination, as
+``group_by`` does in memory. Float32 sums and means are the same bits as
+in memory whatever the block size (``labelarray.sums``: the blocks'
+estimates add, and the groups the error bound cannot settle get a second
+pass for their exact sums). Float64 and integer sums and means, and the
+spreads, add per block in float64 or int64 and are repeatable, not
+bit-identical with the in-memory results. Anything else is refused with a
+``BlockError`` when the verb is called, naming what needs the whole axis.
 """
 
 from __future__ import annotations
 
 import copy
 import math
-from collections.abc import Callable, Hashable, Sequence
+from collections.abc import Callable, Hashable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 from labelarray import sums
 from labelarray.transforms import Bins, Duration, GridCells
 
-from tidy3a.errors import BlockError, SummariseError, translating
+from tidy3a.errors import BlockError, ReadError, SummariseError, TidyError, translating
 from tidy3a.expr import (
     AxisKey,
     BinOp,
@@ -65,27 +74,31 @@ from tidy3a.plan import Pipeline, Record, Step, snapshot
 
 ROW_WISE = ("select", "filter", "mutate")
 COMBINABLE = ("n", "sum", "mean", "min", "max", "std", "var", "any", "all")
-WHOLE_AXIS = "read the file with lazy=True, which memory-maps it, to run this on every position"
+WHOLE_AXIS = "read the data with lazy=True, which memory-maps a file, or load it, to run this on every position"
 
 
-@dataclass(frozen=True)
-class Blocks:
-    """Where the blocks come from: the file reopened per block, and the reader's options applied to each."""
+# ── Sources ─────────────────────────────────────────────────────────────────
 
-    reopen: Callable[[], np.ndarray]
-    size: int  # positions on the blocked axis
+
+class Source:
+    """Where blocks come from: ``size`` positions on ``axis``, a block of them as a frame, and natural chunks."""
+
     axis: str
-    rows: int
-    threads: int
-    build: Callable[[np.ndarray, int, int], TidyArray]
-    labelled: bool = False  # whether the blocked axis has labels of its own (else filter labels it by position)
+    size: int
+    chunks: list[tuple[int, int]] | None = None  # the storage's own block boundaries, if it has any
 
-    @property
-    def spans(self) -> list[tuple[int, int]]:
-        return [(start, min(start + self.rows, self.size)) for start in range(0, self.size, self.rows)] or [(0, 0)]
+    def block(self, start: int, stop: int) -> TidyArray:
+        raise NotImplementedError
 
-    def load(self, start: int, stop: int) -> TidyArray:
-        """One block as a frame: a copy out of the map, which closes with it."""
+
+class FileSource(Source):
+    """A file memory-mapped again for each block; the block is a copy, and the map closes with it."""
+
+    def __init__(self, reopen: Callable[[], np.ndarray], size: int, axis: str,
+                 build: Callable[[np.ndarray, int, int], TidyArray]):
+        self.reopen, self.size, self.axis, self.build = reopen, size, axis, build
+
+    def block(self, start: int, stop: int) -> TidyArray:
         mapped = self.reopen()
         values = np.array(mapped[start:stop])
         del mapped
@@ -94,22 +107,115 @@ class Blocks:
         return self.build(values, start, stop)
 
 
+class ArraySource(Source):
+    """An array in memory; each block is a view of it, so what blocks bound is the verbs' intermediates."""
+
+    def __init__(self, values: np.ndarray, axis: str, build: Callable[[np.ndarray, int, int], TidyArray]):
+        self.values, self.size, self.axis, self.build = values, int(values.shape[0]), axis, build
+
+    def block(self, start: int, stop: int) -> TidyArray:
+        return self.build(self.values[start:stop], start, stop)
+
+
+class DatasetSource(Source):
+    """An xarray Dataset or DataArray, lazy or not: a block is its positions on *axis*, computed, wrapped by ``tidy``."""
+
+    def __init__(self, data: Any, axis: str, field_axis: str | None, backend: str | None):
+        from tidy3a.backend import is_xarray_object
+
+        if not is_xarray_object(data):
+            raise TidyError(f"blocks= reads xarray objects in blocks, not {type(data).__name__}")
+        if axis not in data.dims:
+            axes = ", ".join(str(dim) for dim in data.dims) or "none"
+            raise TidyError(f'blocks= names "{axis}", which is not an axis of this data (axes: {axes})')
+        if axis == field_axis:
+            raise TidyError(f'blocks= reads runs of "{axis}", which field_axis= turns into columns; '
+                            "block an observation axis")
+        self.data, self.axis, self.field_axis, self.backend = data, axis, field_axis, backend
+        self.size = int(data.sizes[axis])
+        self.chunks = _chunks_along(data, axis)
+
+    def block(self, start: int, stop: int) -> TidyArray:
+        from tidy3a.frame import tidy
+
+        return tidy(self.data.isel({self.axis: slice(start, stop)}).compute(), field_axis=self.field_axis,
+                    backend=self.backend)
+
+
+def _chunks_along(data: Any, axis: str) -> list[tuple[int, int]] | None:
+    """A Dask-backed dataset's chunk boundaries along *axis*, or None when it is not chunked there."""
+    chunks = getattr(data, "chunks", None)
+    if not chunks:
+        return None
+    sizes = chunks.get(axis) if isinstance(chunks, Mapping) else chunks[data.dims.index(axis)]
+    if not sizes:
+        return None
+    edges = np.concatenate([[0], np.cumsum(sizes)])
+    return [(int(a), int(b)) for a, b in zip(edges[:-1], edges[1:])]
+
+
+@dataclass(frozen=True)
+class Blocks:
+    """The blocks of a source: its spans, how many run at once, and whether the blocked axis has labels of its own."""
+
+    source: Source
+    rows: int | str  # positions per block, or "chunks" for the source's own boundaries
+    threads: int
+    labelled: bool = False  # else filter labels the axis by position, counted within each block
+
+    @property
+    def axis(self) -> str:
+        return self.source.axis
+
+    @property
+    def size(self) -> int:
+        return self.source.size
+
+    @property
+    def spans(self) -> list[tuple[int, int]]:
+        if self.rows == "chunks":
+            return self.source.chunks or [(0, self.size)]
+        rows = int(self.rows)
+        return [(start, min(start + rows, self.size)) for start in range(0, self.size, rows)] or [(0, 0)]
+
+    def load(self, start: int, stop: int) -> TidyArray:
+        return self.source.block(start, stop)
+
+    def words(self, counted: str = "") -> str:
+        """How many blocks of what: "7 blocks of 3,000 positions on point", or "7 on point, the data's own chunks"."""
+        count = f"{len(self.spans):,}{counted}"
+        if self.rows == "chunks":
+            return f"{count} on {self.axis}, the data's own chunks"
+        return f"{count} of {int(self.rows):,} positions on {self.axis}"
+
+
+def check_rows(rows: Any, threads: Any, source: Source) -> None:
+    """``blocks=`` is a positive number of positions, or "chunks" for a source that has them."""
+    if rows == "chunks":
+        if source.chunks is None:
+            raise ReadError('blocks="chunks" takes a Dask-backed dataset\'s chunks along the axis; '
+                            f"this data is not chunked along {source.axis}, so give a number of positions")
+    elif isinstance(rows, bool) or not isinstance(rows, (int, np.integer)) or rows < 1:
+        raise ReadError(f'blocks= must be a positive number of positions, or "chunks", not {rows!r}')
+    if isinstance(threads, bool) or not isinstance(threads, (int, np.integer)) or threads < 1:
+        raise ReadError(f"threads= must be a positive number, not {threads!r}")
+
+
 class ChunkedFrame(TidyArray):
-    """The first block of a file read with ``blocks=``, with the verbs to run over every block."""
+    """The first block of data read with ``blocks=``, with the verbs to run over every block."""
 
     __slots__ = ("_blocks", "_steps", "_plan", "_result")
 
     @classmethod
-    def open(cls, reopen: Callable[[], np.ndarray], size: int, axis: str, rows: int, threads: int,
-             build: Callable[[np.ndarray, int, int], TidyArray]) -> ChunkedFrame:
-        blocks = Blocks(reopen, size, axis, rows, threads, build)
+    def open(cls, source: Source, rows: int | str, threads: int) -> ChunkedFrame:
+        check_rows(rows, threads, source)
+        blocks = Blocks(source, rows, threads)
         first = blocks.load(*blocks.spans[0])
-        blocks = Blocks(reopen, size, axis, rows, threads, build, first._backend.has_labels(first._data, axis))
+        blocks = Blocks(source, rows, threads, first._backend.has_labels(first._data, source.axis))
         frame = cls._wrap(first, blocks, ())
         count = len(blocks.spans)
         frame._record = Record(first._source or "data", snapshot(first),
-                               preview=f"the first of {count:,} block{'' if count == 1 else 's'} of {rows:,} "
-                                       f"positions on {axis}")
+                               preview=f"the first of {blocks.words(' block' if count == 1 else ' blocks')}")
         return frame
 
     @classmethod
@@ -164,10 +270,8 @@ class ChunkedFrame(TidyArray):
     def __repr__(self) -> str:
         if self._result is not None:
             return repr(self._result)
-        blocks = self._blocks
-        count = len(blocks.spans)
-        return (f"{TidyArray.__repr__(self)}\nblocks: {count:,} of {blocks.rows:,} positions on {blocks.axis}; "
-                "the first block is shown, and every block runs when a result is asked for")
+        return (f"{TidyArray.__repr__(self)}\nblocks: {self._blocks.words()}; the first block is shown, and every "
+                "block runs when a result is asked for")
 
 
 # ── Checks at verb time ─────────────────────────────────────────────────────
@@ -419,12 +523,13 @@ class _Table:
                     variance = np.where(missing > 0, np.nan, variance)
                 columns[hidden] = np.sqrt(variance) if node.op == "std" else variance
             elif kind == "float":
-                total, present = held
-                result = total if node.op == "sum" else total / (present if node.na_rm else self.counts)
+                total, present, counted = held
+                result = total if node.op == "sum" else total / (present if node.na_rm else counted)
                 columns[hidden] = _at_least(result, present, node)
             else:
-                result = held if node.op == "sum" else held / self.counts
-                columns[hidden] = _at_least(result, self.counts, node)
+                total, counted = held
+                result = total if node.op == "sum" else total / counted
+                columns[hidden] = _at_least(result, counted, node)
         return columns
 
     def group_codes(self) -> list[np.ndarray]:
@@ -467,22 +572,31 @@ def _execute(frame: ChunkedFrame) -> TidyArray:
     return _result(frame, plan, table, columns)
 
 
-def _block(plan: _Plan, blocks: Blocks, span: tuple[int, int]):
-    """One block through the row-wise verbs: each key's groups and codes, the rows kept, and each reduction's values.
+@dataclass
+class _Rows:
+    """One block through the row-wise verbs: its rows' codes per key, and what each reduction sees of them."""
 
-    Gives, per key, its labels without the missing group, the missing
-    group's label if the block had one, how many rows it dropped, and each
-    row's local code (the missing group last); then the rows kept (None
-    when every row is), and the reductions' values on those rows.
-    """
+    found: list[tuple[np.ndarray, Any, int]]  # per key: labels without the missing group, its label, rows dropped
+    local: list[np.ndarray]  # per key: each kept row's local code (the missing group last)
+    kept: int  # rows kept
+    dropped: int  # rows left out for a missing key
+    per_position: int  # positions on the other observation axes, which n() counts per row
+    values: dict[str, tuple[np.ndarray, int]]  # per reduction: its values, flattened with the row first, and per row
+
+
+def _block(plan: _Plan, blocks: Blocks, span: tuple[int, int]) -> _Rows:
+    """One block through the row-wise verbs, grouped: its keys' groups and codes, and the reductions' values."""
     block = blocks.load(*span) >> plan.before
-    backend = block._backend
-    size = backend.sizes(block._data)[blocks.axis]
+    backend, axis = block._backend, blocks.axis
+    size = backend.sizes(block._data)[axis]
     found: list[tuple[np.ndarray, Any, int]] = []
     local: list[np.ndarray] = []
     kept = np.ones(size, dtype=bool)
     for part in plan.parts:
         groups = resolve_value_key(part, block, [])
+        if groups.axis != axis:
+            raise BlockError(f"group_by({part.label}) groups {groups.axis}, not the blocked axis {axis}; "
+                             f"{WHOLE_AXIS}")
         labels, codes = list(groups.labels), np.asarray(groups.codes)
         missing = None
         if groups.dropped:
@@ -494,19 +608,37 @@ def _block(plan: _Plan, blocks: Blocks, span: tuple[int, int]):
         local.append(codes)
     all_kept = bool(kept.all())
     ctx = Context(block, verb="summarise", error=SummariseError, grouped=False)
-    values: dict[str, np.ndarray] = {}
+    values: dict[str, tuple[np.ndarray, int]] = {}
     for hidden, node in plan.reductions.items():
         if node.arg is None:
             continue
         value = evaluate(node.arg, ctx)
-        if not backend.is_array(value) or tuple(value.dims) != (blocks.axis,):
+        if not backend.is_array(value) or axis not in value.dims:
             dims = ", ".join(map(str, getattr(value, "dims", ()))) or "no axis"
-            raise BlockError(f"{node.text()}: {node.arg.text()} varies along {dims}; on blocks a summary's "
-                             f"argument varies along {blocks.axis} alone; {WHOLE_AXIS}")
-        values[hidden] = value.values if all_kept else value.values[kept]
-    kept_count = size if all_kept else int(kept.sum())
-    return (found, [codes if all_kept else codes[kept] for codes in local], kept_count, values,
-            size - kept_count)
+            raise BlockError(f"{node.text()}: {node.arg.text()} varies along {dims}, not the blocked axis {axis}; "
+                             f"{WHOLE_AXIS}")
+        if block._field_axis in value.dims:
+            raise BlockError(f"{node.text()}: {node.arg.text()} varies along the field axis {block._field_axis}; "
+                             "name one field")
+        array = np.moveaxis(value.values, list(value.dims).index(axis), 0)
+        if not all_kept:
+            array = array[kept]
+        each = int(np.prod(array.shape[1:], dtype=np.int64))  # values per row: the other axes' positions
+        values[hidden] = (array.reshape(len(array) * each), each)
+    return _Rows(found, [codes if all_kept else codes[kept] for codes in local], size if all_kept else int(kept.sum()),
+                 size - (size if all_kept else int(kept.sum())), _per_position(block, axis), values)
+
+
+def _per_position(block: TidyArray, axis: str) -> int:
+    """What ``n()`` counts per row: positions on the other observation axes shared by every non-scalar variable."""
+    backend, data = block._backend, block._data
+    sizes = backend.sizes(data)
+    shared = set(sizes)
+    for variable in backend.variables(data).values():
+        if variable.ndim:
+            shared &= set(variable.dims)
+    others = [dim for dim in sizes if dim in shared and dim not in (axis, block._field_axis)]
+    return int(np.prod([sizes[dim] for dim in others], dtype=np.int64))
 
 
 def _combined(local: Sequence[tuple[np.ndarray, Any, np.ndarray]], table: _Table) -> np.ndarray:
@@ -520,52 +652,52 @@ def _combined(local: Sequence[tuple[np.ndarray, Any, np.ndarray]], table: _Table
 def _partial(plan: _Plan, blocks: Blocks, span: tuple[int, int]):
     """One block's groups; each combination's local codes per key, with the key's labels, to map once the table has
     taken the groups in; the combinations' row counts; each reduction's pieces per combination; and the rows dropped."""
-    found, local, size, values, dropped = _block(plan, blocks, span)
-    if size == 0:
-        return found, None, None, None, dropped
+    rows = _block(plan, blocks, span)
+    if rows.kept == 0:
+        return rows.found, None, None, None, rows.dropped
     # Codes per local combination, so the pieces are made once per group, not once per row.
     if plan.parts:
-        sizes = [len(labels) + (missing is not None) for labels, missing, _ in found]
-        keys, codes = np.unique(np.ravel_multi_index(local, sizes), return_inverse=True)
+        sizes = [len(labels) + (missing is not None) for labels, missing, _ in rows.found]
+        keys, codes = np.unique(np.ravel_multi_index(rows.local, sizes), return_inverse=True)
         codes = codes.reshape(-1)
-        combos = [(labels, missing, where) for (labels, missing, _), where in zip(found, np.unravel_index(keys, sizes))]
+        combos = [(labels, missing, where)
+                  for (labels, missing, _), where in zip(rows.found, np.unravel_index(keys, sizes))]
     else:
-        keys, codes, combos = np.zeros(1, dtype=np.int64), np.zeros(size, dtype=np.intp), []
+        keys, codes, combos = np.zeros(1, dtype=np.int64), np.zeros(rows.kept, dtype=np.intp), []
     count = len(keys)
-    counts = np.bincount(codes, minlength=count).astype(np.int64)
+    counts = np.bincount(codes, minlength=count).astype(np.int64) * rows.per_position
     pieces: dict[str, tuple[str, np.ndarray]] = {}
-    order = starts = None
     for hidden, node in plan.reductions.items():
         if node.op == "n":
             continue
-        value = values[hidden]
-        if node.op in ("min", "max", "any", "all"):
-            if order is None:
-                order = np.argsort(codes, kind="stable")
-                starts = np.concatenate([[0], np.cumsum(counts)[:-1]])
-            if node.op in ("any", "all"):
-                pieces[hidden] = ("flag", _extreme(node).reduceat(value[order].astype(bool), starts))
-            else:
-                pieces[hidden] = ("extreme", _extreme(node).reduceat(value[order], starts))
-        elif node.op in ("std", "var"):
-            pieces[hidden] = ("moments", _moments(value, codes, count))
-        elif value.dtype == np.float32:
-            pieces[hidden] = ("estimate", sums.chunk_estimate(value, (0,), na_rm=node.na_rm, codes=codes,
-                                                               groups=count))
-        elif value.dtype.kind == "f":
-            missing = np.isnan(value)
-            summed = np.where(missing, 0.0, value) if node.na_rm else value
-            pieces[hidden] = ("float", np.stack([np.bincount(codes, weights=summed, minlength=count),
-                                                 np.bincount(codes, weights=~missing, minlength=count)]))
-        elif value.dtype.kind in "biu":
-            if order is None:
-                order = np.argsort(codes, kind="stable")
-                starts = np.concatenate([[0], np.cumsum(counts)[:-1]])
-            pieces[hidden] = ("int", np.add.reduceat(value[order].astype(np.int64), starts))
-        else:
-            raise BlockError(f"{node.text()}: {node.op} of {value.dtype} values is not handled on blocks; "
-                             f"{WHOLE_AXIS}")
-    return found, combos, counts, pieces, dropped
+        value, each = rows.values[hidden]
+        pieces[hidden] = _pieces(node, value, codes if each == 1 else np.repeat(codes, each), count)
+    return rows.found, combos, counts, pieces, rows.dropped
+
+
+def _pieces(node: Reduce, value: np.ndarray, codes: np.ndarray, count: int) -> tuple[str, np.ndarray]:
+    """One reduction's pieces per group from a block's values and their codes."""
+    if node.op in ("min", "max", "any", "all"):
+        order = np.argsort(codes, kind="stable")
+        starts = np.concatenate([[0], np.cumsum(np.bincount(codes, minlength=count))[:-1]])
+        if node.op in ("any", "all"):
+            return "flag", _extreme(node).reduceat(value[order].astype(bool), starts)
+        return "extreme", _extreme(node).reduceat(value[order], starts)
+    if node.op in ("std", "var"):
+        return "moments", _moments(value, codes, count)
+    if value.dtype == np.float32:
+        return "estimate", sums.chunk_estimate(value, (0,), na_rm=node.na_rm, codes=codes, groups=count)
+    counted = np.bincount(codes, minlength=count).astype(np.float64)
+    if value.dtype.kind == "f":
+        missing = np.isnan(value)
+        summed = np.where(missing, 0.0, value) if node.na_rm else value
+        return "float", np.stack([np.bincount(codes, weights=summed, minlength=count),
+                                  np.bincount(codes, weights=~missing, minlength=count), counted])
+    if value.dtype.kind in "biu":
+        order = np.argsort(codes, kind="stable")
+        starts = np.concatenate([[0], np.cumsum(np.bincount(codes, minlength=count))[:-1]])
+        return "int", np.stack([np.add.reduceat(value[order].astype(np.int64), starts), counted.astype(np.int64)])
+    raise BlockError(f"{node.text()}: {node.op} of {value.dtype} values is not handled on blocks; {WHOLE_AXIS}")
 
 
 def _extreme(node: Reduce) -> Any:
@@ -619,17 +751,19 @@ def _exact(plan: _Plan, blocks: Blocks, table: _Table, pool: ThreadPoolExecutor,
     assert keys is not None
 
     def block(span: tuple[int, int]) -> Any:
-        found, local, size, values, _ = _block(plan, blocks, span)
-        if size == 0:
+        rows = _block(plan, blocks, span)
+        if rows.kept == 0:
             return 0
         if table.parts:
-            codes = np.ravel_multi_index([part.codes(labels, missing is not None)[rows]
-                                          for part, (labels, missing, _), rows in zip(table.parts, found, local)],
-                                         table.sizes)
+            codes = np.ravel_multi_index([part.codes(labels, missing is not None)[local]
+                                          for part, (labels, missing, _), local in zip(table.parts, rows.found,
+                                                                                        rows.local)], table.sizes)
             codes = np.searchsorted(keys, codes)
         else:
-            codes = np.zeros(size, dtype=np.intp)
-        return sums.chunk_exact(values[hidden], (0,), chosen, codes=codes, groups=len(keys))
+            codes = np.zeros(rows.kept, dtype=np.intp)
+        value, each = rows.values[hidden]
+        return sums.chunk_exact(value, (0,), chosen, codes=codes if each == 1 else np.repeat(codes, each),
+                                groups=len(keys))
 
     buckets: Any = 0
     for part in pool.map(block, blocks.spans):  # the buckets add in any order

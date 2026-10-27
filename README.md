@@ -209,7 +209,11 @@ positions on its first axis. The result holds the first block, so each verb
 runs on it as it is called, with its checks, notes, and `explain()`; when a
 result is asked for (`pull`, `collect()`, `to_dict()`), the verbs run over
 every block, `threads` blocks at a time, and the blocks' summaries merge,
-so memory is the blocks in flight and the groups, not the file:
+so memory is the blocks in flight and the groups, not the file. The same
+`blocks=` on an in-memory array keeps the verbs' intermediates block-sized,
+and `tidy(dataset, blocks={"time": 100})` runs an xarray dataset, lazy or
+Dask-backed, a block of time steps at a time (`blocks="chunks"` takes its
+own chunks), each block computed and wrapped on its own:
 
 ```python
 import os

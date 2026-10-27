@@ -237,13 +237,15 @@ def read_array(
     (bytes to skip, default 0). ``lazy=True`` memory-maps the file instead
     of loading it.
 
-    ``blocks=rows`` reads a file larger than memory in blocks of that many
-    positions on its first axis: the result holds the first block, so each
-    verb runs on it as it is called, and the verbs run over every block,
-    ``threads`` blocks at a time, when a result is asked for
-    (``docs/plan.md``, decision 10, stage (b)). The pipeline must end in
-    ``summarise()``; what a block cannot answer is refused when the verb is
-    called.
+    ``blocks=rows`` reads the data in blocks of that many positions on its
+    first axis, a file larger than memory or an array whose intermediates
+    should stay small: the result holds the first block, so each verb runs
+    on it as it is called, and the verbs run over every block, ``threads``
+    blocks at a time, when a result is asked for (``docs/plan.md``,
+    decision 10, stage (b), and milestone 11). A pipeline ending in
+    ``summarise()`` merges the blocks' summaries; any other joins the
+    blocks' rows in memory. What a block cannot answer is refused when the
+    verb is called.
 
     ``backend=`` is ``"xarray"`` or ``"numpy"``; without it, the default
     from ``set_backend()`` is used, or with none chosen, NumPy.
@@ -256,8 +258,8 @@ def read_array(
     names, sizes = _parse_dims(dims, kind)
     notes: list[str] = []
     if blocks is not None:
-        _check_blocks(kind, description, blocks, threads, lazy, order, names, field_axis, variables_from)
-        lazy = True  # the file is memory-mapped, and each block copied out of the map
+        _check_blocks(kind, description, blocks, lazy, order, names, field_axis, variables_from)
+        lazy = kind != "array"  # a file is memory-mapped, and each block copied out of the map
 
     if kind == "raw":
         values, inferred = _read_raw(
@@ -294,9 +296,16 @@ def read_array(
         raise ReadError("name= must be a non-empty string")
 
     if blocks is not None:
-        from tidy3a.chunked import ChunkedFrame
+        from tidy3a.chunked import ArraySource, ChunkedFrame, FileSource
 
         axis = names[0]
+
+        def build(block: np.ndarray, start: int, stop: int) -> TidyArray:
+            block_coords = {dim: (held[start:stop] if dim == axis else held) for dim, held in coords.items()}
+            return _frame(block, names, block_coords, field_axis, variables_from, name, backend, source_text, notes)
+
+        if kind == "array":
+            return ChunkedFrame.open(ArraySource(values, axis, build), blocks, threads)
         if kind == "raw":
             def reopen() -> np.ndarray:
                 return _read_raw(path, value_type, names, sizes, byte_order or "little", "C", offset or 0, True)[0]
@@ -304,12 +313,9 @@ def read_array(
             def reopen() -> np.ndarray:
                 return _load_stored(source, kind, path, True)
 
-        def build(block: np.ndarray, start: int, stop: int) -> TidyArray:
-            block_coords = {dim: (held[start:stop] if dim == axis else held) for dim, held in coords.items()}
-            return _frame(block, names, block_coords, field_axis, variables_from, name, backend, source_text, notes)
-
+        size = int(shape[0])
         del values  # the map closes; each block reopens the file
-        return ChunkedFrame.open(reopen, int(shape[0]), axis, blocks, threads, build)
+        return ChunkedFrame.open(FileSource(reopen, size, axis, build), blocks, threads)
     return _frame(values, names, coords, field_axis, variables_from, name, backend, source_text, notes)
 
 
@@ -367,13 +373,11 @@ def _describe_source(kind: str, path: Path | None) -> str:
     return f'{".npy file" if kind == "npy" else "raw file"} "{path.name}"'
 
 
-def _check_blocks(kind: str, description: str, blocks: Any, threads: Any, lazy: bool, order: Any,
+def _check_blocks(kind: str, description: str, blocks: Any, lazy: bool, order: Any,
                   names: list[str], field_axis: str | None, variables_from: str | None) -> None:
-    for option, value in (("blocks", blocks), ("threads", threads)):
-        if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 1:
-            raise ReadError(f"{option}= must be a positive number, not {value!r}")
-    if kind == "array":
-        raise ReadError("blocks= reads a file in blocks; an in-memory array is already loaded")
+    if blocks == "chunks":
+        raise ReadError('blocks="chunks" takes a Dask-backed dataset\'s chunks; '
+                        f"{description} has none, so give a number of positions")
     if lazy:
         raise ReadError("blocks= and lazy=True both keep the file on disk; use one of them")
     if order == "F":

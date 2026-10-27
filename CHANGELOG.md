@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Blocks over any source: `read_array(array, ..., blocks=rows)` runs an
+  in-memory array block by block, so the verbs' intermediates stay
+  block-sized, and `tidy(dataset, blocks={"time": 100})` runs an xarray
+  dataset, lazy, file-backed, or Dask-backed, a block of positions at a
+  time, each computed and wrapped on its own; `blocks="chunks"` takes a
+  Dask-backed dataset's own chunks as the blocks, so each is computed
+  once. A block holds every other axis whole, so gridded data summarises
+  block by block too (plan milestone 11, step 1).
 - Files larger than memory: `read_array(path, ..., blocks=rows)` reads a
   file in blocks of that many positions on its first axis. The result holds
   the first block, so each verb runs on it as it is called, with its checks,
