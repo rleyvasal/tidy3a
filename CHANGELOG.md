@@ -8,14 +8,19 @@
   notes, and `explain()`; when a result is asked for (`collect()`, `pull`,
   `to_dict()`), the verbs run over every block, `threads` blocks at a time,
   and the blocks' summaries merge, so memory is the blocks in flight and
-  the groups, not the file. The pipeline is `select`, `filter`, and
-  `mutate` of row-wise expressions, at most one `group_by` on a plain
-  field, then `summarise` of `n`, `sum`, `mean`, `min`, `max`, or
-  expressions of them. Float32 sums and means are the same bits as in
-  memory whatever the block size; float64 and integer ones add per block
-  and are close, not identical. What a block cannot answer is refused with
-  a `BlockError` when the verb is called (plan decision 10, stage (b),
-  phase 1).
+  the groups, not the file. A summarised pipeline is `select`, `filter`,
+  and `mutate` of row-wise expressions, `group_by` of value keys (fields,
+  `cells`, `bins`, `rounded`, several at once, with or without `dropna`),
+  then `summarise` of `n`, `sum`, `mean`, `min`, `max`, or expressions of
+  them; each key's groups merge across blocks in the order `group_by`
+  gives them. Float32 sums and means are the same bits as in memory
+  whatever the block size; float64 and integer ones add per block and are
+  close, not identical. A pipeline without `summarise` joins the blocks'
+  rows in memory. What a block cannot answer is refused with a
+  `BlockError` when the verb is called (plan decision 10, stage (b),
+  phases 1 and 2). On nuScenes Mini's 122.6M lidar points, a distance
+  filter and 1 m voxels took 8.0 s at 1.65 GB in blocks against 36.5 s at
+  7.14 GB in memory.
 
 ## 0.5.1 — 2026-10-26
 

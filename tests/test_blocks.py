@@ -13,9 +13,12 @@ import pytest
 
 from tidy3a import (
     BlockError,
+    GroupError,
     MutateError,
     ReadError,
     SummariseError,
+    bins,
+    cells,
     fields,
     filter,
     formula,
@@ -29,6 +32,7 @@ from tidy3a import (
     n,
     pull,
     read_array,
+    rounded,
     select,
     sqrt,
     std,
@@ -67,6 +71,8 @@ def in_blocks(path, pipeline, names, rows, threads=1, **options):
 
 def same_bits(a, b):
     a, b = np.asarray(a), np.asarray(b)
+    if a.dtype.kind in "OU" or b.dtype.kind in "OU":  # text labels: equal as values, as objects or NumPy text
+        return a.dtype.kind in "OU" and b.dtype.kind in "OU" and a.shape == b.shape and a.tolist() == b.tolist()
     return a.dtype == b.dtype and a.shape == b.shape and a.tobytes() == b.tobytes()
 
 
@@ -212,19 +218,16 @@ def test_verbs_run_on_the_first_block_as_they_are_called(npy):
                        blocks=3_000)
     assert "unlabeled, positions 1 … 3,000" in repr(frame)
     assert "blocks: 7 of 3,000 positions on point" in repr(frame)
-    with pytest.raises(BlockError, match="after summarise"):
-        frame >> pull("x")
+    assert len(frame >> pull("x")) == 20_000  # every block, joined
     with pytest.raises(MutateError, match='"wrong"'):
         frame >> mutate(d=fields("wrong") + 1)
     assert "1. mutate(d = x + 1)" in str((frame >> mutate(d=x + 1)).explain())
 
 
 @pytest.mark.parametrize("pipeline, message", [
-    (take(point=[1, 2]) >> summarise(points=n()), "after summarise"),
     (mutate(centred=intensity - mean(intensity)) >> group_by(ring) >> summarise(points=n()), "whole axis"),
     (group_by(ring) >> mutate(centred=intensity - mean(intensity)), "after group_by, only summarise"),
-    (group_by(ring, dropna=False) >> summarise(points=n()), "one plain field"),
-    (group_by(ring, intensity) >> summarise(points=n()), "one plain field"),
+    (group_by("point") >> summarise(points=n()), "keeps an axis"),
     (group_by(ring) >> summarise(points=n(), middle=median(intensity)), "cannot be combined"),
     (group_by(ring) >> summarise(total=sum(intensity, min_count=2)), "min_count"),
     (group_by(ring) >> summarise(spread=std(intensity)), "cannot be combined"),
@@ -272,3 +275,122 @@ def test_an_empty_file_gives_an_empty_summary(tmp_path):
     _, got = in_blocks(path, pipeline, ["ring", "points", "brightness"], 3)
     for name in ("points", "brightness"):
         assert got[name].shape == want[name].shape == (0,)
+
+
+# ── Phase 2: several keys, transforms, dropna=False, rows kept ──────────────
+
+
+VOXELS = (filter(intensity > -100) >> group_by(cells(x, 20.0), rounded(y, 25), cells(z, 30, origin=5), axis="voxel")
+          >> summarise(points=n(), brightness=mean(intensity), top=max(z)))
+VOXEL_COLUMNS = ["voxel", "x_cell", "y_rounded", "z_cell", "points", "brightness", "top"]
+
+
+@pytest.mark.parametrize("rows", [7, 997, 6_000, 1_000_000])
+def test_several_keys_and_transforms_give_the_in_memory_groups_in_order(npy, rows):
+    path, values = npy
+    want = in_memory(values, VOXELS, VOXEL_COLUMNS)
+    _, got = in_blocks(path, VOXELS, VOXEL_COLUMNS, rows, threads=3)
+    for name in VOXEL_COLUMNS:
+        assert same_bits(got[name], want[name]), name
+
+
+@pytest.mark.parametrize("pipeline, columns", [
+    (group_by(cells(x, 10)) >> summarise(points=n(), brightness=mean(intensity)), ["x_cell", "points", "brightness"]),
+    (group_by(rounded(z, 0.5)) >> summarise(points=n(), low=min(x)), ["z_rounded", "points", "low"]),
+    (group_by(bins(intensity, [-2**31, -50, 0, 0.5, 1, 2**31])) >> summarise(points=n(), brightness=mean(intensity)),
+     ["intensity_bin", "points", "brightness"]),  # every bin, the empty ones too
+    (group_by(ring, cells(x, 40)) >> summarise(points=n(), brightness=mean(intensity)),
+     ["group", "ring", "x_cell", "points", "brightness"]),
+])
+def test_each_kind_of_key(npy, pipeline, columns):
+    path, values = npy
+    want = in_memory(values, pipeline, columns)
+    _, got = in_blocks(path, pipeline, columns, 2_500)
+    for name in columns:
+        assert same_bits(got[name], want[name]), name
+
+
+@pytest.mark.parametrize("pipeline, columns, note", [
+    (group_by(ring, dropna=False) >> summarise(points=n(), brightness=mean(intensity)),
+     ["ring", "points", "brightness"], None),
+    (group_by(cells(x, 20), dropna=False) >> summarise(points=n()), ["x_cell", "points"], None),
+    (group_by(rounded(x, 10), dropna=False) >> summarise(points=n()), ["x_rounded", "points"], None),
+    (group_by(ring, cells(x, 20), dropna=False) >> summarise(points=n(), top=max(z)),
+     ["group", "ring", "x_cell", "points", "top"], None),
+    (group_by(ring, cells(x, 20)) >> summarise(points=n()), ["group", "ring", "x_cell", "points"],
+     "changed: group_by(ring, cells(x)) dropped 800 positions with a missing ring or x; dropna=False keeps them "
+     "as groups"),
+    (group_by(cells(x, 20)) >> summarise(points=n()), ["x_cell", "points"],
+     "changed: group_by(cells(x)) dropped 400 positions with a missing x; dropna=False keeps them as a group"),
+])
+def test_missing_keys_kept_as_the_last_group_or_dropped_and_counted(tmp_path, pipeline, columns, note):
+    values = cloud()
+    values[::50, 4] = np.nan
+    values[25::50, 0] = np.nan
+    path = tmp_path / "missing.npy"
+    np.save(path, values)
+    want = in_memory(values, pipeline, columns)
+    result, got = in_blocks(path, pipeline, columns, 3_000)
+    for name in columns:
+        assert same_bits(got[name], want[name]), name
+    if note is not None:
+        assert note in repr(result)
+
+
+def test_many_small_groups_merge(tmp_path):
+    rng = np.random.default_rng(1)
+    values = (rng.uniform(0, 1000, size=(100_000, 5))).astype("float32")
+    values[:, 4] = rng.integers(0, 3, 100_000)
+    path = tmp_path / "sparse.npy"
+    np.save(path, values)
+    pipeline = (group_by(cells(x, 10), cells(y, 10), cells(z, 100), axis="voxel")
+                >> summarise(points=n(), brightness=mean(intensity)))
+    columns = ["voxel", "x_cell", "y_cell", "z_cell", "points", "brightness"]
+    want = in_memory(values, pipeline, columns)
+    assert len(want["voxel"]) > 50_000
+    _, got = in_blocks(path, pipeline, columns, 20_000, threads=2)
+    for name in columns:
+        assert same_bits(got[name], want[name]), name
+
+
+def test_values_outside_every_bin_are_group_by_s_own_error(npy):
+    path, _ = npy
+    frame = read_array(path, dims={"point": infer, "feature": 5}, labels={"feature": NAMES}, field_axis="feature",
+                       blocks=3_000)
+    with pytest.raises(GroupError, match="fall outside every bin"):
+        frame >> group_by(bins(intensity, [0, 10]))
+
+
+ROWS = mutate(distance=formula(r"\sqrt{x^2 + y^2 + z^2}")) >> filter(distance <= 60) >> select("x", "distance")
+
+
+@pytest.mark.parametrize("rows", [7, 3_000, 1_000_000])
+def test_rows_kept_are_joined_with_their_positions(npy, rows):
+    path, values = npy
+    want = in_memory(values, ROWS, ["point", "x", "distance"])
+    result, got = in_blocks(path, ROWS, ["point", "x", "distance"], rows, threads=2)
+    for name in ("point", "x", "distance"):
+        assert same_bits(got[name], want[name]), name
+    assert "(all removed by" not in repr(result)
+    assert "2. filter(distance <= 60)" in str(result.explain())
+
+
+def test_rows_kept_with_the_axis_s_own_labels_and_a_verb_after(npy):
+    path, values = npy
+    labels = np.arange(20_000) * 10
+    frame = read_array(path, dims={"point": infer, "feature": 5}, labels={"feature": NAMES, "point": labels},
+                       field_axis="feature", blocks=3_000)
+    reference = read_array(values, dims={"point": infer, "feature": 5}, labels={"feature": NAMES, "point": labels},
+                           field_axis="feature")
+    pipeline = ROWS >> take(point=[1, 2, 3])  # slice needs the whole axis: the rows are joined first
+    for name in ("point", "x"):
+        assert same_bits(frame >> pipeline >> pull(name), reference >> pipeline >> pull(name)), name
+
+
+def test_no_rows_kept_anywhere(tmp_path, npy):
+    path, values = npy
+    pipeline = filter(x > 1e9)
+    want = in_memory(values, pipeline, ["x"])
+    result, got = in_blocks(path, pipeline, ["x"], 3_000)
+    assert got["x"].shape == want["x"].shape == (0,)
+    assert "point: 0 (all removed by filter(" in repr(result)

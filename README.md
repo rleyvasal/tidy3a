@@ -238,18 +238,24 @@ per_ring = (
 print(per_ring >> pull("ring"))  # [0. 1. 2. 3.]
 ```
 
-The pipeline is `select`, `filter`, and `mutate` of row-wise expressions,
-at most one `group_by` on a plain field, then `summarise` of `n`, `sum`,
-`mean`, `min`, `max`, or expressions of them (`mean(x) / n()`). Float32
-sums and means are the same bits as in memory whatever the block size;
-float64 and integer ones add per block and are close, not identical. What
-a block cannot answer (a reduction inside `mutate` or `filter`, `slice`,
-joins, several keys, `cells()`, `median`, `std`) is refused when the verb
-is called, naming `lazy=True`, which memory-maps the file, as the
-whole-axis alternative. Measured on 80M points in five float32 fields
-(1.5 GB), the pipeline above took 1.5 s with four threads and 500,000-point
-blocks at a peak of 0.39 GB, against 5.4 GB on the Dask path and 5.9 GB in
-memory; the plan has the measurements (decision 10, stage (b)).
+A summarised pipeline is `select`, `filter`, and `mutate` of row-wise
+expressions, `group_by` of value keys (fields, `cells`, `bins`, `rounded`,
+several at once, with or without `dropna`), then `summarise` of `n`,
+`sum`, `mean`, `min`, `max`, or expressions of them (`mean(x) / n()`).
+Each key's groups merge across blocks in the order `group_by` gives them,
+and float32 sums and means are the same bits as in memory whatever the
+block size; float64 and integer ones add per block and are close, not
+identical. A pipeline without `summarise` joins the blocks' rows in memory,
+for data that fits once filtered; a verb that needs the whole axis
+(`slice`, joins) then runs on the joined rows. What a block cannot answer
+(a reduction inside `mutate` or `filter`, a grouped `mutate`, an axis key,
+`median`, `std`) is refused when the verb is called, naming `lazy=True`,
+which memory-maps the file, as the whole-axis alternative. Measured on all
+122.6M points of nuScenes Mini's lidar sweeps (2.45 GB) through a distance
+filter and 1 m voxels (`cells(x, 1), cells(y, 1), cells(z, 1)`, 84,475 of
+them), blocks of 2M points on four threads took 8.0 s at a peak of
+1.65 GB, against 36.5 s and 7.14 GB in memory, with identical results; the
+plan has the measurements (decision 10, stage (b)).
 
 ## Tables: Polars and tidy3
 
