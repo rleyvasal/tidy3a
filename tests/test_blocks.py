@@ -1143,13 +1143,20 @@ def test_keys_formulas_filters_and_kept_rows_are_read():
     assert set(reads) == {"day", "temperature"}  # the filter's variable, and the variable the rows keep
 
 
-def test_what_the_record_cannot_vouch_for_reads_everything():
+def test_a_selector_that_looks_at_values_is_refused_before_anything_is_read():
+    """A where() of the caller's would answer for no values on the empty block, and each block could pick other
+    columns; it is refused when select() is called, and selecting by type still works."""
     source, _, reads = counted_grid()
     frame = tidy(source, blocks={"time": "chunks"})
-    picked = frame >> select(where(lambda data: True)) >> summarise(points=n())
     del reads[:]
-    picked >> pull("points")
-    assert set(reads) == {"temperature", "wind", "hour", "day"}  # a caller's predicate may look at any values
+    for item in (where(lambda data: True), ~where(lambda data: True), [where(lambda data: True)]):
+        with pytest.raises(BlockError, match=r"picks columns by their values.*preview\(\) a sample to see them"):
+            frame >> select(item)
+    assert reads == []
+    from tidy3a import is_numeric
+
+    picked = frame >> select(where(is_numeric)) >> summarise(points=n())
+    assert (picked >> pull("points")) == 48
 
 
 def test_a_field_label_written_reads_its_holder_whole(npy):

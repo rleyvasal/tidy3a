@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `select(where(predicate))` with a predicate of the caller's, which
+  picks columns by their values, is refused on data read with `blocks=`,
+  when the verb is called: since 0.6.0 such a frame is checked on a block
+  of no positions, where the predicate answers for no values, and each
+  block could have picked other columns. Select by name or type
+  (`starts_with(...)`, `where(is_numeric)`), or `preview()` a sample and
+  select the columns it shows by name.
 - `write(path)` writes a frame's data to a `.npy` file (one array) or a
   Zarr store (a dataset; the `zarr` extra), and gives the file back as a
   frame. A frame read with `blocks=` that keeps rows writes them block by
@@ -16,8 +23,7 @@
   records, while each verb is checked on the empty block, which variables
   it reads (by name, field label, coordinate, or formula), and a dataset's
   blocks compute only those, with the variables a frame that keeps rows
-  keeps. A selector's predicate of the caller's, `where(...)`, which may
-  look at any values, reads everything. `n()` counts the axes every
+  keeps. `n()` counts the axes every
   variable shares as before, from the whole schema. A file's rows hold
   every field together, so files gain nothing. The backend is chosen once
   for the whole data, so every block is on the same one (plan milestone

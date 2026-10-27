@@ -321,6 +321,8 @@ class ChunkedFrame(TidyArray):
             return _write(self, verb)
         if self._summarised or operation not in (*ROW_WISE, "group_by", "summarise"):
             return verb(self._run())  # needs the whole axis: the blocks' result, in memory
+        if operation == "select":
+            _refuse_value_selectors(verb)  # before the verb runs on the empty block, which would answer for no values
         with warnings.catch_warnings(), recording_reads() as read:  # a mean of nothing warns; here that says nothing
             warnings.simplefilter("ignore", RuntimeWarning)
             result = TidyArray._apply_verb(self, verb)  # on the empty block: the eager checks, and the result's schema
@@ -436,6 +438,26 @@ class _Plan:
     reductions: dict[str, Reduce]  # hidden name -> the reduction combined across blocks
     summaries: dict[str, Any]  # name -> its expression, with each reduction replaced by its hidden name
     per_position: int  # positions on the other observation axes that n() counts per row, from the whole schema
+
+
+def _refuse_value_selectors(verb: Any) -> None:
+    """A ``where(predicate)`` of the caller's picks columns by their values: on the empty block it would answer for
+    no values, and each block could answer differently, so a frame read in blocks refuses it."""
+    from tidy3a.selectors import Exclude, Selector
+
+    def found(item: Any) -> Any:
+        if isinstance(item, (list, tuple)):
+            return next((inner for inner in map(found, item) if inner is not None), None)
+        if isinstance(item, Exclude):
+            return found(item.item)
+        return item if isinstance(item, Selector) and item._settings is None else None
+
+    selector = found(verb._arguments)
+    if selector is not None:
+        raise BlockError(f"{verb.text}: {selector.text()} picks columns by their values, and a frame read in blocks "
+                         "is checked before any value is read, and each block could pick others; select the columns "
+                         "by name or type (starts_with(...), where(is_numeric)), or preview() a sample to see them "
+                         "and select them by name")
 
 
 def _check(frame: ChunkedFrame, verb: Any, result: TidyArray, steps: Sequence[Any]) -> _Plan | None:

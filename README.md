@@ -257,10 +257,13 @@ and the shared verbs (`mutate` and `filter` above) run once on it, and
 each frame takes its summaries or its rows from where its own verbs branch
 off; the float32 sums no error bound can settle get one shared second
 pass. Verbs are matched by what they do, not by being the same object, so
-two pipelines written apart share the steps they have in common; a verb
-that holds a function of yours, such as `where(lambda ...)`, is shared
-only with itself. Each result is the same bits as the frame's own run, and afterwards
-each frame holds its result, as after `collect()`.
+two pipelines written apart share the steps they have in common. Each
+result is the same bits as the frame's own run, and afterwards each frame
+holds its result, as after `collect()`. A `select(where(...))` with a
+function of yours, which picks columns by their values, is refused on data
+read in blocks, since nothing has been read when the verb is checked and
+each block could pick others: select by name or type, or `preview()` a
+sample to see the columns and select them by name.
 
 `write(path)` writes rows that need not fit in memory: a pipeline read in
 blocks that keeps rows writes them as the blocks arrive, in order, to a

@@ -272,12 +272,14 @@ def test_a_scan_shares_the_steps_of_pipelines_written_apart():
                                                      >> summarise(points=n()) >> pull("points")).tolist()
 
 
-def test_a_step_like_no_other_is_not_shared_and_neither_is_what_follows():
+def test_steps_that_differ_are_not_shared_and_neither_is_what_follows():
+    """x * 1 and x * 1.0 give the same float32 values here, but are different steps (an integer and a float), so
+    the scan shares neither them nor the identical steps after them."""
     values = np.ones((10, 2), dtype="float32")
     options = dict(dims={"point": infer, "feature": 2}, labels={"feature": ["x", "y"]}, field_axis="feature")
     counts = []
     frame = read_array(values, blocks=5, **options)
-    first = frame >> select(where(lambda data: True)) >> counting(counts) >> summarise(points=n())
-    second = frame >> select(where(lambda data: True)) >> counting(counts) >> summarise(points=n())
+    first = frame >> mutate(c=x * 1) >> counting(counts) >> summarise(points=n())
+    second = frame >> mutate(c=x * 1.0) >> counting(counts) >> summarise(points=n())
     scan(first, second)
-    assert counts == [1] * (2 + 2 * 2)  # the lambdas differ, so both branches run on both blocks
+    assert counts == [1] * (2 + 2 * 2)  # both branches run on both blocks
