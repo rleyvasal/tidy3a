@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Several results from one pass: `scan(*frames)` runs several frames read
+  with `blocks=` over their source in one pass and gives their results as
+  a tuple (`per_ring, voxels = scan(a, b)`). The frames' row-wise verbs
+  form a trie, so each block is loaded once and a shared `mutate` or
+  `filter` runs once on it, and each frame takes its summaries or its
+  rows from where its own verbs branch off; the float32 sums the error
+  bound cannot settle get one shared second pass. Each result is the same
+  bits as the frame's own run (plan milestone 11, step 2).
 - Blocks over any source: `read_array(array, ..., blocks=rows)` runs an
   in-memory array block by block, so the verbs' intermediates stay
   block-sized, and `tidy(dataset, blocks={"time": 100})` runs an xarray

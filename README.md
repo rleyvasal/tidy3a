@@ -220,7 +220,7 @@ import os
 import tempfile
 
 import numpy as np
-from tidy3a import fields, filter, formula, group_by, infer, mean, mutate, n, pull, read_array, summarise
+from tidy3a import cells, fields, filter, formula, group_by, infer, mean, mutate, n, pull, read_array, scan, summarise
 
 rng = np.random.default_rng(0)
 points = (rng.normal(size=(100_000, 5)) * 30).astype("float32")
@@ -232,15 +232,20 @@ x, y, z, intensity, ring, distance = fields("x", "y", "z", "intensity", "ring", 
 cloud = read_array(path, dims={"point": infer, "feature": 5},
                    labels={"feature": ["x", "y", "z", "intensity", "ring"]}, field_axis="feature",
                    blocks=20_000, threads=2)
-per_ring = (
-    cloud
-    >> mutate(distance = formula(r"\sqrt{x^2 + y^2 + z^2}"))
-    >> filter(distance <= 60)
-    >> group_by(ring)
-    >> summarise(points = n(), brightness = mean(intensity))
-)
+near = cloud >> mutate(distance = formula(r"\sqrt{x^2 + y^2 + z^2}")) >> filter(distance <= 60)
+per_ring = near >> group_by(ring) >> summarise(points = n(), brightness = mean(intensity))
+voxels = near >> group_by(cells(x, 30), cells(y, 30), axis="voxel") >> summarise(points = n())
+per_ring, voxels = scan(per_ring, voxels)  # one pass over the file for both
 print(per_ring >> pull("ring"))  # [0. 1. 2. 3.]
 ```
+
+`scan(*frames)` gives several frames' results from one pass over their
+source: the frames' row-wise verbs form a trie, each block is loaded once
+and the shared verbs (`mutate` and `filter` above) run once on it, and
+each frame takes its summaries or its rows from where its own verbs branch
+off; the float32 sums no error bound can settle get one shared second
+pass. Each result is the same bits as the frame's own run, and afterwards
+each frame holds its result, as after `collect()`.
 
 A summarised pipeline is `select`, `filter`, and `mutate` of row-wise
 expressions, `group_by` of value keys (fields, `cells`, `bins`, `rounded`,
