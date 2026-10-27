@@ -23,11 +23,22 @@ class Column:
 
 
 class Selector:
-    """A rule that picks columns by name or content; ``~`` excludes them."""
+    """A rule that picks columns by name or content; ``~`` excludes them.
 
-    def __init__(self, text: str, pick: Callable[[list[Column]], list[Column]]):
+    ``settings`` records the helper and its arguments, the selector's
+    identity (``tidy3a.identity``); without them, as for a predicate of the
+    caller's, the selector is like no other.
+    """
+
+    def __init__(self, text: str, pick: Callable[[list[Column]], list[Column]], settings: tuple | None = None):
         self._text = text
         self._pick = pick
+        self._settings = settings
+
+    def _structure(self) -> Hashable:
+        from tidy3a.identity import Unique, structure
+
+        return ("selector", Unique(self._text) if self._settings is None else structure(self._settings))
 
     def pick(self, columns: list[Column]) -> list[Column]:
         return self._pick(columns)
@@ -50,9 +61,21 @@ class Exclude:
     def __init__(self, item: Any):
         self.item = item
 
+    def text(self) -> str:
+        item = self.item
+        return f"~{item.text() if hasattr(item, 'text') else (repr(item) if not isinstance(item, str) else item)}"
 
-def _by_name(text: str, test: Callable[[str], bool]) -> Selector:
-    return Selector(text, lambda columns: [c for c in columns if test(str(c.name))])
+    def __repr__(self) -> str:
+        return f"<selector {self.text()}>"
+
+    def _structure(self) -> Hashable:
+        from tidy3a.identity import structure
+
+        return ("exclude", structure(self.item))
+
+
+def _by_name(text: str, test: Callable[[str], bool], settings: tuple) -> Selector:
+    return Selector(text, lambda columns: [c for c in columns if test(str(c.name))], settings)
 
 
 def _matches(match: str | Iterable[str], ignore_case: bool, how: Callable[[str, str], bool]):
@@ -69,24 +92,28 @@ def _matches(match: str | Iterable[str], ignore_case: bool, how: Callable[[str, 
 
 def everything() -> Selector:
     """Every variable and field label."""
-    return Selector("everything()", lambda columns: list(columns))
+    return Selector("everything()", lambda columns: list(columns), ("everything",))
 
 
 def starts_with(match: str | Iterable[str], *, ignore_case: bool = True) -> Selector:
-    return _by_name(f"starts_with({match!r})", _matches(match, ignore_case, str.startswith))
+    return _by_name(f"starts_with({match!r})", _matches(match, ignore_case, str.startswith),
+                    ("starts_with", match if isinstance(match, str) else tuple(match), ignore_case))
 
 
 def ends_with(match: str | Iterable[str], *, ignore_case: bool = True) -> Selector:
-    return _by_name(f"ends_with({match!r})", _matches(match, ignore_case, str.endswith))
+    return _by_name(f"ends_with({match!r})", _matches(match, ignore_case, str.endswith),
+                    ("ends_with", match if isinstance(match, str) else tuple(match), ignore_case))
 
 
 def contains(match: str | Iterable[str], *, ignore_case: bool = True) -> Selector:
-    return _by_name(f"contains({match!r})", _matches(match, ignore_case, lambda n, p: p in n))
+    return _by_name(f"contains({match!r})", _matches(match, ignore_case, lambda n, p: p in n),
+                    ("contains", match if isinstance(match, str) else tuple(match), ignore_case))
 
 
 def matches(pattern: str, *, ignore_case: bool = True) -> Selector:
     regex = re.compile(pattern, re.IGNORECASE if ignore_case else 0)
-    return _by_name(f"matches({pattern!r})", lambda name: regex.search(name) is not None)
+    return _by_name(f"matches({pattern!r})", lambda name: regex.search(name) is not None,
+                    ("matches", pattern, ignore_case))
 
 
 def num_range(prefix: str, values: Iterable[int], *, width: int | None = None) -> Selector:
@@ -107,12 +134,13 @@ def all_of(names: Iterable[Hashable], *, _text: str | None = None, _missing_ok: 
             raise SelectError(f"all_of(): {', '.join(map(str, missing))} not found; any_of() allows missing names")
         return [by_name[name] for name in wanted if name in by_name]
 
-    return Selector(_text or f"all_of({wanted!r})", pick)
+    return Selector(_text or f"all_of({wanted!r})", pick, ("all_of", tuple(wanted), _missing_ok))
 
 
 def any_of(names: Iterable[Hashable]) -> Selector:
     """These names where they exist, in this order."""
-    return all_of(names, _text=f"any_of({list(names)!r})", _missing_ok=True)
+    names = list(names)  # once: a generator would be empty the second time
+    return all_of(names, _text=f"any_of({names!r})", _missing_ok=True)
 
 
 def where(*args: Any) -> Selector:
@@ -126,14 +154,15 @@ def where(*args: Any) -> Selector:
         raise TypeError("where() takes one predicate, e.g. where(is_numeric)")
     predicate = args[0]
     name = getattr(predicate, "__name__", "predicate")
-    return Selector(f"where({name})", lambda columns: [c for c in columns if predicate(c.data)])
+    own = ("where", name) if predicate is is_numeric else None  # the caller's predicates are like no other
+    return Selector(f"where({name})", lambda columns: [c for c in columns if predicate(c.data)], own)
 
 
 def last_col(offset: int = 0) -> Selector:
     def pick(columns: list[Column]) -> list[Column]:
         return [columns[-1 - offset]] if offset < len(columns) else []
 
-    return Selector(f"last_col({offset})" if offset else "last_col()", pick)
+    return Selector(f"last_col({offset})" if offset else "last_col()", pick, ("last_col", offset))
 
 
 def is_numeric(data: Any) -> bool:

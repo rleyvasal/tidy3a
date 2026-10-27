@@ -9,7 +9,14 @@
   `filter` runs once on it, and each frame takes its summaries or its
   rows from where its own verbs branch off; the float32 sums the error
   bound cannot settle get one shared second pass. Each result is the same
-  bits as the frame's own run (plan milestone 11, step 2).
+  bits as the frame's own run (plan milestone 11, step 2). Verbs match by
+  their structure (`tidy3a.identity`): every option they were given, with
+  values typed (`1`, `1.0`, `True`, and `np.float64(1)` are four values)
+  and arrays by identity, so pipelines written apart share their common
+  steps, and a verb holding a function of the caller's is like no other.
+- `any_of()` given a generator selected nothing (the generator was read
+  twice); a `select()` with `~selector` showed the exclusion as an object
+  address in its text.
 - Blocks over any source: `read_array(array, ..., blocks=rows)` runs an
   in-memory array block by block, so the verbs' intermediates stay
   block-sized, and `tidy(dataset, blocks={"time": 100})` runs an xarray

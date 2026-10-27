@@ -15,6 +15,7 @@ position 1. Index letters bind to axes by name, or through ``bind=``.
 
 from __future__ import annotations
 
+import re
 import sys
 from collections.abc import Hashable, Mapping
 from dataclasses import dataclass, field
@@ -541,6 +542,17 @@ class Formula(Expr):
 
     def text(self) -> str:
         return f'formula(r"{self.source}")'
+
+    def _structure(self) -> Hashable:
+        """The source, the bound names, and the caller's values its names can pick up: plain values and
+        references, as ``lookup`` takes them; the caller's functions and modules play no part, so they are left out."""
+        from tidy3a.identity import structure
+
+        words = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", re.sub(r"\\[A-Za-z]+", " ", self.source))
+        names = sorted({*words, *(letter for word in words for letter in word)})
+        used = {name: self.scope[name] for name in names
+                if name in self.scope and (isinstance(self.scope[name], Ref) or _is_python_value(self.scope[name]))}
+        return ("formula", self.source, structure(self.bind), structure(used))
 
     def lower(self, ctx: Context) -> tuple[Expr, list[str]]:
         compiler = _Compiler(self, ctx)

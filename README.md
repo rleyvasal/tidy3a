@@ -244,7 +244,10 @@ source: the frames' row-wise verbs form a trie, each block is loaded once
 and the shared verbs (`mutate` and `filter` above) run once on it, and
 each frame takes its summaries or its rows from where its own verbs branch
 off; the float32 sums no error bound can settle get one shared second
-pass. Each result is the same bits as the frame's own run, and afterwards
+pass. Verbs are matched by what they do, not by being the same object, so
+two pipelines written apart share the steps they have in common; a verb
+that holds a function of yours, such as `where(lambda ...)`, is shared
+only with itself. Each result is the same bits as the frame's own run, and afterwards
 each frame holds its result, as after `collect()`.
 
 A summarised pipeline is `select`, `filter`, and `mutate` of row-wise

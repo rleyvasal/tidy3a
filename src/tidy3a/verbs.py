@@ -61,6 +61,20 @@ class Verb:
         self._apply = apply
         self._operation = operation
         self._arguments = arguments
+        self._structure: Hashable | None = None
+
+    def structure(self) -> Hashable:
+        """What the verb does, as a record (``tidy3a.identity``): its operation and every option it was given. Its
+        text is left out, since it shows objects by their ``repr``. A verb with no recorded operation (``bind_cols``,
+        the joins) is like no other."""
+        if self._structure is None:
+            from tidy3a.identity import Unique, structure
+
+            if self._operation is None:
+                self._structure = ("verb", Unique(self.text))
+            else:
+                self._structure = ("verb", self._operation, structure(self._arguments))
+        return self._structure
 
     @translating
     def __call__(self, frame: Any) -> Any:
@@ -88,7 +102,7 @@ def _call_text(name: str, args: Sequence[Any], named: dict[str, Any] | None = No
 
 
 def _text(value: Any) -> str:
-    if isinstance(value, (Expr, Selector)):
+    if isinstance(value, (Expr, Selector, Exclude)):
         return value.text()
     if isinstance(value, ValueKey):
         return value.label
@@ -421,6 +435,11 @@ class Assignment:
         self.target = target.name if isinstance(target, Ref) else target
         self.value = value
 
+    def _structure(self) -> Hashable:
+        from tidy3a.identity import structure
+
+        return ("assign", structure(self.target), structure(self.value))
+
     def text(self) -> str:
         target = self.target.text() if isinstance(self.target, Vector) else str(self.target)
         return f"{target} = {_text(self.value)}"
@@ -663,7 +682,7 @@ def group_by(*keys: Any, dropna: bool = True, axis: str | None = None, **named: 
     if axis is not None:
         options["axis"] = axis
     text = _call_text("group_by", keys, {**named, **options})
-    return Verb(text, apply, operation="group_by", arguments=(keys, named))
+    return Verb(text, apply, operation="group_by", arguments=(keys, named, bool(dropna), axis))
 
 
 def ungroup() -> Verb:

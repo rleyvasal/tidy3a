@@ -14,9 +14,11 @@ import builtins
 import operator
 import sys
 import warnings
-from collections.abc import Callable, Hashable, Iterator, Sequence
+from collections.abc import Callable, Hashable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from fractions import Fraction
+from types import MappingProxyType
 from typing import Any
 
 import numpy as np
@@ -41,7 +43,12 @@ from tidy3a.frame import TidyArray, tidy
 
 
 class Expr:
-    """Base class for tidy3a expressions; combine them with Python operators."""
+    """Base class for tidy3a expressions; combine them with Python operators.
+
+    Each node is a frozen record of its settings (plan decision 5): ``==``
+    builds an expression, so two nodes compare by ``tidy3a.identity.structure``,
+    which reads every field.
+    """
 
     __hash__ = None  # type: ignore[assignment]  # == builds an expression
     # NumPy values on the left defer to the expression's reflected operators.
@@ -97,12 +104,12 @@ Expr.__pos__ = lambda self: UnaryOp("+", self)  # type: ignore[assignment]
 Expr.__invert__ = lambda self: UnaryOp("~", self)  # type: ignore[assignment]
 
 
+@dataclass(frozen=True, eq=False, repr=False)
 class Ref(Expr):
     """A name to resolve against the data: ``kind`` is "any", "var", or "label"."""
 
-    def __init__(self, name: Hashable, kind: str = "any"):
-        self.name = name
-        self.kind = kind
+    name: Hashable
+    kind: str = "any"
 
     def text(self) -> str:
         if self.kind == "any":
@@ -111,6 +118,7 @@ class Ref(Expr):
         return f'{helper}("{self.name}")'
 
 
+@dataclass(frozen=True, eq=False, repr=False, init=False)
 class NameRef(Ref):
     """A bare notebook name: data, a Python value, or an error if it is both (§5.2).
 
@@ -118,9 +126,18 @@ class NameRef(Ref):
     Python value the name had then, or ``MISSING``.
     """
 
+    python: Any = None
+
     def __init__(self, name: Hashable, python: Any):
-        super().__init__(name)
-        self.python = python
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "kind", "any")
+        object.__setattr__(self, "python", python)
+
+    def _structure(self) -> Hashable:
+        from tidy3a.identity import structure
+
+        python = ("missing",) if self.python is MISSING else structure(self.python)
+        return ("NameRef", structure(self.name), structure(self.kind), python)
 
 
 MISSING = object()
@@ -151,10 +168,10 @@ def check_name(ref: Ref, ctx: Context) -> bool:
     return data
 
 
+@dataclass(frozen=True, eq=False, repr=False)
 class Literal(Expr):
-    def __init__(self, value: Any, label: str | None = None):
-        self.value = value
-        self.label = label
+    value: Any
+    label: str | None = None
 
     def text(self) -> str:
         if self.label is not None:
@@ -172,11 +189,14 @@ class Literal(Expr):
         return repr(value)
 
 
+@dataclass(frozen=True, eq=False, repr=False)
 class Vector(Expr):
     """``[x, y, z]``: field labels kept on their axis, or variables re-packed."""
 
-    def __init__(self, items: Sequence[Ref]):
-        self.items = tuple(items)
+    items: Sequence[Ref]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "items", tuple(self.items))
 
     def children(self) -> Sequence[Expr]:
         return self.items
@@ -185,11 +205,11 @@ class Vector(Expr):
         return "[" + ", ".join(item.text() for item in self.items) + "]"
 
 
+@dataclass(frozen=True, eq=False, repr=False)
 class BinOp(Expr):
-    def __init__(self, symbol: str, left: Expr, right: Expr):
-        self.symbol = symbol
-        self.left = left
-        self.right = right
+    symbol: str
+    left: Expr
+    right: Expr
 
     def children(self) -> Sequence[Expr]:
         return (self.left, self.right)
@@ -198,10 +218,10 @@ class BinOp(Expr):
         return f"{_wrap(self.left)} {self.symbol} {_wrap(self.right)}"
 
 
+@dataclass(frozen=True, eq=False, repr=False)
 class UnaryOp(Expr):
-    def __init__(self, symbol: str, operand: Expr):
-        self.symbol = symbol
-        self.operand = operand
+    symbol: str
+    operand: Expr
 
     def children(self) -> Sequence[Expr]:
         return (self.operand,)
@@ -210,13 +230,17 @@ class UnaryOp(Expr):
         return f"{self.symbol}{_wrap(self.operand)}"
 
 
+@dataclass(frozen=True, eq=False, repr=False)
 class Call(Expr):
-    """A named function from ``FUNCTIONS``; ``options`` are keyword settings."""
+    """A named function from ``FUNCTIONS``; ``options`` are keyword settings, read-only."""
 
-    def __init__(self, name: str, args: Sequence[Expr], options: dict[str, Any] | None = None):
-        self.name = name
-        self.args = tuple(args)
-        self.options = dict(options or {})
+    name: str
+    args: Sequence[Expr]
+    options: Mapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "args", tuple(self.args))
+        object.__setattr__(self, "options", MappingProxyType(dict(self.options or {})))
 
     def children(self) -> Sequence[Expr]:
         return self.args
@@ -227,16 +251,13 @@ class Call(Expr):
         return f"{self.name}({', '.join(parts)})"
 
 
+@dataclass(frozen=True, eq=False, repr=False)
 class Reduce(Expr):
-    def __init__(
-        self, op: str, arg: Expr | None, over: Any = None, na_rm: bool = False,
-        min_count: int | None = None,
-    ):
-        self.op = op
-        self.arg = arg
-        self.over = over
-        self.na_rm = na_rm
-        self.min_count = min_count
+    op: str
+    arg: Expr | None
+    over: Any = None
+    na_rm: bool = False
+    min_count: int | None = None
 
     def children(self) -> Sequence[Expr]:
         return () if self.arg is None else (self.arg,)
@@ -377,14 +398,18 @@ def n() -> Reduce:
 # ── Grouping keys ───────────────────────────────────────────────────────────
 
 
+@dataclass(frozen=True, eq=False)
 class AxisKey:
     """``group_by(sensor)``: keep this axis, reduce the others."""
 
-    def __init__(self, axis: Hashable):
-        self.axis = axis
-        self.label = str(axis)
+    axis: Hashable
+
+    @property
+    def label(self) -> str:
+        return str(self.axis)
 
 
+@dataclass(frozen=True, eq=False)
 class ValueKey:
     """``group_by(ring)`` or ``group_by(bins(distance, edges))``: group positions by value.
 
@@ -398,19 +423,24 @@ class ValueKey:
     left out of every group, as pandas does by default, or kept as one group.
     """
 
-    def __init__(self, name: Hashable, expr: Expr, transform: Any = None, dropna: bool = True, *,
-                 label: str | None = None, call: str | None = None):
-        self.name = name
-        self.expr = expr
-        self.transform = transform
-        self.dropna = dropna
-        self.label = str(name) if label is None else label
-        self.call = self.label if call is None else call
+    name: Hashable
+    expr: Expr
+    transform: Any = None
+    dropna: bool = True
+    label: str | None = field(default=None, kw_only=True)
+    call: str | None = field(default=None, kw_only=True)
+
+    def __post_init__(self) -> None:
+        if self.label is None:
+            object.__setattr__(self, "label", str(self.name))
+        if self.call is None:
+            object.__setattr__(self, "call", self.label)
 
     def with_dropna(self, dropna: bool) -> ValueKey:
         return ValueKey(self.name, self.expr, self.transform, dropna, label=self.label, call=self.call)
 
 
+@dataclass(frozen=True, eq=False, init=False)
 class MultiKey(ValueKey):
     """``group_by(cells(x, 1), cells(y, 1), cells(z, 1))``: positions grouped by several values at once.
 
@@ -421,10 +451,14 @@ class MultiKey(ValueKey):
     the key. With ``dropna``, a position missing any key is in no group.
     """
 
+    keys: tuple[ValueKey, ...] = ()
+
     def __init__(self, keys: Sequence[ValueKey], name: Hashable = "group", dropna: bool = True):
-        self.keys = tuple(keys)
-        label = ", ".join(key.label for key in self.keys)
-        super().__init__(name, Vector([key.expr for key in self.keys]), None, dropna, label=label)
+        keys = tuple(keys)
+        label = ", ".join(key.label for key in keys)
+        for part, value in (("keys", keys), ("name", name), ("expr", Vector([key.expr for key in keys])),
+                            ("transform", None), ("dropna", dropna), ("label", label), ("call", label)):
+            object.__setattr__(self, part, value)
 
     def with_dropna(self, dropna: bool) -> MultiKey:
         return MultiKey(self.keys, self.name, dropna)

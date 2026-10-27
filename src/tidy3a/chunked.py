@@ -13,7 +13,9 @@ blocks in flight and the groups, not the data; any other pipeline
 concatenates the blocks' rows, for data that fits once filtered.
 
 ``scan(*frames)`` gives several frames' results from one pass over their
-shared source: the frames' row-wise verbs form a trie, each block is loaded
+shared source: the frames' row-wise verbs form a trie, a verb matching
+another by its structure (``tidy3a.identity``), so pipelines written apart
+share the steps they have in common; each block is loaded
 once and walked depth first with the frame after each shared prefix kept
 while its branches run, and each frame takes its summaries or its rows from
 where its own verbs branch off. A frame's result is the same bits as its
@@ -48,7 +50,7 @@ bit-identical with the in-memory results. Anything else is refused with a
 
 from __future__ import annotations
 
-import copy
+import dataclasses
 import math
 from collections.abc import Callable, Hashable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -367,15 +369,13 @@ def _hidden(node: Any, reductions: dict[str, Reduce], name: str) -> Any:
         return Ref(hidden)
     if isinstance(node, Literal):
         return node
-    if isinstance(node, (BinOp, UnaryOp, Call)):
-        node = copy.copy(node)
-        if isinstance(node, BinOp):
-            node.left, node.right = _hidden(node.left, reductions, name), _hidden(node.right, reductions, name)
-        elif isinstance(node, UnaryOp):
-            node.operand = _hidden(node.operand, reductions, name)
-        else:
-            node.args = tuple(_hidden(arg, reductions, name) for arg in node.args)
-        return node
+    if isinstance(node, BinOp):
+        return dataclasses.replace(node, left=_hidden(node.left, reductions, name),
+                                   right=_hidden(node.right, reductions, name))
+    if isinstance(node, UnaryOp):
+        return dataclasses.replace(node, operand=_hidden(node.operand, reductions, name))
+    if isinstance(node, Call):
+        return dataclasses.replace(node, args=tuple(_hidden(arg, reductions, name) for arg in node.args))
     raise BlockError(f"{name} = {node.text()}: a summary on blocks is a reduction, or an expression of reductions "
                      f"such as mean(x) / n(); {WHOLE_AXIS}")
 
@@ -659,9 +659,10 @@ class _Node:
         self.next: list[tuple[Any, _Node]] = []
 
     def after(self, verb: Any) -> _Node:
-        """The node for this prefix followed by *verb*, the same verb object meaning the same step."""
+        """The node for this prefix followed by *verb*: verbs with the same structure are the same step, so
+        pipelines written apart share their work (``tidy3a.identity``)."""
         for other, node in self.next:
-            if other is verb:
+            if other is verb or other.structure() == verb.structure():
                 return node
         node = _Node()
         self.next.append((verb, node))
