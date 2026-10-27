@@ -850,15 +850,53 @@ def _evaluate_reduce(node: Reduce, ctx: Context) -> Any:
         clash = [axis for axis in axes if axis in ctx.group_axes]
         if clash:
             raise error(f"{node.text()}: over= includes {clash[0]}, which group_by keeps")
-        return backend.reduce(array, node.op, axes, node.na_rm, node.min_count, node.q)
+        return _reduce(backend, array, node, axes, error)
 
     axes = [axis for axis in ctx.observation_axes(array) if axis not in ctx.group_axes]
     if ctx.value_key is None:
-        return backend.reduce(array, node.op, axes, node.na_rm, node.min_count, node.q)
+        return _reduce(backend, array, node, axes, error)
     groups = ctx.groups()
     others = [axis for axis in axes if axis != groups.axis]
-    stats = backend.group_reduce(array, node.op, groups, others, node.na_rm, node.min_count, node.q)
+    stats = _group_reduce(backend, array, node, groups, others, error)
     return group_result(stats, groups, ctx)
+
+
+def _reduce(backend: Any, array: Any, node: Reduce, axes: Sequence[Hashable], error: type[TidyError]) -> Any:
+    """*node*'s reduction over *axes*: the backend's, or a registered one's own function (``register_reduction``),
+    whose values take the place of a ``count``'s, so they come with the axes and labels a built-in's would."""
+    from tidy3a.reductions import EAGER
+
+    own = EAGER.get(node.op)
+    if own is None:
+        return backend.reduce(array, node.op, axes, node.na_rm, node.min_count, node.q)
+    template = backend.reduce(array, "count", axes)
+    numbers = tuple(list(array.dims).index(axis) for axis in axes)
+    return _registered_values(backend, template, own(np.asarray(array.values), numbers, node.na_rm), node, error)
+
+
+def _group_reduce(backend: Any, array: Any, node: Reduce, groups: Any, others: Sequence[Hashable],
+                  error: type[TidyError]) -> Any:
+    """*node*'s reduction per group: the backend's, or a registered one's own function on each group's values."""
+    from tidy3a.reductions import EAGER
+
+    own = EAGER.get(node.op)
+    if own is None:
+        return backend.group_reduce(array, node.op, groups, others, node.na_rm, node.min_count, node.q)
+    template = backend.group_reduce(array, "count", groups, others, False, None)
+    dims = list(array.dims)
+    axis, numbers = dims.index(groups.axis), tuple(dims.index(name) for name in (groups.axis, *others))
+    values, codes = np.asarray(array.values), np.asarray(groups.codes)
+    parts = [np.asarray(own(np.take(values, np.flatnonzero(codes == code), axis=axis), numbers, node.na_rm))
+             for code in range(len(groups))]
+    return _registered_values(backend, template, np.stack(parts) if parts else np.zeros(template.shape), node, error)
+
+
+def _registered_values(backend: Any, template: Any, values: Any, node: Reduce, error: type[TidyError]) -> Any:
+    values = np.asarray(values)
+    if values.shape != tuple(template.shape):
+        raise error(f"{node.text()}: {node.op}'s function gave values of shape {values.shape}, where the reduction "
+                    f"keeps {tuple(template.shape)}; it reduces the axes it is given and keeps the rest")
+    return backend.with_values(template, values)
 
 
 # Reductions a kind of value cannot take, refused with the reduction's name rather than NumPy's error. Text is not

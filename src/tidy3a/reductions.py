@@ -484,7 +484,75 @@ class Quantile(Median):
         return result
 
 
+class _Registered(Reduction):
+    """A reduction registered with block steps (``register_reduction``): its pieces are what ``partial`` gives."""
+
+    def __init__(self, name: str, partial: Any, merge: Any, finish: Any, fill: Any):
+        self.name, self._partial, self._merge, self._finish, self._fill = name, partial, merge, finish, fill
+
+    def partial(self, node, value, codes, count):
+        return "registered", np.asarray(self._partial(value, codes, count, node.na_rm))
+
+    def merge(self, node, kind, held, piece):
+        return np.asarray(self._merge(held, piece))
+
+    def fill(self, node, kind, dtype):
+        return self._fill
+
+    def finish(self, node, kind, held, counts, blocks):
+        return np.asarray(self._finish(held, counts)), []
+
+
 REGISTRY: dict[str, Reduction] = {entry.name: entry for entry in (
     Count(), Total("sum"), Total("mean"), Extreme("min"), Extreme("max"), Spread("std"), Spread("var"),
     Flag("any"), Flag("all"), Median(), Quantile(),
 )}
+
+
+BUILT_IN = frozenset({*REGISTRY, "count"})
+EAGER: dict[str, Any] = {}  # registered reductions' own functions, for data in memory
+
+
+def register_reduction(name: str, eager: Any, *, partial: Any = None, merge: Any = None, finish: Any = None,
+                       fill: Any = 0) -> Any:
+    """Add a reduction, and give the function that writes it (``r = register_reduction("range", ...)``, then
+    ``summarise(spread=r(x))``). Experimental: the contract may change in a release.
+
+    ``eager(values, axes, na_rm)`` reduces a NumPy array over the axes numbered in *axes* (a tuple) and keeps the
+    rest, for data in memory on either backend, grouped or not. It is also given no values, and must answer then:
+    for an empty group, and for the block of no positions a frame read in blocks checks ``summarise`` on. For data
+    read in blocks, ``partial(values, codes, groups, na_rm)`` gives one block's pieces per group, an array with the
+    groups along its last axis (*values* 1-D, *codes* each value's group, from 0 to ``groups - 1``);
+    ``merge(held, piece)`` combines two groups' pieces, in any order; ``finish(held, counts)`` gives one answer per
+    group (*counts*, each group's positions); ``fill`` is a group's pieces before any block has it (a scalar, or an
+    array that broadcasts to one group's pieces). Without block steps, data read in blocks refuses the reduction
+    when ``summarise`` is called. A built-in name cannot be taken; registering a name again replaces it.
+    """
+    from tidy3a.errors import TidyError
+    from tidy3a.expr import Reduce, _is_data, as_expr
+
+    if not isinstance(name, str) or not name.isidentifier():
+        raise TidyError(f"register_reduction(): the name is a Python identifier, not {name!r}")
+    if name in BUILT_IN:
+        raise TidyError(f"register_reduction(): {name} is a built-in reduction; give yours another name")
+    if not callable(eager):
+        raise TidyError(f"register_reduction({name!r}): eager is a function of (values, axes, na_rm)")
+    steps = (partial, merge, finish)
+    if any(step is not None for step in steps) and not all(callable(step) for step in steps):
+        raise TidyError(f"register_reduction({name!r}): blocks need partial, merge, and finish, all three, or none")
+    EAGER[name] = eager
+    if partial is None:
+        REGISTRY.pop(name, None)
+    else:
+        REGISTRY[name] = _Registered(name, partial, merge, finish, fill)
+
+    def reduction(x: Any, *, over: Any = None, na_rm: bool = False) -> Any:
+        if not _is_data(x):
+            raise TypeError(f"{name}() needs an expression, e.g. {name}(intensity)")
+        if not isinstance(na_rm, bool):
+            raise TypeError(f"{name}() na_rm must be True or False")
+        return Reduce(name, as_expr(x), over, na_rm)
+
+    reduction.__name__ = reduction.__qualname__ = name
+    reduction.__doc__ = f"The registered reduction {name} (``tidy3a.register_reduction``)."
+    return reduction

@@ -93,7 +93,6 @@ from tidy3a.plan import Record, Snapshot, Step, _variable, snapshot
 from tidy3a.reductions import REGISTRY, WHOLE_AXIS, pass_budget
 
 ROW_WISE = ("select", "filter", "mutate")
-COMBINABLE = tuple(REGISTRY)  # the reductions a block can answer (``tidy3a.reductions``)
 
 
 # ── Sources ─────────────────────────────────────────────────────────────────
@@ -322,6 +321,8 @@ class ChunkedFrame(TidyArray):
             return verb(self._run())  # needs the whole axis: the blocks' result, in memory
         if operation == "select":
             _refuse_value_selectors(verb)  # before the verb runs on the empty block, which would answer for no values
+        if operation == "summarise":
+            _refuse_unblocked(verb)  # before a registered reduction's own function runs on the empty block
         with warnings.catch_warnings(), recording_reads() as read:  # a mean of nothing warns; here that says nothing
             warnings.simplefilter("ignore", RuntimeWarning)
             result = TidyArray._apply_verb(self, verb)  # on the empty block: the eager checks, and the result's schema
@@ -459,6 +460,18 @@ def _refuse_value_selectors(verb: Any) -> None:
                          "and select them by name")
 
 
+def _refuse_unblocked(verb: Any) -> None:
+    """A reduction a block cannot answer, refused before ``summarise`` runs on the empty block (a registered
+    reduction without block steps), as ``_hidden`` refuses it after."""
+    _, named = verb._arguments
+    for name, expr in named.items():
+        for node in walk(as_expr(expr)):
+            if isinstance(node, Reduce) and node.op not in REGISTRY:
+                raise BlockError(f"{name} = {node.text()}: {node.op}() cannot be combined across blocks; "
+                                 f"{', '.join(REGISTRY)} can (register_reduction() adds one, with block steps); "
+                                 f"{WHOLE_AXIS}")
+
+
 def _check(frame: ChunkedFrame, verb: Any, result: TidyArray, steps: Sequence[Any]) -> _Plan | None:
     operation = verb._operation
     if any(step._operation == "group_by" for step in frame._steps) and operation != "summarise":
@@ -519,9 +532,10 @@ def _analyse(frame: ChunkedFrame, verb: Any, steps: Sequence[Any]) -> _Plan:
 def _hidden(node: Any, reductions: dict[str, Reduce], name: str) -> Any:
     """*node* with each reduction replaced by a hidden name, the reductions collected; refuses what cannot combine."""
     if isinstance(node, Reduce):
-        if node.op not in COMBINABLE:
+        if node.op not in REGISTRY:  # the reductions a block can answer, built in or registered with block steps
             raise BlockError(f"{name} = {node.text()}: {node.op}() cannot be combined across blocks; "
-                             f"{', '.join(COMBINABLE)} can; {WHOLE_AXIS}")
+                             f"{', '.join(REGISTRY)} can (register_reduction() adds one, with block steps); "
+                             f"{WHOLE_AXIS}")
         if node.over is not None:
             raise BlockError(f"{name} = {node.text()}: over= names axes, which blocks split; {WHOLE_AXIS}")
         if node.arg is not None and any(isinstance(inner, Reduce) for inner in walk(node.arg)):

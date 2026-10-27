@@ -10,8 +10,8 @@ integer means, spreads).
 import numpy as np
 import pytest
 
-from tidy3a import all, any, fields, group_by, max, mean, median, min, n, pull, quantile, std, sum, summarise, tidy, var
-from tidy3a.chunked import COMBINABLE
+from tidy3a import (all, any, bins, fields, group_by, max, mean, median, min, n, pull, quantile, scan, std, sum,
+                    summarise, tidy, var)
 from tidy3a.reductions import REGISTRY, Reduction
 
 FUNCTIONS = {"sum": sum, "mean": mean, "min": min, "max": max, "std": std, "var": var, "any": any, "all": all,
@@ -22,7 +22,6 @@ EXACT = {("sum", "f"), ("mean", "f"), ("sum", "i"), ("min", "f"), ("max", "f"), 
 
 
 def test_the_registry_is_what_blocks_can_answer():
-    assert COMBINABLE == tuple(REGISTRY)
     assert set(REGISTRY) == {"n", *FUNCTIONS}
     assert all(isinstance(entry, Reduction) and entry.name == name for name, entry in REGISTRY.items())
     assert [name for name, entry in REGISTRY.items() if entry.counted] == ["n"]
@@ -114,3 +113,145 @@ def test_passes_are_shared_by_frames_run_in_rounds_and_ask_again(monkeypatch, tm
         assert all(min(total) >= 1 for _, total in log)  # every group's max is among its values
         assert np.array_equal(got_top >> pull("top"), want >> pull("top"))
         assert np.array_equal(got_low >> pull("low"), want >> pull("low"))
+
+
+# ── register_reduction (step 4) ─────────────────────────────────────────────
+
+
+@pytest.fixture
+def registered():
+    """Names registered in a test, removed after it: registration is global."""
+    import tidy3a.reductions as reductions
+
+    names = []
+    yield names
+    for name in names:
+        reductions.REGISTRY.pop(name, None)
+        reductions.EAGER.pop(name, None)
+
+
+def _geometric_mean(registered):
+    from tidy3a import register_reduction
+
+    def eager(values, axes, na_rm):
+        logs = np.log(values)
+        return np.exp(np.nanmean(logs, axis=axes) if na_rm else np.mean(logs, axis=axes))
+
+    def partial(values, codes, groups, na_rm):
+        logs = np.log(values.astype(np.float64))
+        missing = np.isnan(logs)
+        return np.stack([np.bincount(codes, weights=np.where(missing, 0.0, logs) if na_rm else logs, minlength=groups),
+                         np.bincount(codes, weights=~missing if na_rm else None, minlength=groups)])
+
+    registered.append("geomean")
+    return register_reduction("geomean", eager, partial=partial, merge=lambda held, piece: held + piece,
+                              finish=lambda held, counts: np.exp(held[0] / held[1]))
+
+
+def _value_range(registered):
+    from tidy3a import register_reduction
+
+    def eager(values, axes, na_rm):  # given no values too: an empty group, and the empty block blocks check on
+        if any(values.shape[axis] == 0 for axis in axes):
+            return np.full([size for axis, size in enumerate(values.shape) if axis not in axes], np.nan)
+        return np.max(values, axis=axes) - np.min(values, axis=axes)
+
+    def partial(values, codes, groups, na_rm):
+        low, high = np.full(groups, np.inf), np.full(groups, -np.inf)
+        np.minimum.at(low, codes, values)
+        np.maximum.at(high, codes, values)
+        return np.stack([low, high])
+
+    registered.append("value_range")
+    return register_reduction("value_range", eager, partial=partial,
+                              merge=lambda held, piece: np.stack([np.minimum(held[0], piece[0]),
+                                                                  np.maximum(held[1], piece[1])]),
+                              finish=lambda held, counts: held[1] - held[0],
+                              fill=np.array([[np.inf], [-np.inf]]))  # each row's own fill
+
+
+def positive(seed=5, count=3_000):
+    xr = pytest.importorskip("xarray")
+    rng = np.random.default_rng(seed)
+    values = rng.uniform(0.5, 9.0, count)
+    values[:4] = np.nan
+    return xr.Dataset({"v": ("point", values), "g": ("point", rng.integers(0, 5, count).astype(float))})
+
+
+@pytest.mark.parametrize("backend", ["numpy", "xarray"])
+def test_a_registered_reduction_runs_in_memory_as_its_function_says(registered, backend):
+    geomean = _geometric_mean(registered)
+    data = positive()
+    v, g = fields("v", "g")
+    values, group = data["v"].values, data["g"].values
+    for na_rm in (False, True):
+        got = tidy(data, backend=backend) >> group_by(g) >> summarise(s=geomean(v, na_rm=na_rm)) >> pull("s")
+        reduce = np.nanmean if na_rm else np.mean
+        want = np.array([np.exp(reduce(np.log(values[group == code]))) for code in range(5)])
+        assert got.tobytes() == want.tobytes()
+        whole = tidy(data, backend=backend) >> summarise(s=geomean(v, na_rm=na_rm)) >> pull("s")
+        assert np.asarray(whole).tobytes() == np.asarray(np.exp(reduce(np.log(values)))).tobytes()
+    assert geomean(v, na_rm=True).text() == "geomean(v, na_rm=True)"
+
+
+@pytest.mark.parametrize("rows", [1, 97, 3_000])
+def test_registered_reductions_run_on_blocks(registered, rows):
+    """A geometric mean through sums of logs (float64, close), and a range whose two rows each have their own fill
+    (the same bits); grouped, by bins with an empty bin, and whole."""
+    geomean, value_range = _geometric_mean(registered), _value_range(registered)
+    data = positive()
+    data["v"].values[:4] = 1.0  # the range has no na_rm rule; give it values
+    v, g = fields("v", "g")
+    for pipeline in (group_by(g) >> summarise(points=n(), geo=geomean(v), spread=value_range(v)),
+                     group_by(bins(g, [0, 2, 2.5, 5])) >> summarise(geo=geomean(v), spread=value_range(v)),
+                     summarise(geo=geomean(v), spread=value_range(v))):
+        want = tidy(data) >> pipeline
+        got = tidy(data, blocks={"point": rows}) >> pipeline
+        assert np.allclose(got >> pull("geo"), want >> pull("geo"), rtol=1e-12, equal_nan=True)
+        spread_got, spread_want = np.asarray(got >> pull("spread")), np.asarray(want >> pull("spread"))
+        empty = np.isnan(spread_want)  # an empty bin: NaN in memory, inf - inf (NaN) from the block steps
+        assert np.isnan(spread_got[empty]).all() and spread_got[~empty].tobytes() == spread_want[~empty].tobytes()
+
+
+def test_a_registered_reduction_without_block_steps_is_refused_on_blocks(registered):
+    from tidy3a import BlockError, register_reduction
+
+    registered.append("middle_third")
+    middle_third = register_reduction("middle_third", lambda values, axes, na_rm: np.percentile(values, 50, axis=axes))
+    data = positive()
+    data["v"].values[:4] = 1.0
+    v = fields("v")
+    assert (tidy(data) >> summarise(s=middle_third(v)) >> pull("s")) == np.percentile(data["v"].values, 50)
+    with pytest.raises(BlockError, match=r"middle_third\(\) cannot be combined across blocks.*register_reduction"):
+        tidy(data, blocks={"point": 100}) >> summarise(s=middle_third(v))
+
+
+def test_registration_is_checked(registered):
+    from tidy3a import TidyError, register_reduction
+
+    with pytest.raises(TidyError, match="mean is a built-in reduction"):
+        register_reduction("mean", lambda values, axes, na_rm: values)
+    with pytest.raises(TidyError, match="a Python identifier"):
+        register_reduction("not a name", lambda values, axes, na_rm: values)
+    with pytest.raises(TidyError, match="partial, merge, and finish, all three, or none"):
+        register_reduction("half", lambda values, axes, na_rm: values, partial=lambda *args: 0)
+    registered.append("shapeless")
+    shapeless = register_reduction("shapeless", lambda values, axes, na_rm: values)  # reduces nothing
+    with pytest.raises(Exception, match="gave values of shape .* where the reduction keeps"):
+        tidy(positive()) >> summarise(s=shapeless(fields("v")))
+
+
+def test_frames_with_a_registered_reduction_share_a_scan(registered):
+    geomean = _geometric_mean(registered)
+    data = positive()
+    v, g = fields("v", "g")
+    frame = tidy(data, blocks={"point": 600})
+    loads = []
+    load = frame._blocks.source.block
+    frame._blocks.source.block = lambda start, stop, names=None: loads.append(1) or load(start, stop, names)
+    first = frame >> group_by(g) >> summarise(s=geomean(v, na_rm=True))
+    second = frame >> summarise(s=geomean(v, na_rm=True))
+    got_first, got_second = scan(first, second)
+    assert len(loads) == 5  # one pass, for both
+    assert np.allclose(got_first >> pull("s"), tidy(data) >> group_by(g) >> summarise(s=geomean(v, na_rm=True))
+                       >> pull("s"), rtol=1e-12)
