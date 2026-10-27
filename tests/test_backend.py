@@ -23,8 +23,9 @@ OPTIONAL = ("xarray", "pandas")
 # The xarray backend is the only module that imports xarray or pandas when it is imported.
 MAY_IMPORT_AT_MODULE_LEVEL = {"xarray_backend.py"}
 # These use them only when present or asked for: conversion to and from xarray, label
-# display and fast grouping in the NumPy backend, and pandas' fast paths in expressions.
-MAY_IMPORT_IN_FUNCTIONS = {"numpy_backend.py", "expr.py"}
+# display and fast grouping in the NumPy backend, pandas' fast paths in expressions, and
+# opening a written Zarr store, which only xarray reads.
+MAY_IMPORT_IN_FUNCTIONS = {"numpy_backend.py", "expr.py", "write.py"}
 
 
 def _optional_imports(tree: ast.AST) -> list[ast.AST]:

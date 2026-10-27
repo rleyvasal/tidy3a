@@ -36,10 +36,12 @@ xarray = ["xarray>=2024.6", "pandas>=2.2.2"]
 fast = ["labelarray[fast]>=0.1.4"]
 # as_table() and tidy(table, axis=): Polars DataFrames, and through them tidy3 frames.
 polars = ["polars>=1.0"]
+# write() to a Zarr store, block by block for data read with blocks=.
+zarr = ["xarray>=2024.6", "pandas>=2.2.2", "zarr>=2.18"]
 # opt_einsum: xarray uses it for dot when installed; the tests check tidy3a's results do not change.
 # numba: the tests run the compiled path; the minimum-dependency job runs the NumPy path.
 dev = ["xarray>=2024.6", "pandas>=2.2.2", "numba>=0.60", "pytest>=7.0", "flox>=0.9", "ipython>=8.0", "dask[array]",
-       "opt_einsum", "polars>=1.0"]
+       "opt_einsum", "polars>=1.0", "zarr>=2.18"]
 
 [project.urls]
 Homepage = "https://github.com/rleyvasal/tidy3a"

@@ -227,7 +227,8 @@ import os
 import tempfile
 
 import numpy as np
-from tidy3a import cells, fields, filter, formula, group_by, infer, mean, mutate, n, pull, read_array, scan, summarise
+from tidy3a import (cells, fields, filter, formula, group_by, infer, mean, mutate, n, pull, read_array, scan, select,
+                    summarise, write)
 
 rng = np.random.default_rng(0)
 points = (rng.normal(size=(100_000, 5)) * 30).astype("float32")
@@ -246,6 +247,8 @@ sample = per_ring.preview()  # blocks 1, 3, and 5 of 5, in memory; nothing else 
 per_ring, voxels = scan(per_ring, voxels)  # one pass over the file for both
 print(sample >> pull("ring"))  # [0. 1. 2. 3.]
 print(per_ring >> pull("ring"))  # [0. 1. 2. 3.]
+written = near >> select("values") >> write(os.path.join(tempfile.mkdtemp(), "near.npy"))  # block by block
+print((written >> pull("values")).shape)  # (73686, 5)
 ```
 
 `scan(*frames)` gives several frames' results from one pass over their
@@ -258,6 +261,19 @@ two pipelines written apart share the steps they have in common; a verb
 that holds a function of yours, such as `where(lambda ...)`, is shared
 only with itself. Each result is the same bits as the frame's own run, and afterwards
 each frame holds its result, as after `collect()`.
+
+`write(path)` writes rows that need not fit in memory: a pipeline read in
+blocks that keeps rows writes them as the blocks arrive, in order, to a
+`.npy` file (one array; NumPy only) or a Zarr store (a dataset, appended
+along the blocked axis; `pip install "tidy3a[zarr]"`), and gives the file
+back as a frame read in blocks of the same size, so a pipeline goes on from
+it. The file is written under a temporary name and renamed when every
+block is in, so a failed run leaves nothing under the name given; an
+existing path is refused unless `overwrite=True`. It reads back the same
+bits as `collect()`; a `.npy` file holds values only, so the blocked axis
+comes back without the positions a filter kept, which a Zarr store keeps.
+`scan(summary, writes=[(rows, "near.zarr")])` writes beside other results
+in the same pass.
 
 A summarised pipeline is `select`, `filter`, and `mutate` of row-wise
 expressions, `group_by` of value keys (fields, `cells`, `bins`, `rounded`,

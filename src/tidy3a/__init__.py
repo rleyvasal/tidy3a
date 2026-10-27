@@ -14,6 +14,7 @@ from tidy3a.errors import (
     SliceError,
     SummariseError,
     TidyError,
+    WriteError,
 )
 from tidy3a.expr import (
     all,
@@ -40,6 +41,7 @@ from tidy3a.formula import FormulaError, formula
 from tidy3a.chunked import scan
 from tidy3a.frame import TidyArray, tidy
 from tidy3a.io import fixed_text, infer, read_array, read_binary
+from tidy3a.write import write
 from tidy3a.linalg import (
     angle,
     arccos,
@@ -105,14 +107,14 @@ nan = float("nan")
 
 __all__ = [
     "AlignError", "BlockError", "FilterError", "GroupError", "MutateError", "ReadError", "RefError",
-    "Pipeline", "Plan", "SelectError", "SliceError", "SummariseError", "TidyArray", "TidyError", "__version__",
+    "Pipeline", "Plan", "SelectError", "SliceError", "SummariseError", "TidyArray", "TidyError", "WriteError", "__version__",
     "all", "all_of", "any", "any_of", "as_table", "assign", "bind_cols", "bins", "cells", "col", "contains",
     "ends_with", "env", "everything", "fields", "filter", "fixed_text", "full_join", "group_by", "if_else",
     "infer", "inner_join", "is_numeric", "label", "last_col", "left_join", "matches", "max",
     "mean", "median", "min", "mutate", "n", "nan", "num_range", "pull", "read_array", "read_binary", "rounded",
     "scan", "select",
     "set_backend", "slice", "slice_head", "slice_tail", "starts_with", "std", "sum", "summarise", "summarize",
-    "tidy", "ungroup", "var", "variable", "where",
+    "tidy", "ungroup", "var", "variable", "where", "write",
     # formula
     "FormulaError", "formula",
     # array layer

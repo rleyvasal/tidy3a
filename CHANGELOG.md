@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- `write(path)` writes a frame's data to a `.npy` file (one array) or a
+  Zarr store (a dataset; the `zarr` extra), and gives the file back as a
+  frame. A frame read with `blocks=` that keeps rows writes them block by
+  block, in order, as the blocks arrive, so a result need not fit in
+  memory, and the frame given back reads the file in blocks of the same
+  size. Files are written under a temporary name and renamed when every
+  block is in; an existing path is refused unless `overwrite=True`.
+  `scan(..., writes=[(frame, path)])` writes beside other results in one
+  pass. What is written reads back the same bits as `collect()` (plan
+  milestone 12, step 2).
 - A block reads only the variables used: a frame read with `blocks=`
   records, while each verb is checked on the empty block, which variables
   it reads (by name, field label, coordinate, or formula), and a dataset's

@@ -317,6 +317,8 @@ class ChunkedFrame(TidyArray):
 
     def _apply_verb(self, verb: Any) -> Any:
         operation = getattr(verb, "_operation", None)
+        if operation == "write" and not self._summarised:  # rows written as the blocks arrive, never all in memory
+            return _write(self, verb)
         if self._summarised or operation not in (*ROW_WISE, "group_by", "summarise"):
             return verb(self._run())  # needs the whole axis: the blocks' result, in memory
         with warnings.catch_warnings(), recording_reads() as read:  # a mean of nothing warns; here that says nothing
@@ -756,7 +758,7 @@ def _spread(held: np.ndarray, where: np.ndarray, size: int, fill: Any) -> np.nda
 # ── The scan ────────────────────────────────────────────────────────────────
 
 
-def scan(*frames: Any) -> tuple[TidyArray, ...]:
+def scan(*frames: Any, writes: Sequence[tuple[Any, Any]] = ()) -> tuple[TidyArray, ...]:
     """Run several chunked frames' verbs over their source in one pass, and give each frame's result, in memory.
 
     The frames come from one ``read_array(..., blocks=)`` or ``tidy(..., blocks=)``
@@ -767,17 +769,48 @@ def scan(*frames: Any) -> tuple[TidyArray, ...]:
     result is the same bits as the frame's own run. Afterwards each frame
     holds its result, as it does after ``collect()``; a frame already
     computed is given as it is.
+
+    ``writes=[(frame, path), ...]`` writes those frames' rows block by block
+    in the same pass (``tidy3a.write``), and adds each written file, as a
+    frame read in blocks, after the results.
     """
-    for frame in frames:
+    for frame in (*frames, *(pair[0] for pair in writes if isinstance(pair, tuple) and len(pair) == 2)):
         if not isinstance(frame, ChunkedFrame):
             raise BlockError(f"scan() runs frames read with blocks=, not {type(frame).__name__}")
+    for pair in writes:
+        if not (isinstance(pair, tuple) and len(pair) == 2):
+            raise BlockError(f"scan(writes=...) takes (frame, path) pairs, not {pair!r}")
+        if pair[0]._summarised:
+            raise BlockError("scan(writes=...) writes rows block by block; a summary fits in memory, so write it "
+                             "after its result: summary >> write(path)")
     pending = {id(frame): frame for frame in frames if frame._result is None}  # the same frame twice runs once
-    if len({id(frame._blocks) for frame in pending.values()}) > 1:
+    writers = [(frame, _writer(frame, path, False)) for frame, path in writes]
+    if len({id(frame._blocks) for frame in (*pending.values(), *(frame for frame, _ in writers))}) > 1:
         raise BlockError("scan() runs one source in one pass; these frames come from different read_array() or "
                          "tidy() calls, so scan each call's frames together")
-    if pending:
-        _scan(list(pending.values()))
-    return tuple(frame._result for frame in frames)
+    if pending or writers:
+        _scan(list(pending.values()), writers)
+    return (*(frame._result for frame in frames), *(writer.reopen() for _, writer in writers))
+
+
+def _writer(frame: ChunkedFrame, path: Any, overwrite: bool) -> Any:
+    """The writer for a frame's rows, appended block by block along the blocked axis; checked before any block runs.
+    The blocks' positions are dropped where joining them in memory drops them (no filter ran)."""
+    import os
+
+    from tidy3a.write import Writer
+
+    blocks = frame._blocks
+    unlabel = not blocks.labelled and not any(step._operation == "filter" for step in frame._steps)
+    return Writer(os.fspath(path), frame, blocks.axis, overwrite, unlabel, blocks)
+
+
+def _write(frame: ChunkedFrame, verb: Any) -> TidyArray:
+    """``frame >> write(path)``: the frame's rows written as the blocks arrive, then the file read back in blocks."""
+    path, overwrite = verb._arguments
+    writer = _writer(frame, path, overwrite)
+    _scan([], [(frame, writer)])
+    return writer.reopen()
 
 
 @dataclass
@@ -789,6 +822,7 @@ class _Leaf:
     parts: list[Any]  # a joining frame's rows per block, as the backend holds them
     exact: dict[str, list[tuple[np.ndarray, np.ndarray]]]  # per float32 sum: the combinations a second pass settled
     # (their places in the table, their correctly rounded results)
+    writer: Any = None  # a writing frame's file (``tidy3a.write.Writer``): its blocks go there, not into parts
 
 
 class _Node:
@@ -869,13 +903,25 @@ def _needs(frame: ChunkedFrame) -> frozenset | None:
     return frame._reads | frozenset(frame._backend.variable_names(frame._data))
 
 
-def _scan(frames: Sequence[ChunkedFrame]) -> None:
-    """One pass over the blocks for *frames*, then the shared second pass; each frame is left holding its result.
-    A block holds only the variables some frame needs (plan milestone 12)."""
-    blocks = frames[0]._blocks
+def _scan(frames: Sequence[ChunkedFrame], writers: Sequence[tuple[ChunkedFrame, Any]] = ()) -> None:
+    """One pass over the blocks for *frames*, then the shared second pass; each frame is left holding its result,
+    and each of *writers*' frames has its rows written. A block holds only the variables some frame needs (plan
+    milestone 12). A failure leaves no written file behind."""
+    try:
+        _scan_once(frames, writers)
+    except BaseException:
+        for _, writer in writers:
+            writer.abort()
+        raise
+
+
+def _scan_once(frames: Sequence[ChunkedFrame], writers: Sequence[tuple[ChunkedFrame, Any]]) -> None:
+    every = [*frames, *(frame for frame, _ in writers)]
+    blocks = every[0]._blocks
     leaves = [_Leaf(frame, _Table(frame._plan) if frame._summarised else None, [], {}) for frame in frames]
+    leaves += [_Leaf(frame, None, [], {}, writer) for frame, writer in writers]
     root = _trie(leaves)
-    needs = [_needs(frame) for frame in frames]
+    needs = [_needs(frame) for frame in every]
     names = None if any(need is None for need in needs) else frozenset().union(*needs)
 
     def block(span: tuple[int, int]) -> list[tuple[_Leaf, Any]]:
@@ -894,7 +940,9 @@ def _scan(frames: Sequence[ChunkedFrame]) -> None:
     with ThreadPoolExecutor(blocks.threads) as pool:
         for found in _in_order(pool, block, blocks.spans):  # merged as the blocks arrive, in order
             for leaf, part in found:
-                if leaf.table is None:
+                if leaf.writer is not None:
+                    leaf.writer.add(part)
+                elif leaf.table is None:
                     leaf.parts.append(part)
                 else:
                     leaf.table.merge(*part)
@@ -906,7 +954,9 @@ def _scan(frames: Sequence[ChunkedFrame]) -> None:
         _exact_pass(leaves, blocks, pool, {key: unsure for key, (_, unsure) in settled.items()}, names)
     for leaf in leaves:
         frame, table = leaf.frame, leaf.table
-        if table is None:
+        if leaf.writer is not None:
+            leaf.writer.finish()
+        elif table is None:
             frame._result = _joined(frame, leaf.parts)
         elif table.keys is None:  # no block kept a row, the first included, so its summary is the answer
             frame._result = frame._evolve()

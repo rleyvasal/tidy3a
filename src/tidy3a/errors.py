@@ -58,6 +58,10 @@ class BlockError(TidyError):
     """A verb or summary that cannot run block by block over a file read with ``blocks=``."""
 
 
+class WriteError(TidyError):
+    """``write`` cannot write this data to this path."""
+
+
 class AlignError(TidyError, labelarray.AlignError):
     """Labels on a shared axis do not match."""
 
