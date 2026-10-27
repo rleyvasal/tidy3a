@@ -91,10 +91,10 @@ from tidy3a.expr import (
 )
 from tidy3a.frame import TidyArray
 from tidy3a.plan import Record, Snapshot, Step, _variable, snapshot
+from tidy3a.reductions import REGISTRY, WHOLE_AXIS
 
 ROW_WISE = ("select", "filter", "mutate")
-COMBINABLE = ("n", "sum", "mean", "min", "max", "std", "var", "any", "all")
-WHOLE_AXIS = "read the data with lazy=True, which memory-maps a file, or load it, to run this on every position"
+COMBINABLE = tuple(REGISTRY)  # the reductions a block can answer (``tidy3a.reductions``)
 
 
 # ── Sources ─────────────────────────────────────────────────────────────────
@@ -667,22 +667,15 @@ class _Table:
             where = np.searchsorted(union, self.keys)
             self.counts = _spread(self.counts, where, len(union), 0)
             for hidden, (kind, held) in self.pieces.items():
-                fill = _fill(kind, held.dtype, self.plan.reductions[hidden])
+                node = self.plan.reductions[hidden]
+                fill = REGISTRY[node.op].fill(node, kind, held.dtype)
                 self.pieces[hidden] = (kind, _spread(held, where, len(union), fill))
             self.keys = union
         at = np.searchsorted(union, keys)
         self.counts[at] += counts
         for hidden, (kind, piece) in pieces.items():
-            held = self.pieces[hidden][1]
-            if kind == "estimate":
-                held[:sums.TERMS, at] += piece[:sums.TERMS]
-                held[sums.TERMS, at] = np.maximum(held[sums.TERMS, at], piece[sums.TERMS])
-            elif kind in ("extreme", "flag", "flagged"):
-                held[..., at] = _merged(self.plan.reductions[hidden], held[..., at], piece)
-            elif kind == "moments":
-                held[:, at] = _combine_moments(held[:, at], piece)
-            else:
-                held[..., at] += piece
+            node, held = self.plan.reductions[hidden], self.pieces[hidden][1]
+            held[..., at] = REGISTRY[node.op].merge(node, kind, held[..., at], piece)
 
     def merge(self, found: Sequence[tuple[np.ndarray, Any, int]], local: Any, counts: Any, pieces: Any,
               dropped: int) -> None:
@@ -704,74 +697,43 @@ class _Table:
         where = np.searchsorted(full, self.keys)
         self.counts = _spread(self.counts, where, len(full), 0)
         for hidden, (kind, held) in self.pieces.items():
-            fill = _fill(kind, held.dtype, plan.reductions[hidden])
-            self.pieces[hidden] = (kind, _spread(held, where, len(full), fill))
+            node = plan.reductions[hidden]
+            self.pieces[hidden] = (kind, _spread(held, where, len(full), REGISTRY[node.op].fill(node, kind, held.dtype)))
         self.keys = full
 
     def settle(self) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
-        """Each reduction's values per combination from the pieces, and, per float32 sum, the combinations the
-        error bound cannot settle (``labelarray.sums.settle``), whose exact sums a second pass finds."""
+        """Each reduction's values per combination from the pieces, and the combinations a reduction cannot settle
+        from them (a float32 sum the error bound does not settle), whose exact values a second pass finds."""
         assert self.keys is not None
         columns: dict[str, np.ndarray] = {}
         unsure: dict[str, np.ndarray] = {}
         for hidden, node in self.plan.reductions.items():
-            if node.op == "n":
+            entry = REGISTRY[node.op]
+            if entry.counted:
                 columns[hidden] = self.counts
                 continue
             kind, held = self.pieces[hidden]
-            if kind == "estimate":
-                result, undecided = sums.settle(np.asarray(held, dtype=np.float64), self.blocks, node.op, node.na_rm)
-                columns[hidden] = result
-                if undecided.any():
-                    unsure[hidden] = np.flatnonzero(undecided)
-            elif kind == "extreme":
-                columns[hidden] = _settled_extreme(held, self.counts)
-            elif kind == "flag":
-                columns[hidden] = held
-            elif kind == "flagged":  # missing where a group had a missing value, as in memory, unless na_rm
-                answer, marks = held
-                missing = marks if node.op == "any" else ~marks
-                columns[hidden] = answer if node.na_rm else np.where(missing, np.nan, answer.astype(np.float64))
-            elif kind == "moments":
-                present, _, squares, missing = held
-                with np.errstate(invalid="ignore", divide="ignore"):
-                    variance = np.where(present > 0, squares / present, np.nan)  # the population variance, as np.var
-                if not node.na_rm:
-                    variance = np.where(missing > 0, np.nan, variance)
-                columns[hidden] = np.sqrt(variance) if node.op == "std" else variance
-            elif kind == "float":
-                total, present, counted = held
-                with np.errstate(invalid="ignore", divide="ignore"):
-                    result = total if node.op == "sum" else total / (present if node.na_rm else counted)
-                columns[hidden] = _at_least(result, present, node)
-            else:
-                total, counted = held
-                columns[hidden] = _at_least(total, counted, node)
+            columns[hidden], undecided = entry.finish(node, kind, held, self.counts, self.blocks)
+            if undecided is not None:
+                unsure[hidden] = undecided
         return columns, unsure
 
     def finish(self, columns: dict[str, np.ndarray],
                exact: dict[str, list[tuple[np.ndarray, np.ndarray]]]) -> dict[str, np.ndarray]:
-        """*columns* with the exact sums the second pass found in their places, and a float32 sum's ``min_count``
-        applied, as ``from_chunks`` does in memory."""
+        """*columns* with the values the second pass found in their places, each closed by its reduction (a float32
+        sum's ``min_count``, as ``from_chunks`` applies it in memory)."""
         for hidden, node in self.plan.reductions.items():
             for chosen, found in exact.get(hidden, ()):
                 columns[hidden][chosen] = found
-            if node.op == "sum" and node.min_count is not None and self.pieces[hidden][0] == "estimate":
-                present = self.pieces[hidden][1][sums.PRESENT]
-                columns[hidden] = np.where(present >= node.min_count, columns[hidden], np.float32(np.nan))
+            if not REGISTRY[node.op].counted:
+                kind, held = self.pieces[hidden]
+                columns[hidden] = REGISTRY[node.op].close(node, kind, held, columns[hidden])
         return columns
 
     def group_codes(self) -> list[np.ndarray]:
         """Each part's code for every combination in the table."""
         assert self.keys is not None
         return list(np.unravel_index(self.keys, self.sizes)) if self.parts else []
-
-
-def _at_least(result: np.ndarray, present: np.ndarray, node: Reduce) -> np.ndarray:
-    """A sum as NaN where fewer than ``min_count`` values are present."""
-    if node.op != "sum" or node.min_count is None:
-        return result
-    return np.where(present >= node.min_count, result, np.nan)
 
 
 def _spread(held: np.ndarray, where: np.ndarray, size: int, fill: Any) -> np.ndarray:
@@ -1023,9 +985,10 @@ def _exact_pass(leaves: Sequence[_Leaf], blocks: Blocks, pool: ThreadPoolExecuto
                 codes = _table_codes(leaf.table, rows)
                 for index, hidden, chosen in wanted[id(leaf)]:
                     value, each = rows.values[hidden]
-                    buckets.append((index, sums.chunk_exact(value, (0,), chosen,
-                                                            codes=codes if each == 1 else np.repeat(codes, each),
-                                                            groups=len(leaf.table.keys))))
+                    node = leaf.table.plan.reductions[hidden]
+                    buckets.append((index, REGISTRY[node.op].exact(node, value,
+                                                                   codes if each == 1 else np.repeat(codes, each),
+                                                                   chosen, len(leaf.table.keys))))
 
             with _naming(blocks, span):
                 _walk(root, blocks.load(*span, names), visit)
@@ -1038,8 +1001,8 @@ def _exact_pass(leaves: Sequence[_Leaf], blocks: Blocks, pool: ThreadPoolExecuto
         for index, (leaf, hidden, chosen) in enumerate(requests):  # finished now, so the buckets go with the pass
             if index in totals:
                 node = leaf.table.plan.reductions[hidden]  # type: ignore[union-attr]
-                leaf.exact.setdefault(hidden, []).append((chosen, sums.exact_results(totals[index], node.op,
-                                                                                     node.na_rm)))
+                leaf.exact.setdefault(hidden, []).append((chosen, REGISTRY[node.op].exact_finish(node,
+                                                                                                totals[index])))
         del totals
 
 
@@ -1160,125 +1123,8 @@ def _partial(plan: _Plan, block: TidyArray, axis: str):
 
 
 def _pieces(node: Reduce, value: np.ndarray, codes: np.ndarray, count: int) -> tuple[str, np.ndarray]:
-    """One reduction's pieces per group from a block's values and their codes."""
-    if node.op in ("min", "max", "any", "all"):
-        order = np.argsort(codes, kind="stable")
-        starts = np.concatenate([[0], np.cumsum(np.bincount(codes, minlength=count))[:-1]])
-        if node.op in ("any", "all"):
-            return _flags(node, value, codes, count, order, starts)
-        if value.dtype.kind in "US":  # text compares as Python objects, as the backends compare it
-            value = value.astype(object)
-        return "extreme", _extreme(node).reduceat(value[order], starts)
-    if node.op in ("std", "var"):
-        return "moments", _moments(value, codes, count)
-    if value.dtype == np.float32:
-        return "estimate", sums.chunk_estimate(value, (0,), na_rm=node.na_rm, codes=codes, groups=count)
-    counted = np.bincount(codes, minlength=count).astype(np.float64)
-    if value.dtype.kind == "f":
-        missing = np.isnan(value)
-        summed = np.where(missing, 0.0, value) if node.na_rm else value
-        return "float", np.stack([np.bincount(codes, weights=summed, minlength=count),
-                                  np.bincount(codes, weights=~missing, minlength=count), counted])
-    if value.dtype.kind in "biu" and node.op == "mean":  # added in float64, as np.mean adds integers
-        return "float", np.stack([np.bincount(codes, weights=value, minlength=count), counted, counted])
-    if value.dtype.kind in "biu":  # added in int64, wrapping as np.sum does
-        order = np.argsort(codes, kind="stable")
-        starts = np.concatenate([[0], np.cumsum(np.bincount(codes, minlength=count))[:-1]])
-        return "int", np.stack([np.add.reduceat(value[order].astype(np.int64), starts), counted.astype(np.int64)])
-    raise BlockError(f"{node.text()}: {node.op} of {value.dtype} values is not handled on blocks; {WHOLE_AXIS}")
-
-
-def _flags(node: Reduce, value: np.ndarray, codes: np.ndarray, count: int, order: np.ndarray,
-           starts: np.ndarray) -> tuple[str, np.ndarray]:
-    """``any`` or ``all`` per group, a missing value counted as in memory: left out (False for any, True for all), and,
-    for values that can be missing, whether the group had one, merged by the same or and and as the answer: for
-    ``all`` the row says the group had none, so one fill (False for any, True for all) serves both rows."""
-    flags = value.astype(bool)
-    if value.dtype.kind not in "fcmM":
-        return "flag", _extreme(node).reduceat(flags[order], starts)
-    missing = np.isnat(value) if value.dtype.kind in "mM" else np.isnan(value)
-    flags[missing] = node.op == "all"
-    answer = _extreme(node).reduceat(flags[order], starts)
-    marks = missing if node.op == "any" else ~missing
-    return "flagged", np.stack([answer, _extreme(node).reduceat(marks[order], starts)])
-
-
-def _extreme(node: Reduce) -> Any:
-    if node.op == "any":
-        return np.logical_or
-    if node.op == "all":
-        return np.logical_and
-    if node.op == "min":
-        return np.fmin if node.na_rm else np.minimum
-    return np.fmax if node.na_rm else np.maximum
-
-
-def _moments(value: np.ndarray, codes: np.ndarray, count: int) -> np.ndarray:
-    """Per group, in float64: the values present, their mean, their squared deviations' sum, and the NaN among them."""
-    floats = value.astype(np.float64)
-    missing = np.isnan(floats)
-    present = np.bincount(codes, weights=~missing, minlength=count)
-    total = np.bincount(codes, weights=np.where(missing, 0.0, floats), minlength=count)
-    mean = np.divide(total, present, out=np.zeros(count), where=present > 0)
-    deviations = np.where(missing, 0.0, floats - mean[codes]) ** 2
-    squares = np.bincount(codes, weights=deviations, minlength=count)
-    return np.stack([present, mean, squares, np.bincount(codes, weights=missing, minlength=count)])
-
-
-def _combine_moments(held: np.ndarray, piece: np.ndarray) -> np.ndarray:
-    """Two groups' moments as one (Chan, Golub, and LeVeque's parallel update), in float64."""
-    na, ma, sa, nana = held
-    nb, mb, sb, nanb = piece
-    n = na + nb
-    delta = mb - ma
-    share = np.divide(nb, n, out=np.zeros_like(n), where=n > 0)
-    return np.stack([n, ma + delta * share, sa + sb + delta * delta * na * share, nana + nanb])
-
-
-_UNSEEN = object()  # an object accumulator's slot for a group no block has had yet
-
-
-def _fill(kind: str, dtype: np.dtype, node: Reduce) -> Any:
-    """The value a group not yet seen holds in an accumulator."""
-    if kind in ("flag", "flagged"):
-        return node.op == "all"
-    if kind != "extreme":
-        return 0
-    if dtype.kind in "fc":  # NaN where NaN is skipped (fmin, fmax), so a group of NaN stays NaN; else the far end
-        return np.nan if node.na_rm else (np.inf if node.op == "min" else -np.inf)
-    if dtype.kind in "mM":  # the far ends of the int64 the times are held in; its smallest is NaT
-        limits = np.iinfo(np.int64)
-        return np.array(limits.max if node.op == "min" else limits.min + 1, dtype=np.int64).view(dtype)[()]
-    if dtype.kind == "O":
-        return _UNSEEN
-    limits = np.iinfo(dtype)
-    return limits.max if node.op == "min" else limits.min
-
-
-def _merged(node: Reduce, held: np.ndarray, piece: np.ndarray) -> np.ndarray:
-    """An accumulator's values for some groups and a block's pieces for them, combined; an object accumulator's
-    unseen slots take the piece, since no other value compares with them."""
-    if held.dtype == object:
-        unseen = np.frompyfunc(lambda item: item is _UNSEEN, 1, 1)(held).astype(bool)
-        held = np.where(unseen, piece, held)
-    return _extreme(node)(held, piece)
-
-
-def _settled_extreme(held: np.ndarray, counts: np.ndarray) -> np.ndarray:
-    """A min or max per group, missing where a group had no positions (an empty bin), as in memory: NaN of a float's
-    own type, NaT, NaN among objects; integers and booleans have no missing value, so float64 when a group is empty."""
-    empty = counts == 0
-    kind = held.dtype.kind
-    if kind == "O":
-        unseen = np.frompyfunc(lambda item: item is _UNSEEN, 1, 1)(held).astype(bool)
-        return np.where(empty | unseen, np.nan, held)
-    if not empty.any():
-        return held
-    if kind in "fc":
-        return np.where(empty, np.nan, held).astype(held.dtype)
-    if kind in "mM":
-        return np.where(empty, np.array("NaT", dtype=held.dtype), held)
-    return np.where(empty, np.nan, held.astype(np.float64))
+    """One reduction's pieces per group from a block's values and their codes (``tidy3a.reductions``)."""
+    return REGISTRY[node.op].partial(node, value, codes, count)
 
 
 def _result(frame: ChunkedFrame, plan: _Plan, table: _Table, columns: dict[str, np.ndarray]) -> TidyArray:
