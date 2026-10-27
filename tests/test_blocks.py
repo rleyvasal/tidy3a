@@ -36,6 +36,7 @@ from tidy3a import (
     pull,
     read_array,
     rounded,
+    scan,
     select,
     sqrt,
     std,
@@ -570,3 +571,137 @@ def test_block_options_on_datasets_are_checked(npy):
     path = npy[0]
     with pytest.raises(ReadError, match='blocks="chunks" takes'):
         read_array(path, dims={"point": infer, "feature": 5}, blocks="chunks")
+
+
+# ── Milestone 11, step 2: several results from one pass ─────────────────────
+
+
+def counting(counts):
+    """A row-wise verb that counts the blocks it runs on and changes nothing."""
+    from tidy3a.verbs import Verb
+
+    def apply(frame):
+        counts.append(1)
+        return frame
+
+    return Verb("counting()", apply, operation="mutate", arguments=[])
+
+
+RINGS = group_by(ring) >> summarise(points=n(), low=min(z), high=max(z))
+GRID = group_by(cells(x, 20.0), rounded(y, 25), axis="cell") >> summarise(points=n(), top=max(intensity))
+
+
+def test_the_shared_prefix_runs_once_per_block(npy):
+    path, values = npy
+    counts = []
+    cloud_ = read_array(path, dims={"point": infer, "feature": 5}, labels={"feature": NAMES}, field_axis="feature",
+                        blocks=3_000)
+    near = mutate(distance=formula(r"\sqrt{x^2 + y^2 + z^2}")) >> filter(distance <= 60)
+    shared = cloud_ >> mutate(distance=formula(r"\sqrt{x^2 + y^2 + z^2}")) >> counting(counts) >> filter(distance <= 60)
+    assert counts == [1]  # on the first block, as the verb was called
+    rings, grid = shared >> RINGS, shared >> GRID
+    got_rings, got_grid = scan(rings, grid)
+    assert counts == [1] * 8  # once more per block, for both frames
+    assert rings._result is got_rings and grid._result is got_grid
+    assert "+ axis ring: 41" in str(rings.explain())  # the frames hold their results, as after collect()
+    again = scan(rings, grid)  # computed frames are given as they are
+    assert again[0] is got_rings and again[1] is got_grid
+    assert counts == [1] * 8
+    for name in ("ring", "points", "low", "high"):
+        assert same_bits(got_rings >> pull(name), in_memory(values, near >> RINGS, [name])[name]), name
+    for name in ("cell", "points", "top"):
+        assert same_bits(got_grid >> pull(name), in_memory(values, near >> GRID, [name])[name]), name
+
+
+@pytest.mark.parametrize("threads", [1, 3])
+def test_a_joining_frame_beside_summarising_ones(npy, threads):
+    path, values = npy
+    frame = read_array(path, dims={"point": infer, "feature": 5}, labels={"feature": NAMES}, field_axis="feature",
+                       blocks=3_000, threads=threads)
+    near = frame >> mutate(distance=formula(r"\sqrt{x^2 + y^2 + z^2}")) >> filter(distance <= 60)
+    rows = near >> select("x", "distance")  # a leaf that joins its rows
+    rings = near >> RINGS  # hangs off the same prefix
+    whole = frame >> summarise(points=n(), far=max(x))  # at the root, with no row-wise verb
+    got_rows, got_rings, got_whole = scan(rows, rings, whole)
+    assert same_bits(got_rows >> pull("point"), in_memory(values, ROWS, ["point"])["point"])
+    assert same_bits(got_rows >> pull("distance"), in_memory(values, ROWS, ["distance"])["distance"])
+    assert same_bits(got_rings >> pull("points"), in_memory(values, near.plan() >> RINGS, ["points"])["points"])
+    assert got_whole >> pull("points") == len(values)
+    assert same_bits(got_whole >> pull("far"), values[:, 0].max())
+
+
+def test_a_frame_that_is_another_s_prefix(npy):
+    path, values = npy
+    frame = read_array(path, dims={"point": infer, "feature": 5}, labels={"feature": NAMES}, field_axis="feature",
+                       blocks=3_000)
+    near = frame >> mutate(distance=formula(r"\sqrt{x^2 + y^2 + z^2}")) >> filter(distance <= 60)
+    rings = near >> RINGS
+    got_near, got_rings, again = scan(near, rings, near)  # the same frame twice runs once
+    assert got_near is again
+    assert same_bits(got_near >> pull("distance"), in_memory(values, ROWS, ["distance"])["distance"])
+    assert same_bits(got_rings >> pull("low"), in_memory(values, near.plan() >> RINGS, ["low"])["low"])
+
+
+@pytest.mark.parametrize("pairs", [None, 1])
+@pytest.mark.parametrize("rows", [97, 3_000])
+def test_the_exact_pass_is_shared_and_gives_the_same_bits(npy, monkeypatch, pairs, rows):
+    """Two branches whose float32 sums the error bound cannot settle (the tie group) get their exact sums from one
+    more pass; with EXACT_PAIRS at 1, a pass takes one combination, so each branch's tie group gets a pass of its own."""
+    from labelarray import sums as labelarray_sums
+
+    if pairs is not None:
+        monkeypatch.setattr(labelarray_sums, "EXACT_PAIRS", pairs)
+    path, values = npy
+    counts = []
+    frame = read_array(path, dims={"point": infer, "feature": 5}, labels={"feature": NAMES}, field_axis="feature",
+                       blocks=rows)
+    shared = frame >> counting(counts) >> filter(intensity > -(2**31))
+    half = fields("half")
+    by_ring = group_by(ring) >> summarise(total=sum(intensity), brightness=mean(intensity))
+    by_half = mutate(half=intensity * 0.5) >> group_by(ring) >> summarise(total=sum(half), points=n())
+    totals, halves = shared >> by_ring, shared >> by_half
+    got_totals, got_halves = scan(totals, halves)
+    blocks = -(-len(values) // rows)
+    passes = (len(counts) - 1) // blocks  # the first block, then each block once per pass
+    assert len(counts) == 1 + passes * blocks
+    assert passes == 2 if pairs is None else passes >= 3  # one shared second pass, or one per combination
+    want = in_memory(values, filter(intensity > -(2**31)) >> by_ring, ["ring", "total", "brightness"])
+    for name in ("ring", "total", "brightness"):
+        assert same_bits(got_totals >> pull(name), want[name]), name
+    want = in_memory(values, filter(intensity > -(2**31)) >> by_half, ["total", "points"])
+    for name in ("total", "points"):
+        assert same_bits(got_halves >> pull(name), want[name]), name
+
+
+def test_scan_reads_each_dask_chunk_once_for_several_frames(npy):
+    _, values = npy
+    source, reads = chunked_dataset(values, 3_000)
+    frame = tidy(source, blocks="chunks", threads=2)
+    near = frame >> mutate(distance=sqrt(x * x + y * y + z * z)) >> filter(distance <= 60)
+    rings = near >> group_by(ring) >> summarise(points=n(), low=min(z))
+    grid = near >> group_by(cells(x, 20.0), rounded(y, 25), axis="cell") >> summarise(points=n())
+    rows = near >> select("x", "ring")
+    del reads[:]
+    got_rings, got_grid, got_rows = scan(rings, grid, rows)
+    from collections import Counter
+
+    assert Counter(reads) == Counter((name, start) for name in NAMES for start in range(0, 20_000, 3_000))
+    whole = tidy(source) >> near.plan()
+    assert same_bits(got_rings >> pull("low"), whole >> group_by(ring) >> summarise(low=min(z)) >> pull("low"))
+    assert same_bits(got_grid >> pull("points"), whole >> group_by(cells(x, 20.0), rounded(y, 25), axis="cell")
+                     >> summarise(points=n()) >> pull("points"))
+    assert same_bits(got_rows >> pull("x"), whole >> pull("x"))
+
+
+def test_scan_refuses_frames_from_different_sources_and_frames_in_memory(npy):
+    path, values = npy
+    options = dict(dims={"point": infer, "feature": 5}, labels={"feature": NAMES}, field_axis="feature")
+    one = read_array(path, blocks=3_000, **options) >> summarise(points=n())
+    other = read_array(path, blocks=5_000, **options) >> summarise(points=n())
+    with pytest.raises(BlockError, match="different read_array\\(\\) or tidy\\(\\) calls"):
+        scan(one, other)
+    with pytest.raises(BlockError, match="frames read with blocks=, not TidyArray"):
+        scan(one, read_array(values, **options))
+    assert scan() == ()
+    (got,) = scan(one)
+    assert got >> pull("points") == len(values)

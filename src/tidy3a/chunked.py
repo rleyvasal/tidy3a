@@ -12,6 +12,14 @@ over every block, ``threads`` blocks at a time: a pipeline ending in
 blocks in flight and the groups, not the data; any other pipeline
 concatenates the blocks' rows, for data that fits once filtered.
 
+``scan(*frames)`` gives several frames' results from one pass over their
+shared source: the frames' row-wise verbs form a trie, each block is loaded
+once and walked depth first with the frame after each shared prefix kept
+while its branches run, and each frame takes its summaries or its rows from
+where its own verbs branch off. A frame's result is the same bits as its
+own run; the float32 sums the error bound cannot settle get one shared
+second pass. Asking one frame for its result is a scan of that frame.
+
 The blocks come from a source (``FileSource``, ``ArraySource``,
 ``DatasetSource``): a file reopened per block, an in-memory array sliced
 per block, or an xarray dataset, lazy or not, whose block is computed and
@@ -70,7 +78,7 @@ from tidy3a.expr import (
     walk,
 )
 from tidy3a.frame import TidyArray
-from tidy3a.plan import Pipeline, Record, Step, snapshot
+from tidy3a.plan import Record, Step, snapshot
 
 ROW_WISE = ("select", "filter", "mutate")
 COMBINABLE = ("n", "sum", "mean", "min", "max", "std", "var", "any", "all")
@@ -242,9 +250,7 @@ class ChunkedFrame(TidyArray):
 
     def _run(self) -> TidyArray:
         """The recorded verbs over every block: the merged summaries, or the rows kept, in memory, computed once."""
-        if self._result is None:
-            self._result = _execute(self) if self._summarised else _concatenate(self)
-        return self._result
+        return scan(self)[0]
 
     @translating
     def collect(self) -> Any:
@@ -279,7 +285,6 @@ class ChunkedFrame(TidyArray):
 
 @dataclass(frozen=True)
 class _Plan:
-    before: Pipeline  # the row-wise verbs, run on each block
     key: ValueKey | None  # the group_by key: a plain field, a transform, or several keys (MultiKey)
     parts: tuple[ValueKey, ...]  # the key itself, or each key of several
     reductions: dict[str, Reduce]  # hidden name -> the reduction combined across blocks
@@ -327,8 +332,7 @@ def _analyse(frame: ChunkedFrame, verb: Any, steps: Sequence[Any]) -> _Plan:
     reductions: dict[str, Reduce] = {}
     summaries = {name: _hidden(as_expr(expr), reductions, name) for name, expr in named.items()}
     keys = [key for key in frame._groups if isinstance(key, ValueKey)]
-    before = Pipeline([step for step in steps[:-1] if step._operation != "group_by"])
-    return _Plan(before, keys[0] if keys else None, _parts(frame._groups), reductions, summaries)
+    return _Plan(keys[0] if keys else None, _parts(frame._groups), reductions, summaries)
 
 
 def _hidden(node: Any, reductions: dict[str, Reduce], name: str) -> Any:
@@ -500,19 +504,30 @@ class _Table:
             else:
                 held[..., at] += piece
 
-    def finish(self, exact: Callable[[np.ndarray, str], np.ndarray]) -> dict[str, np.ndarray]:
-        """Each reduction's values per combination; *exact(chosen, hidden)* gives the exact sums a second pass finds."""
-        if self.keys is None:
-            self.keys = np.zeros(0, dtype=np.int64)
+    def merge(self, found: Sequence[tuple[np.ndarray, Any, int]], local: Any, counts: Any, pieces: Any,
+              dropped: int) -> None:
+        """One block's partial (``_partial``) taken into the table."""
+        self.take(found)
+        self.dropped += dropped
+        if local is not None:
+            self.add(_combined(local, self), counts, pieces)
+
+    def settle(self) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+        """Each reduction's values per combination from the pieces, and, per float32 sum, the combinations the
+        error bound cannot settle (``labelarray.sums.settle``), whose exact sums a second pass finds."""
+        assert self.keys is not None
         columns: dict[str, np.ndarray] = {}
+        unsure: dict[str, np.ndarray] = {}
         for hidden, node in self.plan.reductions.items():
             if node.op == "n":
                 columns[hidden] = self.counts
                 continue
             kind, held = self.pieces[hidden]
             if kind == "estimate":
-                columns[hidden] = sums.from_chunks(held, self.blocks, node.op, lambda chosen: exact(chosen, hidden),
-                                                   na_rm=node.na_rm, min_count=node.min_count)
+                result, undecided = sums.settle(np.asarray(held, dtype=np.float64), self.blocks, node.op, node.na_rm)
+                columns[hidden] = result
+                if undecided.any():
+                    unsure[hidden] = np.flatnonzero(undecided)
             elif kind in ("extreme", "flag"):
                 columns[hidden] = held
             elif kind == "moments":
@@ -530,6 +545,18 @@ class _Table:
                 total, counted = held
                 result = total if node.op == "sum" else total / counted
                 columns[hidden] = _at_least(result, counted, node)
+        return columns, unsure
+
+    def finish(self, columns: dict[str, np.ndarray],
+               exact: dict[str, list[tuple[np.ndarray, np.ndarray]]]) -> dict[str, np.ndarray]:
+        """*columns* with the exact sums the second pass found (``labelarray.sums.exact_results``) in their places,
+        and a float32 sum's ``min_count`` applied, as ``from_chunks`` does in memory."""
+        for hidden, node in self.plan.reductions.items():
+            for chosen, buckets in exact.get(hidden, ()):
+                columns[hidden][chosen] = sums.exact_results(buckets, node.op, node.na_rm)
+            if node.op == "sum" and node.min_count is not None and self.pieces[hidden][0] == "estimate":
+                present = self.pieces[hidden][1][sums.PRESENT]
+                columns[hidden] = np.where(present >= node.min_count, columns[hidden], np.float32(np.nan))
         return columns
 
     def group_codes(self) -> list[np.ndarray]:
@@ -552,24 +579,183 @@ def _spread(held: np.ndarray, where: np.ndarray, size: int, fill: Any) -> np.nda
     return wider
 
 
-# ── The run ─────────────────────────────────────────────────────────────────
+# ── The scan ────────────────────────────────────────────────────────────────
 
 
-def _execute(frame: ChunkedFrame) -> TidyArray:
-    plan, blocks = frame._plan, frame._blocks
-    assert plan is not None
-    table = _Table(plan)
+def scan(*frames: Any) -> tuple[TidyArray, ...]:
+    """Run several chunked frames' verbs over their source in one pass, and give each frame's result, in memory.
+
+    The frames come from one ``read_array(..., blocks=)`` or ``tidy(..., blocks=)``
+    and share a prefix of verbs: each block is loaded once, the shared verbs
+    run once on it, and each frame takes its summaries or its rows from where
+    its own verbs branch off, so ``per_ring, voxels = scan(a, b)`` reads the
+    data once where ``a.collect()`` and ``b.collect()`` read it twice. Each
+    result is the same bits as the frame's own run. Afterwards each frame
+    holds its result, as it does after ``collect()``; a frame already
+    computed is given as it is.
+    """
+    for frame in frames:
+        if not isinstance(frame, ChunkedFrame):
+            raise BlockError(f"scan() runs frames read with blocks=, not {type(frame).__name__}")
+    pending = {id(frame): frame for frame in frames if frame._result is None}  # the same frame twice runs once
+    if len({id(frame._blocks) for frame in pending.values()}) > 1:
+        raise BlockError("scan() runs one source in one pass; these frames come from different read_array() or "
+                         "tidy() calls, so scan each call's frames together")
+    if pending:
+        _scan(list(pending.values()))
+    return tuple(frame._result for frame in frames)
+
+
+@dataclass
+class _Leaf:
+    """One frame in a scan, and what the blocks add to its result."""
+
+    frame: ChunkedFrame
+    table: _Table | None  # a summarised frame's merging table; else the frame joins its rows
+    parts: list[tuple[int, dict]]  # a joining frame's rows per block, with the block's start
+    exact: dict[str, list[tuple[np.ndarray, np.ndarray]]]  # per float32 sum: the combinations a second pass settled
+    # (their places in the table, their buckets added over the blocks)
+
+
+class _Node:
+    """A prefix of row-wise verbs: the frames whose verbs end there, and the verbs that lengthen it."""
+
+    def __init__(self) -> None:
+        self.leaves: list[_Leaf] = []
+        self.next: list[tuple[Any, _Node]] = []
+
+    def after(self, verb: Any) -> _Node:
+        """The node for this prefix followed by *verb*, the same verb object meaning the same step."""
+        for other, node in self.next:
+            if other is verb:
+                return node
+        node = _Node()
+        self.next.append((verb, node))
+        return node
+
+
+def _trie(leaves: Sequence[_Leaf]) -> _Node:
+    """The leaves' row-wise verbs as a trie; ``group_by`` and ``summarise`` are each leaf's own work on its rows."""
+    root = _Node()
+    for leaf in leaves:
+        node = root
+        for verb in leaf.frame._steps:
+            if verb._operation in ROW_WISE:
+                node = node.after(verb)
+        node.leaves.append(leaf)
+    return root
+
+
+def _walk(node: _Node, frame: TidyArray, visit: Callable[[_Leaf, TidyArray], None]) -> None:
+    """Depth first: *visit* each leaf at *node* with the frame so far, then each next verb's node with the frame after
+    it, so a prefix's frame lives while its branches run, and each verb runs once per block."""
+    for leaf in node.leaves:
+        visit(leaf, frame)
+    for verb, child in node.next:
+        _walk(child, frame >> verb, visit)
+
+
+def _scan(frames: Sequence[ChunkedFrame]) -> None:
+    """One pass over the blocks for *frames*, then the shared second pass; each frame is left holding its result."""
+    blocks = frames[0]._blocks
+    leaves = [_Leaf(frame, _Table(frame._plan) if frame._summarised else None, [], {}) for frame in frames]
+    root = _trie(leaves)
+
+    def block(span: tuple[int, int]) -> list[tuple[_Leaf, Any]]:
+        found: list[tuple[_Leaf, Any]] = []
+
+        def visit(leaf: _Leaf, frame: TidyArray) -> None:
+            if leaf.table is None:
+                found.append((leaf, (span[0], frame.to_dict())))
+            else:
+                found.append((leaf, _partial(leaf.table.plan, frame, blocks.axis)))
+
+        _walk(root, blocks.load(*span), visit)
+        return found
+
     with ThreadPoolExecutor(blocks.threads) as pool:
-        for found, local, counts, pieces, dropped in pool.map(lambda span: _partial(plan, blocks, span),
-                                                               blocks.spans):
-            table.take(found)
-            table.dropped += dropped
-            if local is not None:
-                table.add(_combined(local, table), counts, pieces)
-        if table.keys is None:  # no block kept a row, the first included, so its summary is the answer
-            return frame._evolve()
-        columns = table.finish(lambda chosen, hidden: _exact(plan, blocks, table, pool, chosen, hidden))
-    return _result(frame, plan, table, columns)
+        for found in pool.map(block, blocks.spans):  # merged as the blocks arrive, in order
+            for leaf, part in found:
+                if leaf.table is None:
+                    leaf.parts.append(part)
+                else:
+                    leaf.table.merge(*part)
+        settled: dict[int, tuple[dict[str, np.ndarray], dict[str, np.ndarray]]] = {}
+        for leaf in leaves:
+            if leaf.table is not None and leaf.table.keys is not None:
+                settled[id(leaf)] = leaf.table.settle()
+        _exact_pass(leaves, blocks, pool, {key: unsure for key, (_, unsure) in settled.items()})
+    for leaf in leaves:
+        frame, table = leaf.frame, leaf.table
+        if table is None:
+            frame._result = _joined(frame, leaf.parts)
+        elif table.keys is None:  # no block kept a row, the first included, so its summary is the answer
+            frame._result = frame._evolve()
+        else:
+            frame._result = _result(frame, table.plan, table, table.finish(settled[id(leaf)][0], leaf.exact))
+
+
+def _exact_pass(leaves: Sequence[_Leaf], blocks: Blocks, pool: ThreadPoolExecutor,
+                unsure: Mapping[int, dict[str, np.ndarray]]) -> None:
+    """The second pass, shared by the leaves: each block's exact sums for every combination the first pass could not
+    settle, over every leaf's float32 sums at once (``labelarray.sums.chunk_exact``), added across the blocks. At most
+    ``EXACT_PAIRS`` combinations' buckets are in flight per block, so a larger set takes several passes."""
+    asked = [(leaf, hidden, rows[start:start + sums.EXACT_PAIRS])
+             for leaf in leaves for hidden, rows in unsure.get(id(leaf), {}).items()
+             for start in range(0, len(rows), sums.EXACT_PAIRS)]
+    passes: list[list[tuple[_Leaf, str, np.ndarray]]] = []
+    held = sums.EXACT_PAIRS
+    for request in asked:  # whole requests, in order, until a pass is full
+        if held + len(request[2]) > sums.EXACT_PAIRS:
+            passes.append([])
+            held = 0
+        passes[-1].append(request)
+        held += len(request[2])
+    for requests in passes:
+        wanted: dict[int, list[tuple[int, str, np.ndarray]]] = {}
+        for index, (leaf, hidden, chosen) in enumerate(requests):
+            wanted.setdefault(id(leaf), []).append((index, hidden, chosen))
+        root = _trie(list({id(leaf): leaf for leaf, _, _ in requests}.values()))
+
+        def block(span: tuple[int, int]) -> list[tuple[int, np.ndarray]]:
+            buckets: list[tuple[int, np.ndarray]] = []
+
+            def visit(leaf: _Leaf, frame: TidyArray) -> None:
+                assert leaf.table is not None and leaf.table.keys is not None
+                rows = _block(leaf.table.plan, frame, blocks.axis)
+                if rows.kept == 0:
+                    return
+                codes = _table_codes(leaf.table, rows)
+                for index, hidden, chosen in wanted[id(leaf)]:
+                    value, each = rows.values[hidden]
+                    buckets.append((index, sums.chunk_exact(value, (0,), chosen,
+                                                            codes=codes if each == 1 else np.repeat(codes, each),
+                                                            groups=len(leaf.table.keys))))
+
+            _walk(root, blocks.load(*span), visit)
+            return buckets
+
+        totals: dict[int, np.ndarray] = {}
+        for buckets in pool.map(block, blocks.spans):  # the buckets add in any order
+            for index, part in buckets:
+                totals[index] = part if index not in totals else totals[index] + part
+        for index, (leaf, hidden, chosen) in enumerate(requests):
+            if index in totals:
+                leaf.exact.setdefault(hidden, []).append((chosen, totals[index]))
+
+
+def _table_codes(table: _Table, rows: _Rows) -> np.ndarray:
+    """A block's kept rows' places in the finished table: each key's local codes mapped, combined, and found."""
+    assert table.keys is not None
+    if not table.parts:
+        return np.zeros(rows.kept, dtype=np.intp)
+    codes = np.ravel_multi_index([part.codes(labels, missing is not None)[local]
+                                  for part, (labels, missing, _), local in zip(table.parts, rows.found, rows.local)],
+                                 table.sizes)
+    return np.searchsorted(table.keys, codes)
+
+
+# ── One block's part of a summary ───────────────────────────────────────────
 
 
 @dataclass
@@ -584,10 +770,9 @@ class _Rows:
     values: dict[str, tuple[np.ndarray, int]]  # per reduction: its values, flattened with the row first, and per row
 
 
-def _block(plan: _Plan, blocks: Blocks, span: tuple[int, int]) -> _Rows:
-    """One block through the row-wise verbs, grouped: its keys' groups and codes, and the reductions' values."""
-    block = blocks.load(*span) >> plan.before
-    backend, axis = block._backend, blocks.axis
+def _block(plan: _Plan, block: TidyArray, axis: str) -> _Rows:
+    """One block after the row-wise verbs, grouped: its keys' groups and codes, and the reductions' values."""
+    backend = block._backend
     size = backend.sizes(block._data)[axis]
     found: list[tuple[np.ndarray, Any, int]] = []
     local: list[np.ndarray] = []
@@ -649,10 +834,10 @@ def _combined(local: Sequence[tuple[np.ndarray, Any, np.ndarray]], table: _Table
                                  for part, (labels, missing, codes) in zip(table.parts, local)], table.sizes)
 
 
-def _partial(plan: _Plan, blocks: Blocks, span: tuple[int, int]):
+def _partial(plan: _Plan, block: TidyArray, axis: str):
     """One block's groups; each combination's local codes per key, with the key's labels, to map once the table has
     taken the groups in; the combinations' row counts; each reduction's pieces per combination; and the rows dropped."""
-    rows = _block(plan, blocks, span)
+    rows = _block(plan, block, axis)
     if rows.kept == 0:
         return rows.found, None, None, None, rows.dropped
     # Codes per local combination, so the pieces are made once per group, not once per row.
@@ -744,33 +929,6 @@ def _fill(kind: str, dtype: np.dtype, node: Reduce) -> Any:
     return limits.max if node.op == "min" else limits.min
 
 
-def _exact(plan: _Plan, blocks: Blocks, table: _Table, pool: ThreadPoolExecutor, chosen: np.ndarray,
-           hidden: str) -> np.ndarray:
-    """The second pass: each block's exact sums for the combinations *chosen*, added (``labelarray.sums.chunk_exact``)."""
-    keys = table.keys
-    assert keys is not None
-
-    def block(span: tuple[int, int]) -> Any:
-        rows = _block(plan, blocks, span)
-        if rows.kept == 0:
-            return 0
-        if table.parts:
-            codes = np.ravel_multi_index([part.codes(labels, missing is not None)[local]
-                                          for part, (labels, missing, _), local in zip(table.parts, rows.found,
-                                                                                        rows.local)], table.sizes)
-            codes = np.searchsorted(keys, codes)
-        else:
-            codes = np.zeros(rows.kept, dtype=np.intp)
-        value, each = rows.values[hidden]
-        return sums.chunk_exact(value, (0,), chosen, codes=codes if each == 1 else np.repeat(codes, each),
-                                groups=len(keys))
-
-    buckets: Any = 0
-    for part in pool.map(block, blocks.spans):  # the buckets add in any order
-        buckets = buckets + part
-    return buckets
-
-
 def _result(frame: ChunkedFrame, plan: _Plan, table: _Table, columns: dict[str, np.ndarray]) -> TidyArray:
     """The merged summaries as the frame ``summarise`` gave on the first block, with every block's values."""
     backend, key = frame._backend, plan.key
@@ -836,16 +994,10 @@ def _notes(frame: ChunkedFrame, plan: _Plan, table: _Table) -> list[str]:
 # ── Rows kept, concatenated ─────────────────────────────────────────────────
 
 
-def _concatenate(frame: ChunkedFrame) -> TidyArray:
-    """The row-wise verbs over every block, the blocks' rows joined along the blocked axis, in memory."""
+def _joined(frame: ChunkedFrame, parts: Sequence[tuple[int, dict]]) -> TidyArray:
+    """The blocks' rows after the row-wise verbs (each block's start and ``to_dict()``), joined along the blocked axis,
+    in memory."""
     blocks, backend, axis = frame._blocks, frame._backend, frame._blocks.axis
-    before = Pipeline([step for step in frame._steps if step._operation != "group_by"])
-
-    def rows(span: tuple[int, int]) -> tuple[int, dict]:
-        return span[0], (blocks.load(*span) >> before).to_dict()
-
-    with ThreadPoolExecutor(blocks.threads) as pool:
-        parts = list(pool.map(rows, blocks.spans))
     first = parts[0][1]
     variables: dict[Hashable, tuple] = {}
     for name, entry in first["data_vars"].items():
