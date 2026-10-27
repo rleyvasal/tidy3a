@@ -44,6 +44,7 @@ from tidy3a.expr import (
     axis_labels,
     check_name,
     evaluate,
+    note_read,
     resolve,
     resolve_value_key,
     walk,
@@ -552,6 +553,7 @@ def _write_label(data, holders, field_axis, name, value, text, notes, backend=No
 def _write_labels(data, holders, field_axis, writes, notes, backend=None) -> Any:
     """Write fields of one holder, copying it once; *writes* are ``(name, value, text)`` in order."""
     backend = xarray_backend() if backend is None else backend
+    note_read(*holders)  # the holder is rewritten whole, so a block needs all of it
     if len(holders) > 1:
         raise MutateError(
             f'"{writes[0][0]}" is a field label on several variables ({", ".join(map(str, holders))}); '

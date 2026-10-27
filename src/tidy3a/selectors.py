@@ -155,7 +155,15 @@ def where(*args: Any) -> Selector:
     predicate = args[0]
     name = getattr(predicate, "__name__", "predicate")
     own = ("where", name) if predicate is is_numeric else None  # the caller's predicates are like no other
-    return Selector(f"where({name})", lambda columns: [c for c in columns if predicate(c.data)], own)
+
+    def pick(columns: list[Column]) -> list[Column]:
+        if own is None:  # a caller's predicate may look at any column's values
+            from tidy3a.expr import EVERYTHING, note_read
+
+            note_read(EVERYTHING)
+        return [c for c in columns if predicate(c.data)]
+
+    return Selector(f"where({name})", pick, own)
 
 
 def last_col(offset: int = 0) -> Selector:

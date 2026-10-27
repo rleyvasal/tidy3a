@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- A block reads only the variables used: a frame read with `blocks=`
+  records, while each verb is checked on the empty block, which variables
+  it reads (by name, field label, coordinate, or formula), and a dataset's
+  blocks compute only those, with the variables a frame that keeps rows
+  keeps. A selector's predicate of the caller's, `where(...)`, which may
+  look at any values, reads everything. `n()` counts the axes every
+  variable shares as before, from the whole schema. A file's rows hold
+  every field together, so files gain nothing. The backend is chosen once
+  for the whole data, so every block is on the same one (plan milestone
+  12, step 1).
+
 ## 0.6.0 — 2026-10-27
 
 - Nothing is read until a result is asked for: a frame read with `blocks=`

@@ -46,6 +46,7 @@ from tidy3a import (
     summarise,
     tidy,
     var,
+    where,
 )
 from tidy3a import slice as take
 
@@ -531,7 +532,8 @@ def test_a_dask_backed_dataset_reads_each_chunk_once(npy, blocks, threads):
     brightness = out >> pull("brightness")
     from collections import Counter
 
-    every = Counter((name, start) for name in NAMES for start in range(0, 20_000, 3_000))
+    read = ("x", "intensity", "ring")  # the variables the pipeline reads: y and z are never computed (milestone 12)
+    every = Counter((name, start) for name in read for start in range(0, 20_000, 3_000))
     assert Counter(reads) == every  # each chunk exactly once
     want = in_memory(values, pipeline, ["brightness"])["brightness"]
     assert same_bits(brightness, want)
@@ -704,7 +706,8 @@ def test_scan_reads_each_dask_chunk_once_for_several_frames(npy):
     got_rings, got_grid, got_rows = scan(rings, grid, rows)
     from collections import Counter
 
-    assert Counter(reads) == Counter((name, start) for name in NAMES for start in range(0, 20_000, 3_000))
+    read = ("x", "y", "z", "ring")  # what the three frames read between them; intensity is never computed
+    assert Counter(reads) == Counter((name, start) for name in read for start in range(0, 20_000, 3_000))
     whole = tidy(source) >> near.plan()
     assert same_bits(got_rings >> pull("low"), whole >> group_by(ring) >> summarise(low=min(z)) >> pull("low"))
     assert same_bits(got_grid >> pull("points"), whole >> group_by(cells(x, 20.0), rounded(y, 25), axis="cell")
@@ -1069,3 +1072,114 @@ def test_an_error_in_a_sample_names_the_block_among_every_block(tmp_path):
     assert (summary.preview(blocks=[1, 2]) >> pull("points")).sum() == 2_000
     with pytest.raises(GroupError, match="in block 3 of 4"):
         summary.preview(blocks=[3])
+
+
+# ── Milestone 12, step 1: a block holds only the variables read ─────────────
+
+
+def counted_grid():
+    """A gridded dataset of delayed chunk reads, counted per variable: a field along (time, lat, lon), and two along
+    time only, as hour and month are in climate data."""
+    da = pytest.importorskip("dask.array")
+    xr = pytest.importorskip("xarray")
+    from dask import delayed
+
+    rng = np.random.default_rng(5)
+    values = {"temperature": (rng.normal(size=(48, 4, 5)) * 10 + 280).astype("float32"),
+              "wind": rng.normal(size=(48, 4, 5)).astype("float32"),
+              "hour": np.tile(np.arange(24), 2).astype("int8"), "day": np.repeat(np.arange(2), 24).astype("int8")}
+    reads = []
+
+    @delayed
+    def read(name, start, stop):
+        reads.append(name)
+        return values[name][start:stop]
+
+    variables = {}
+    for name, array in values.items():
+        dims = ("time", "lat", "lon")[:array.ndim]
+        parts = [da.from_delayed(read(name, start, start + 12), shape=(12, *array.shape[1:]), dtype=array.dtype)
+                 for start in range(0, 48, 12)]
+        variables[name] = (dims, da.concatenate(parts))
+    return xr.Dataset(variables, coords={"lat": np.arange(4), "lon": np.arange(5)}), values, reads
+
+
+def test_a_summary_reads_only_its_variables_and_n_counts_as_in_memory():
+    """n() counts the axes every variable shares: here time only, as hour and day lie along it. A block holding
+    only temperature would count grid cells; n() takes its axes from the whole schema, so it counts hours."""
+    xr = pytest.importorskip("xarray")
+    source, values, reads = counted_grid()
+    t = fields("temperature")
+    pipeline = summarise(points=n(), warmth=mean(t))
+    got = tidy(source, blocks={"time": "chunks"}) >> pipeline
+    want = tidy(xr.Dataset({name: (source[name].dims, array) for name, array in values.items()},
+                           coords=source.coords)) >> pipeline
+    del reads[:]
+    assert same_bits(got >> pull("points"), want >> pull("points")) and (got >> pull("points")) == 48
+    assert same_bits(got >> pull("warmth"), want >> pull("warmth"))
+    assert sorted(set(reads)) == ["temperature"] and len(reads) == 4  # one chunk per block, of temperature only
+
+
+def test_a_count_alone_reads_one_variable_along_the_axis():
+    source, _, reads = counted_grid()
+    got = tidy(source, blocks={"time": "chunks"}) >> summarise(points=n())
+    del reads[:]
+    assert (got >> pull("points")) == 48
+    assert len(set(reads)) == 1 and set(reads) <= {"hour", "day"}  # the smallest along time
+
+
+def test_keys_formulas_filters_and_kept_rows_are_read():
+    source, values, reads = counted_grid()
+    t, w, hour, day = fields("temperature", "wind", "hour", "day")
+    frame = tidy(source, blocks={"time": "chunks"})
+    summary = (frame >> filter(hour >= 6) >> mutate(gust=formula(r"\sqrt{\mathrm{wind}^2}")) >> group_by(day)
+               >> summarise(top=max(col("gust"))))
+    del reads[:]
+    summary >> pull("top")
+    assert set(reads) == {"hour", "wind", "day"}
+    rows = frame >> filter(day == 1) >> select("temperature")
+    del reads[:]
+    rows >> pull("temperature")
+    assert set(reads) == {"day", "temperature"}  # the filter's variable, and the variable the rows keep
+
+
+def test_what_the_record_cannot_vouch_for_reads_everything():
+    source, _, reads = counted_grid()
+    frame = tidy(source, blocks={"time": "chunks"})
+    picked = frame >> select(where(lambda data: True)) >> summarise(points=n())
+    del reads[:]
+    picked >> pull("points")
+    assert set(reads) == {"temperature", "wind", "hour", "day"}  # a caller's predicate may look at any values
+
+
+def test_a_field_label_written_reads_its_holder_whole(npy):
+    xr = pytest.importorskip("xarray")
+    _, values = npy
+    source = xr.Dataset({"values": (("point", "feature"), values), "extra": ("point", values[:, 0] * 2)},
+                        coords={"feature": NAMES})
+    frame = tidy(source, field_axis="feature", blocks={"point": 3_000})
+    pipeline = mutate(x=x * 2) >> group_by(ring) >> summarise(far=max(x))
+    want = tidy(source, field_axis="feature") >> pipeline
+    got = frame >> pipeline
+    assert same_bits(got >> pull("far"), want >> pull("far"))
+    assert _needs_of(frame >> pipeline) == {"values"}  # the holder of x and ring; extra is never read
+
+
+def _needs_of(frame):
+    from tidy3a.chunked import _needs
+
+    return set(_needs(frame))
+
+
+def test_the_backend_is_chosen_once_for_the_whole_data():
+    """Without a default, data with storage encodings stays on xarray; a block holding only an unencoded variable
+    would go to NumPy if each block chose for itself. Every block takes the backend chosen for the whole data."""
+    xr = pytest.importorskip("xarray")
+    source = xr.Dataset({"a": ("point", np.arange(10.0)), "b": ("point", np.arange(10.0))})
+    source["a"].encoding["dtype"] = "float32"
+    b = fields("b")
+    frame = tidy(source, blocks={"point": 4})
+    out = frame >> summarise(total=sum(b))
+    assert (out >> pull("total")) == 45.0
+    assert frame._backend is tidy(source)._backend is out._run()._backend
+    assert frame._blocks.source.block(0, 4, frozenset({"b"}))._backend is frame._backend

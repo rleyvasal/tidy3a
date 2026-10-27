@@ -16,6 +16,7 @@ import sys
 import warnings
 from collections.abc import Callable, Hashable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from fractions import Fraction
 from types import MappingProxyType
@@ -652,6 +653,32 @@ def _outside(value: Any, ctx: Context) -> Any:
     return ctx.backend.variable(value._data, names[0])
 
 
+# ── What the verbs read (plan milestone 12) ─────────────────────────────────
+
+# While a frame read in blocks checks a verb on its empty block, the variables the verb reads are recorded, so a
+# block can compute only those (``tidy3a.chunked``). A value that reads data in a way names cannot say, such as a
+# selector's predicate of the caller's, records EVERYTHING.
+EVERYTHING = object()
+_reads: ContextVar[set | None] = ContextVar("tidy3a_reads", default=None)
+
+
+def note_read(*names: Any) -> None:
+    """Record that the running verb reads these variables (or ``EVERYTHING``), if reads are being recorded."""
+    reads = _reads.get()
+    if reads is not None:
+        reads.update(names)
+
+
+@contextmanager
+def recording_reads() -> Iterator[set]:
+    """The names the verbs read inside this block, as a set filled while it runs."""
+    token = _reads.set(set())
+    try:
+        yield _reads.get()
+    finally:
+        _reads.reset(token)
+
+
 def resolve(ref: Ref, ctx: Context) -> Any:
     """Resolve a name: variable, then field label, then axis labels (plan §5.1–5.2).
 
@@ -671,10 +698,12 @@ def resolve(ref: Ref, ctx: Context) -> Any:
     if ref.kind == "var":
         if not is_variable:
             raise ctx.error(f'variable("{name}"): there is no variable {name}. {_inventory(ctx)}')
+        note_read(name)
         return backend.variable(data, name)
     if ref.kind == "label":
         if not is_label:
             raise ctx.error(f'label("{name}"): there is no field label {name}. {_inventory(ctx)}')
+        note_read(*holders)
         return _field_view(data, holders, name, field_axis, ctx)
     if is_variable and is_label:
         raise ctx.error(
@@ -683,10 +712,13 @@ def resolve(ref: Ref, ctx: Context) -> Any:
             f'  label:     label("{name}")'
         )
     if is_variable:
+        note_read(name)
         return backend.variable(data, name)
     if is_label:
+        note_read(*holders)
         return _field_view(data, holders, name, field_axis, ctx)
     if backend.has_axis(data, name):
+        note_read(name)  # the axis's coordinate, which a block keeps with any variable along it
         return backend.axis_labels(data, name)
     raise ctx.error(f'"{name}" is not a variable, field label, or axis of this data. {_inventory(ctx)}'
                     + _observation_hint(data, name, field_axis, backend))
@@ -748,8 +780,10 @@ def resolve_vector(node: Vector, ctx: Context) -> Any:
                 f"{node.text()} are field labels on several variables "
                 f"({', '.join(str(v) for v in holders)}); select one first"
             )
+        note_read(*holders)
         return backend.sel(backend.variable(data, holders[0]), {field_axis: names})
     if builtins.all(kind == "var" for kind in kinds):
+        note_read(*names)
         origins = [ctx.origins.get(name) for name in names]
         axes = {origin[0] for origin in origins if origin is not None}
         if None not in origins and len(axes) == 1:

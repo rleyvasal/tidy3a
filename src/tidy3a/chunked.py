@@ -71,6 +71,7 @@ from labelarray.transforms import Bins, Duration, GridCells
 
 from tidy3a.errors import BlockError, FilterError, MutateError, ReadError, SummariseError, TidyError, translating
 from tidy3a.expr import (
+    EVERYTHING,
     AxisKey,
     BinOp,
     Call,
@@ -84,6 +85,7 @@ from tidy3a.expr import (
     _label_array,
     as_expr,
     evaluate,
+    recording_reads,
     resolve_value_key,
     walk,
 )
@@ -102,14 +104,15 @@ class Source:
     """Where blocks come from: ``size`` positions on ``axis``, a block of them as a frame, and natural chunks.
 
     ``empty()`` is a block of no positions with the source's schema, every variable, axis, and type, built without
-    reading the data (plan decision 4: the verbs are checked on it).
+    reading the data (plan decision 4: the verbs are checked on it). ``block(..., names)`` may compute only the
+    variables named (plan milestone 12); a source whose rows hold every field together reads them all anyway.
     """
 
     axis: str
     size: int
     chunks: list[tuple[int, int]] | None = None  # the storage's own block boundaries, if it has any
 
-    def block(self, start: int, stop: int) -> TidyArray:
+    def block(self, start: int, stop: int, names: frozenset | None = None) -> TidyArray:
         raise NotImplementedError
 
     def empty(self) -> TidyArray:
@@ -128,7 +131,7 @@ class FileSource(Source):
         dtype, shape = self.row
         return self.build(np.empty((0, *shape), dtype), 0, 0)
 
-    def block(self, start: int, stop: int) -> TidyArray:
+    def block(self, start: int, stop: int, names: frozenset | None = None) -> TidyArray:
         mapped = self.reopen()
         values = np.array(mapped[start:stop])
         del mapped
@@ -143,7 +146,7 @@ class ArraySource(Source):
     def __init__(self, values: np.ndarray, axis: str, build: Callable[[np.ndarray, int, int], TidyArray]):
         self.values, self.size, self.axis, self.build = values, int(values.shape[0]), axis, build
 
-    def block(self, start: int, stop: int) -> TidyArray:
+    def block(self, start: int, stop: int, names: frozenset | None = None) -> TidyArray:
         return self.build(self.values[start:stop], start, stop)
 
     def empty(self) -> TidyArray:
@@ -164,15 +167,32 @@ class DatasetSource(Source):
         if axis == field_axis:
             raise TidyError(f'blocks= reads runs of "{axis}", which field_axis= turns into columns; '
                             "block an observation axis")
+        from tidy3a.backend import backend_for
+
+        # The backend is chosen once, for the whole data, so a block holding some of its variables is on the same one.
+        backend = backend_for(data, backend).name if backend is None else backend
         self.data, self.axis, self.field_axis, self.backend = data, axis, field_axis, backend
         self.size = int(data.sizes[axis])
         self.chunks = _chunks_along(data, axis)
 
-    def block(self, start: int, stop: int) -> TidyArray:
+    def block(self, start: int, stop: int, names: frozenset | None = None) -> TidyArray:
         from tidy3a.frame import tidy
 
-        return tidy(self.data.isel({self.axis: slice(start, stop)}).compute(), field_axis=self.field_axis,
+        return tidy(self._only(names).isel({self.axis: slice(start, stop)}).compute(), field_axis=self.field_axis,
                     backend=self.backend)
+
+    def _only(self, names: frozenset | None) -> Any:
+        """The data with only the variables *names* (and the coordinates that come with them); all of it for None or
+        a DataArray. With none named (``n()`` alone), the variable along the axis with fewest values per position,
+        so the block still has the axis."""
+        data = self.data
+        if names is None or not hasattr(data, "data_vars"):
+            return data
+        kept = [name for name in data.data_vars if name in names]
+        if not kept:
+            along = [name for name in data.data_vars if self.axis in data[name].dims]
+            kept = [min(along, key=lambda name: data[name].size)] if along else []
+        return data[kept] if kept else data
 
     def empty(self) -> TidyArray:
         """No positions on the axis: each lazy value along it an empty NumPy array of its type, since slicing lazy
@@ -241,8 +261,8 @@ class Blocks:
         every = self.every
         return every if self.chosen is None else [every[number] for number in self.chosen]
 
-    def load(self, start: int, stop: int) -> TidyArray:
-        block = self.source.block(start, stop)
+    def load(self, start: int, stop: int, names: frozenset | None = None) -> TidyArray:
+        block = self.source.block(start, stop, names)
         if self.labelled:
             return block
         return block._evolve(block._backend.label_positions(block._data, self.axis, start))
@@ -270,7 +290,7 @@ def check_rows(rows: Any, threads: Any, source: Source) -> None:
 class ChunkedFrame(TidyArray):
     """Data read with ``blocks=``: an empty block with its schema, and the verbs to run over every block."""
 
-    __slots__ = ("_blocks", "_steps", "_plan", "_result")
+    __slots__ = ("_blocks", "_steps", "_plan", "_result", "_reads")
 
     @classmethod
     def open(cls, source: Source, rows: int | str, threads: int) -> ChunkedFrame:
@@ -278,31 +298,34 @@ class ChunkedFrame(TidyArray):
         check_rows(rows, threads, source)
         empty = source.empty()
         blocks = Blocks(source, rows, threads, empty._backend.has_labels(empty._data, source.axis))
-        frame = cls._wrap(empty, blocks, ())
+        frame = cls._wrap(empty, blocks, (), reads=frozenset())
         count = len(blocks.every)
         frame._record = Record(empty._source or "data", _unknown(snapshot(empty)),
                                preview=f"nothing read yet: {blocks.words(' block' if count == 1 else ' blocks')}")
         return frame
 
     @classmethod
-    def _wrap(cls, frame: TidyArray, blocks: Blocks, steps: Sequence[Any], plan: Any = None) -> ChunkedFrame:
+    def _wrap(cls, frame: TidyArray, blocks: Blocks, steps: Sequence[Any], plan: Any = None,
+              reads: frozenset | None = None) -> ChunkedFrame:
+        """*reads* are the variables the steps read, as the empty block showed them; None reads everything."""
         new = cls.__new__(cls)
         TidyArray.__init__(new, frame._data, backend=frame._backend, field_axis=frame._field_axis,
                            origins=frame._origins, source=frame._source, notes=frame._notes, groups=frame._groups,
                            resolved=frame._resolved, record=frame._record)
-        new._blocks, new._steps, new._plan, new._result = blocks, tuple(steps), plan, None
+        new._blocks, new._steps, new._plan, new._result, new._reads = blocks, tuple(steps), plan, None, reads
         return new
 
     def _apply_verb(self, verb: Any) -> Any:
         operation = getattr(verb, "_operation", None)
         if self._summarised or operation not in (*ROW_WISE, "group_by", "summarise"):
             return verb(self._run())  # needs the whole axis: the blocks' result, in memory
-        with warnings.catch_warnings():  # a mean of nothing warns; on the empty block that says nothing
+        with warnings.catch_warnings(), recording_reads() as read:  # a mean of nothing warns; here that says nothing
             warnings.simplefilter("ignore", RuntimeWarning)
             result = TidyArray._apply_verb(self, verb)  # on the empty block: the eager checks, and the result's schema
         steps = (*self._steps, verb)
         plan = _check(self, verb, result, steps)
-        frame = self._wrap(result, self._blocks, steps, plan)
+        reads = None if self._reads is None or EVERYTHING in read else self._reads | frozenset(read)
+        frame = self._wrap(result, self._blocks, steps, plan, reads)
         record = frame._record
         last = record.steps[-1]
         frame._record = dataclasses.replace(record, steps=(*record.steps[:-1], Step(last.verb, _unknown(last.after))))
@@ -332,7 +355,7 @@ class ChunkedFrame(TidyArray):
         words = (f"a sample: block{'' if len(chosen) == 1 else 's'} {shown} of {every:,} "
                  f"({sum(stop - start for start, stop in spans):,} of {self._blocks.size:,} positions on "
                  f"{self._blocks.axis}); collect() runs every block")
-        frame = self._wrap(self, sample, self._steps, self._plan)
+        frame = self._wrap(self, sample, self._steps, self._plan, self._reads)
         frame._record = dataclasses.replace(frame._record, preview=words)
         _scan([frame])
         result = frame._result
@@ -410,6 +433,7 @@ class _Plan:
     parts: tuple[ValueKey, ...]  # the key itself, or each key of several
     reductions: dict[str, Reduce]  # hidden name -> the reduction combined across blocks
     summaries: dict[str, Any]  # name -> its expression, with each reduction replaced by its hidden name
+    per_position: int  # positions on the other observation axes that n() counts per row, from the whole schema
 
 
 def _check(frame: ChunkedFrame, verb: Any, result: TidyArray, steps: Sequence[Any]) -> _Plan | None:
@@ -463,7 +487,10 @@ def _analyse(frame: ChunkedFrame, verb: Any, steps: Sequence[Any]) -> _Plan:
     reductions: dict[str, Reduce] = {}
     summaries = {name: _hidden(as_expr(expr), reductions, name) for name, expr in named.items()}
     keys = [key for key in frame._groups if isinstance(key, ValueKey)]
-    return _Plan(keys[0] if keys else None, _parts(frame._groups), reductions, summaries)
+    # n() counts the observation axes every variable shares, so it takes them from the schema the verbs ran on, not
+    # from a block holding only the variables read (``hour`` along time alone would otherwise not be there).
+    return _Plan(keys[0] if keys else None, _parts(frame._groups), reductions, summaries,
+                 _per_position(frame, frame._blocks.axis))
 
 
 def _hidden(node: Any, reductions: dict[str, Reduce], name: str) -> Any:
@@ -832,11 +859,24 @@ def _in_order(pool: ThreadPoolExecutor, work: Callable[[Any], Any], items: Seque
         yield future.result()
 
 
+def _needs(frame: ChunkedFrame) -> frozenset | None:
+    """The variables a frame's blocks must hold: those its verbs read, and, for a frame that joins its rows, those its
+    result keeps; None for all of them."""
+    if frame._reads is None:
+        return None
+    if frame._summarised:
+        return frame._reads
+    return frame._reads | frozenset(frame._backend.variable_names(frame._data))
+
+
 def _scan(frames: Sequence[ChunkedFrame]) -> None:
-    """One pass over the blocks for *frames*, then the shared second pass; each frame is left holding its result."""
+    """One pass over the blocks for *frames*, then the shared second pass; each frame is left holding its result.
+    A block holds only the variables some frame needs (plan milestone 12)."""
     blocks = frames[0]._blocks
     leaves = [_Leaf(frame, _Table(frame._plan) if frame._summarised else None, [], {}) for frame in frames]
     root = _trie(leaves)
+    needs = [_needs(frame) for frame in frames]
+    names = None if any(need is None for need in needs) else frozenset().union(*needs)
 
     def block(span: tuple[int, int]) -> list[tuple[_Leaf, Any]]:
         found: list[tuple[_Leaf, Any]] = []
@@ -848,7 +888,7 @@ def _scan(frames: Sequence[ChunkedFrame]) -> None:
                 found.append((leaf, _partial(leaf.table.plan, frame, blocks.axis)))
 
         with _naming(blocks, span):
-            _walk(root, blocks.load(*span), visit)
+            _walk(root, blocks.load(*span, names), visit)
         return found
 
     with ThreadPoolExecutor(blocks.threads) as pool:
@@ -863,7 +903,7 @@ def _scan(frames: Sequence[ChunkedFrame]) -> None:
             if leaf.table is not None and leaf.table.keys is not None:
                 leaf.table.complete()
                 settled[id(leaf)] = leaf.table.settle()
-        _exact_pass(leaves, blocks, pool, {key: unsure for key, (_, unsure) in settled.items()})
+        _exact_pass(leaves, blocks, pool, {key: unsure for key, (_, unsure) in settled.items()}, names)
     for leaf in leaves:
         frame, table = leaf.frame, leaf.table
         if table is None:
@@ -875,7 +915,7 @@ def _scan(frames: Sequence[ChunkedFrame]) -> None:
 
 
 def _exact_pass(leaves: Sequence[_Leaf], blocks: Blocks, pool: ThreadPoolExecutor,
-                unsure: Mapping[int, dict[str, np.ndarray]]) -> None:
+                unsure: Mapping[int, dict[str, np.ndarray]], names: frozenset | None = None) -> None:
     """The second pass, shared by the leaves: each block's exact sums for every combination the first pass could not
     settle, over every leaf's float32 sums at once (``labelarray.sums.chunk_exact``), added across the blocks. At most
     ``EXACT_PAIRS`` combinations' buckets are in flight per block, so a larger set takes several passes."""
@@ -912,7 +952,7 @@ def _exact_pass(leaves: Sequence[_Leaf], blocks: Blocks, pool: ThreadPoolExecuto
                                                             groups=len(leaf.table.keys))))
 
             with _naming(blocks, span):
-                _walk(root, blocks.load(*span), visit)
+                _walk(root, blocks.load(*span, names), visit)
             return buckets
 
         totals: dict[int, np.ndarray] = {}
@@ -994,7 +1034,7 @@ def _block(plan: _Plan, block: TidyArray, axis: str) -> _Rows:
         each = int(np.prod(array.shape[1:], dtype=np.int64))  # values per row: the other axes' positions
         values[hidden] = (array.reshape(len(array) * each), each)
     return _Rows(found, [codes if all_kept else codes[kept] for codes in local], size if all_kept else int(kept.sum()),
-                 size - (size if all_kept else int(kept.sum())), _per_position(block, axis), values)
+                 size - (size if all_kept else int(kept.sum())), plan.per_position, values)
 
 
 def _per_position(block: TidyArray, axis: str) -> int:

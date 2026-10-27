@@ -218,7 +218,9 @@ file; an error found then names its block ("in block 3 of 4 (positions
 `blocks=` on an in-memory array keeps the verbs' intermediates block-sized,
 and `tidy(dataset, blocks={"time": 100})` runs an xarray dataset, lazy or
 Dask-backed, a block of time steps at a time (`blocks="chunks"` takes its
-own chunks), each block computed and wrapped on its own:
+own chunks), each block computed and wrapped on its own, with only the
+variables the pipeline reads, so a summary of one field of a wide
+NetCDF or Zarr file reads that field and its keys, not the rest:
 
 ```python
 import os
