@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 — 2026-10-27
 
 - Nothing is read until a result is asked for: a frame read with `blocks=`
   checks each verb as it is called on a block of no positions with the
