@@ -130,7 +130,7 @@ def test_the_result_is_a_frame_like_the_in_memory_one(npy):
     assert collected.sizes == reference.sizes
     assert result.to_dict()["dims"] == reference.to_dict()["dims"]
     text = str(result.explain())
-    assert "the first of 7 blocks of 3,000 positions on point" in text
+    assert "nothing read yet: 7 blocks of 3,000 positions on point" in text
     assert "+ axis ring: 41" in text  # the last step's effect comes from every block
 
 
@@ -220,16 +220,28 @@ def test_raw_file_in_blocks_matches_npy(tmp_path, npy):
         assert same_bits(out >> pull(name), want[name]), name
 
 
-def test_verbs_run_on_the_first_block_as_they_are_called(npy):
+def test_verbs_are_checked_on_the_empty_block_and_nothing_is_read_until_a_result(npy):
+    """Plan decision 4: a pipeline is built without a read; each verb's eager checks run on a block of no positions,
+    and sizes the data decides show as ?."""
     path, _ = npy
     frame = read_array(path, dims={"point": infer, "feature": 5}, labels={"feature": NAMES}, field_axis="feature",
                        blocks=3_000)
-    assert "unlabeled, positions 1 … 3,000" in repr(frame)
-    assert "blocks: 7 of 3,000 positions on point" in repr(frame)
-    assert len(frame >> pull("x")) == 20_000  # every block, joined
+    source, opened = frame._blocks.source, []
+    reopen = source.reopen
+    source.reopen = lambda: opened.append(1) or reopen()
+    text = repr(frame)
+    assert "nothing read yet" in text and "values (point: ?, feature: 5) float32" in text
+    assert "blocks: 7 of 3,000 positions on point" in text
     with pytest.raises(MutateError, match='"wrong"'):
         frame >> mutate(d=fields("wrong") + 1)
-    assert "1. mutate(d = x + 1)" in str((frame >> mutate(d=x + 1)).explain())
+    summary = frame >> mutate(d=x + 1) >> filter(col("d") > 0) >> group_by(ring) >> summarise(points=n())
+    plan = str(summary.explain())
+    assert "nothing read yet: 7 blocks of 3,000 positions on point" in plan
+    assert "1. mutate(d = x + 1)" in plan and "point: ? → ?" not in plan and "+ axis ring: ?" in plan
+    assert "all removed by" not in plan + repr(summary)  # the empty block's emptiness writes no note
+    assert opened == []  # nothing read while the pipeline was built
+    assert len(frame >> pull("x")) == 20_000  # every block, joined
+    assert len(opened) == 7
 
 
 @pytest.mark.parametrize("pipeline, message", [
@@ -357,12 +369,14 @@ def test_many_small_groups_merge(tmp_path):
         assert same_bits(got[name], want[name]), name
 
 
-def test_values_outside_every_bin_are_group_by_s_own_error(npy):
+def test_values_outside_every_bin_are_group_by_s_own_error_naming_the_block(npy):
+    """A value-level error is found when the blocks run (the empty block has no values), and names its block."""
     path, _ = npy
     frame = read_array(path, dims={"point": infer, "feature": 5}, labels={"feature": NAMES}, field_axis="feature",
                        blocks=3_000)
-    with pytest.raises(GroupError, match="fall outside every bin"):
-        frame >> group_by(bins(intensity, [0, 10]))
+    grouped = frame >> group_by(bins(intensity, [0, 10])) >> summarise(points=n())
+    with pytest.raises(GroupError, match=r"(?s)fall outside every bin.*in block 1 of 7"):
+        grouped >> pull("points")
 
 
 ROWS = mutate(distance=formula(r"\sqrt{x^2 + y^2 + z^2}")) >> filter(distance <= 60) >> select("x", "distance")
@@ -471,7 +485,7 @@ def test_a_dataset_runs_in_blocks(npy):
     columns = ["ring", "points", "brightness", "low"]
     want = tidy(source) >> pipeline
     frame = tidy(source, blocks={"point": 3_000}, threads=2)
-    assert "the first of 7 blocks of 3,000 positions on point" in str(frame.explain())
+    assert "nothing read yet: 7 blocks of 3,000 positions on point" in str(frame.explain())
     out = frame >> pipeline
     for name in columns:
         assert same_bits(out >> pull(name), want >> pull(name)), name
@@ -509,13 +523,13 @@ def test_a_dask_backed_dataset_reads_each_chunk_once(npy, blocks, threads):
     pipeline = filter(x > 0) >> group_by(ring) >> summarise(points=n(), brightness=mean(intensity))
     frame = tidy(source, blocks=blocks, threads=threads)
     assert "blocks: 7 on point, the data's own chunks" in repr(frame)
-    assert len(reads) == 5  # the first block: one chunk of each variable
+    assert reads == []  # nothing is read while the pipeline is built
     out = frame >> pipeline
     brightness = out >> pull("brightness")
     from collections import Counter
 
     every = Counter((name, start) for name in NAMES for start in range(0, 20_000, 3_000))
-    assert Counter(reads) == every + Counter((name, 0) for name in NAMES)  # each chunk once, the first block's twice
+    assert Counter(reads) == every  # each chunk exactly once
     want = in_memory(values, pipeline, ["brightness"])["brightness"]
     assert same_bits(brightness, want)
 
@@ -720,7 +734,7 @@ def test_positions_are_the_whole_axis_s_in_every_block(npy):
     eager = read_array(values, **options)
     for source in (path, values):
         frame = read_array(source, blocks=3_000, **options)
-        assert "unlabeled, positions 1 … 3,000" in repr(frame)  # the first block, shown as in memory
+        assert "values (point: ?, feature: 5)" in repr(frame)  # nothing read yet
         positions = mutate(p=col("point")) >> select("p")
         assert same_bits(frame >> positions >> pull("p"), eager >> positions >> pull("p"))
         assert not (frame >> positions).collect().coords  # no filter ran, so the axis stays unlabelled
@@ -962,20 +976,93 @@ def test_an_empty_dask_block_computes_no_chunk(npy, as_array):
 
 
 def test_the_block_verbs_on_an_empty_block_give_the_types_of_a_run(npy):
-    """What decision 4 checks verbs on: a summary's type on no positions is its type on data, with two exceptions
-    recorded in the plan (decision 4) and pinned here, so fixing either fails this test until it is tightened: a text
-    key's labels are numbers on no positions, and min() and max() of float32 are float64 there (labelarray's
-    _reduce_data and the xarray backend fill an empty min or max with a float64 NaN), in memory as on blocks."""
+    """What decision 4 checks verbs on: a summary's type on no positions is its type on data. A text key's labels are
+    the exception, numbers on no positions, so a key's label type will come from its transform (pinned here, so the
+    test fails when that changes)."""
     path, values = npy
     frame = read_array(path, dims={"point": infer, "feature": 5}, labels={"feature": NAMES}, field_axis="feature",
                        blocks=3_000)
     empty, first = frame._blocks.source.empty(), frame._blocks.source.block(0, 3_000)
-    for pipeline, labels, extremes in ((PIPELINE, set(), {"low", "high"}), (ROWS, set(), set()),
-                                       (VOXELS, {"x_cell", "z_cell"}, {"top"})):
+    for pipeline, labels in ((PIPELINE, set()), (ROWS, set()), (VOXELS, {"x_cell", "z_cell"})):
         on_nothing, on_data = schema(empty >> pipeline)[0], schema(first >> pipeline)[0]
-        assert {name: kind for name, kind in on_nothing.items() if name not in labels | extremes} == \
-            {name: kind for name, kind in on_data.items() if name not in labels | extremes}
+        assert {name: kind for name, kind in on_nothing.items() if name not in labels} == \
+            {name: kind for name, kind in on_data.items() if name not in labels}
         for name in labels:
             assert on_data[name][1] == "|O" and on_nothing[name][1] != "|O"
-        for name in extremes:
-            assert on_data[name][1] == "<f4" and on_nothing[name][1] == "<f8"
+
+
+@pytest.mark.parametrize("rows", [1, 2, 4])
+def test_min_and_max_of_times_text_and_empty_bins_on_blocks(rows):
+    """The merge filled unseen groups with np.iinfo's extremes, which times and text have none of, and an integer min
+    of an empty bin showed that fill rather than NaN."""
+    xr = pytest.importorskip("xarray")
+    t, g, w, d, k = fields("t", "g", "when", "d", "k")
+    times = np.array(["2024-01-01", "2024-01-02", "NaT", "2024-01-04", "2024-01-05", "2024-01-06"],
+                     dtype="datetime64[ns]")
+    source = xr.Dataset({"t": ("point", np.array(list("bacdef"))), "g": ("point", [1.0, 1, 2, 2, 5, 5]),
+                         "when": ("point", times), "d": ("point", times - times[0]),
+                         "k": ("point", np.array([3, 1, 4, 1, 5, 9], dtype="int32"))})
+    for pipeline in (group_by(g) >> summarise(lo=min(w), hi=max(w, na_rm=True), short=min(d), first=min(t),
+                                              last=max(t), least=min(k)),
+                     group_by(bins(g, [0, 1.5, 3, 4, 6])) >> summarise(least=min(k), last=max(t), first=min(w))):
+        want = tidy(source) >> pipeline
+        got = tidy(source, blocks={"point": rows}) >> pipeline
+        for name in want._backend.variables(want._data):
+            assert same_bits(got >> pull(name), want >> pull(name)), name
+
+
+# ── Decision 4, step 3: preview() runs a sample ─────────────────────────────
+
+
+def test_preview_runs_the_first_middle_and_last_blocks_and_leaves_the_frame_alone(npy):
+    path, values = npy
+    frame = read_array(path, dims={"point": infer, "feature": 5}, labels={"feature": NAMES}, field_axis="feature",
+                       blocks=3_000)
+    source, opened = frame._blocks.source, []
+    reopen = source.reopen
+    source.reopen = lambda: opened.append(1) or reopen()
+    summary = frame >> PIPELINE
+    sample = summary.preview()
+    assert len(opened) == 3 * 2  # blocks 1, 4, and 7, twice: block 1's tie group needs the exact pass
+    rows = np.concatenate([values[0:3_000], values[9_000:12_000], values[18_000:20_000]])
+    want = in_memory(rows, PIPELINE, COLUMNS)
+    for name in COLUMNS:
+        assert same_bits(sample >> pull(name), want[name]), name
+    words = "a sample: blocks 1, 4, 7 of 7 (8,000 of 20,000 positions on point); collect() runs every block"
+    assert f"preview: {words}" in sample._notes
+    assert words in str(sample.explain())
+    assert summary._result is None  # a sample is never the frame's result
+    assert same_bits(summary >> pull("points"), in_memory(values, PIPELINE, ["points"])["points"])
+    assert len(opened) == 3 * 2 + 7 * 2
+
+
+def test_preview_of_named_blocks_and_of_rows(npy):
+    path, values = npy
+    frame = read_array(path, dims={"point": infer, "feature": 5}, labels={"feature": NAMES}, field_axis="feature",
+                       blocks=3_000)
+    rows = (frame >> ROWS).preview(blocks=[2, 5])
+    eager = read_array(values, dims={"point": infer, "feature": 5}, labels={"feature": NAMES},
+                       field_axis="feature") >> ROWS
+    kept = eager >> pull("point")
+    inside = ((kept > 3_000) & (kept <= 6_000)) | ((kept > 12_000) & (kept <= 15_000))
+    assert same_bits(rows >> pull("point"), kept[inside])  # the whole axis's positions
+    assert same_bits(rows >> pull("distance"), (eager >> pull("distance"))[inside])
+    assert same_bits((frame >> PIPELINE).preview(blocks=3) >> pull("points"),
+                     in_memory(values[6_000:9_000], PIPELINE, ["points"])["points"])
+    for wrong in ([0], [8], [], [1.5]):
+        with pytest.raises(BlockError, match="block numbers from 1 to 7"):
+            (frame >> ROWS).preview(blocks=wrong)
+
+
+def test_an_error_in_a_sample_names_the_block_among_every_block(tmp_path):
+    values = cloud(4_000)
+    values[:, 2] = np.clip(values[:, 2], -50, 50)
+    values[2_500, 2] = 500
+    path = tmp_path / "late.npy"
+    np.save(path, values)
+    frame = read_array(path, dims={"point": infer, "feature": 5}, labels={"feature": NAMES}, field_axis="feature",
+                       blocks=1_000)
+    summary = frame >> group_by(bins(z, [-100, 0, 100])) >> summarise(points=n())
+    assert (summary.preview(blocks=[1, 2]) >> pull("points")).sum() == 2_000
+    with pytest.raises(GroupError, match="in block 3 of 4"):
+        summary.preview(blocks=[3])

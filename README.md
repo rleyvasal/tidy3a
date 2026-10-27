@@ -205,11 +205,16 @@ them on other data.
 ## Files larger than memory
 
 `read_array(path, ..., blocks=rows)` reads a file in blocks of that many
-positions on its first axis. The result holds the first block, so each verb
-runs on it as it is called, with its checks, notes, and `explain()`; when a
-result is asked for (`pull`, `collect()`, `to_dict()`), the verbs run over
-every block, `threads` blocks at a time, and the blocks' summaries merge,
-so memory is the blocks in flight and the groups, not the file. The same
+positions on its first axis. Nothing is read until a result is asked for:
+each verb is checked as it is called, on a block of no positions with the
+file's schema, and `repr` and `explain()` show what each step makes, with
+`?` for a size the data decides. `preview()` runs the verbs on a sample of
+blocks, by default the first, middle, and last, and gives that result in
+memory. When a result is asked for (`pull`, `collect()`, `to_dict()`), the
+verbs run over every block, `threads` blocks at a time, and the blocks'
+summaries merge, so memory is the blocks in flight and the groups, not the
+file; an error found then names its block ("in block 3 of 4 (positions
+2,001–3,000 on point)"). The same
 `blocks=` on an in-memory array keeps the verbs' intermediates block-sized,
 and `tidy(dataset, blocks={"time": 100})` runs an xarray dataset, lazy or
 Dask-backed, a block of time steps at a time (`blocks="chunks"` takes its
@@ -235,7 +240,9 @@ cloud = read_array(path, dims={"point": infer, "feature": 5},
 near = cloud >> mutate(distance = formula(r"\sqrt{x^2 + y^2 + z^2}")) >> filter(distance <= 60)
 per_ring = near >> group_by(ring) >> summarise(points = n(), brightness = mean(intensity))
 voxels = near >> group_by(cells(x, 30), cells(y, 30), axis="voxel") >> summarise(points = n())
+sample = per_ring.preview()  # blocks 1, 3, and 5 of 5, in memory; nothing else is read
 per_ring, voxels = scan(per_ring, voxels)  # one pass over the file for both
+print(sample >> pull("ring"))  # [0. 1. 2. 3.]
 print(per_ring >> pull("ring"))  # [0. 1. 2. 3.]
 ```
 

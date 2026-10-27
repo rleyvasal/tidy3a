@@ -239,10 +239,11 @@ def read_array(
 
     ``blocks=rows`` reads the data in blocks of that many positions on its
     first axis, a file larger than memory or an array whose intermediates
-    should stay small: the result holds the first block, so each verb runs
-    on it as it is called, and the verbs run over every block, ``threads``
-    blocks at a time, when a result is asked for (``docs/plan.md``,
-    decision 10, stage (b), and milestone 11). A pipeline ending in
+    should stay small. Nothing is read until a result is asked for: each
+    verb is checked as it is called on a block of no positions with the
+    data's schema, ``preview()`` runs a sample of blocks, and the verbs run
+    over every block, ``threads`` blocks at a time, when a result is asked
+    for (``docs/plan.md``, decision 10, stage (b), and milestone 11). A pipeline ending in
     ``summarise()`` merges the blocks' summaries; any other joins the
     blocks' rows in memory. What a block cannot answer is refused when the
     verb is called.

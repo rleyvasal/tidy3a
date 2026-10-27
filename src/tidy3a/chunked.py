@@ -2,10 +2,14 @@
 
 ``read_array(path, ..., blocks=rows)``, ``read_array(array, ..., blocks=rows)``,
 and ``tidy(dataset, blocks={axis: rows})`` give a ``ChunkedFrame``: a frame
-holding the data's first block of ``rows`` positions on one axis. Each verb
-runs on that block as it is called, so its checks, notes, errors, and
-``explain()`` appear at once, as they do in memory, and the frame records
-the verb. When a result is asked for (``collect()``, ``pull``,
+holding a block of no positions with the data's schema (``Source.empty``),
+so nothing is read until a result is asked for (plan decision 4). Each verb
+runs on that empty block as it is called, so its checks and errors appear
+at once, as they do in memory, and ``repr`` and ``explain()`` show each
+step's variables, axes, and types, with ``?`` for a size the data decides;
+the frame records the verb. ``preview()`` runs the verbs on a sample of
+blocks, by default the first, middle, and last. An error found while a
+block runs names the block. When a result is asked for (``collect()``, ``pull``,
 ``to_dict()``, or a verb that needs the whole axis), the recorded verbs run
 over every block, ``threads`` blocks at a time: a pipeline ending in
 ``summarise`` merges the blocks' summaries into one table, so memory is the
@@ -53,6 +57,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import math
+import warnings
 from collections.abc import Callable, Hashable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -83,7 +88,7 @@ from tidy3a.expr import (
     walk,
 )
 from tidy3a.frame import TidyArray
-from tidy3a.plan import Record, Step, snapshot
+from tidy3a.plan import Record, Snapshot, Step, _variable, snapshot
 
 ROW_WISE = ("select", "filter", "mutate")
 COMBINABLE = ("n", "sum", "mean", "min", "max", "std", "var", "any", "all")
@@ -212,6 +217,7 @@ class Blocks:
     rows: int | str  # positions per block, or "chunks" for the source's own boundaries
     threads: int
     labelled: bool = False  # else each block is labelled with its positions, so a verb sees them as in memory
+    chosen: tuple[int, ...] | None = None  # a sample's blocks (``preview``), counted from 0; else every block
 
     @property
     def axis(self) -> str:
@@ -222,11 +228,18 @@ class Blocks:
         return self.source.size
 
     @property
-    def spans(self) -> list[tuple[int, int]]:
+    def every(self) -> list[tuple[int, int]]:
+        """Every block's span, which a block's number counts in."""
         if self.rows == "chunks":
             return self.source.chunks or [(0, self.size)]
         rows = int(self.rows)
         return [(start, min(start + rows, self.size)) for start in range(0, self.size, rows)] or [(0, 0)]
+
+    @property
+    def spans(self) -> list[tuple[int, int]]:
+        """The spans a run reads: every block's, or a sample's."""
+        every = self.every
+        return every if self.chosen is None else [every[number] for number in self.chosen]
 
     def load(self, start: int, stop: int) -> TidyArray:
         block = self.source.block(start, stop)
@@ -236,7 +249,7 @@ class Blocks:
 
     def words(self, counted: str = "") -> str:
         """How many blocks of what: "7 blocks of 3,000 positions on point", or "7 on point, the data's own chunks"."""
-        count = f"{len(self.spans):,}{counted}"
+        count = f"{len(self.every):,}{counted}"
         if self.rows == "chunks":
             return f"{count} on {self.axis}, the data's own chunks"
         return f"{count} of {int(self.rows):,} positions on {self.axis}"
@@ -255,20 +268,20 @@ def check_rows(rows: Any, threads: Any, source: Source) -> None:
 
 
 class ChunkedFrame(TidyArray):
-    """The first block of data read with ``blocks=``, with the verbs to run over every block."""
+    """Data read with ``blocks=``: an empty block with its schema, and the verbs to run over every block."""
 
     __slots__ = ("_blocks", "_steps", "_plan", "_result")
 
     @classmethod
     def open(cls, source: Source, rows: int | str, threads: int) -> ChunkedFrame:
+        """A frame holding the source's empty block: nothing is read until a result is asked for (plan decision 4)."""
         check_rows(rows, threads, source)
-        blocks = Blocks(source, rows, threads)
-        first = source.block(*blocks.spans[0])  # shown as in memory: the first block's positions are its own
-        blocks = Blocks(source, rows, threads, first._backend.has_labels(first._data, source.axis))
-        frame = cls._wrap(first, blocks, ())
-        count = len(blocks.spans)
-        frame._record = Record(first._source or "data", snapshot(first),
-                               preview=f"the first of {blocks.words(' block' if count == 1 else ' blocks')}")
+        empty = source.empty()
+        blocks = Blocks(source, rows, threads, empty._backend.has_labels(empty._data, source.axis))
+        frame = cls._wrap(empty, blocks, ())
+        count = len(blocks.every)
+        frame._record = Record(empty._source or "data", _unknown(snapshot(empty)),
+                               preview=f"nothing read yet: {blocks.words(' block' if count == 1 else ' blocks')}")
         return frame
 
     @classmethod
@@ -284,10 +297,46 @@ class ChunkedFrame(TidyArray):
         operation = getattr(verb, "_operation", None)
         if self._summarised or operation not in (*ROW_WISE, "group_by", "summarise"):
             return verb(self._run())  # needs the whole axis: the blocks' result, in memory
-        result = TidyArray._apply_verb(self, verb)  # on the first block, with its checks and record
+        with warnings.catch_warnings():  # a mean of nothing warns; on the empty block that says nothing
+            warnings.simplefilter("ignore", RuntimeWarning)
+            result = TidyArray._apply_verb(self, verb)  # on the empty block: the eager checks, and the result's schema
         steps = (*self._steps, verb)
         plan = _check(self, verb, result, steps)
-        return self._wrap(result, self._blocks, steps, plan)
+        frame = self._wrap(result, self._blocks, steps, plan)
+        record = frame._record
+        last = record.steps[-1]
+        frame._record = dataclasses.replace(record, steps=(*record.steps[:-1], Step(last.verb, _unknown(last.after))))
+        return frame
+
+    @translating
+    def preview(self, blocks: Sequence[int] | None = None) -> TidyArray:
+        """The verbs run on a sample of blocks, the result in memory, labelled as a sample; the frame is unchanged.
+
+        By default the first, middle, and last blocks, so the sample is not only
+        the start of the data; ``blocks=`` names others, counted from 1 as an
+        error names them. It reads those blocks, and only those.
+        """
+        every = len(self._blocks.every)
+        if blocks is None:
+            chosen = sorted({0, every // 2, every - 1})
+        else:
+            numbers = [blocks] if isinstance(blocks, (int, np.integer)) else list(blocks)
+            wrong = [number for number in numbers
+                     if isinstance(number, bool) or not isinstance(number, (int, np.integer)) or not 1 <= number <= every]
+            if wrong or not numbers:
+                raise BlockError(f"preview(blocks=...) takes block numbers from 1 to {every:,}, not {wrong or blocks!r}")
+            chosen = sorted({int(number) - 1 for number in numbers})
+        sample = dataclasses.replace(self._blocks, chosen=tuple(chosen))
+        spans = sample.spans
+        shown = ", ".join(str(number + 1) for number in chosen)
+        words = (f"a sample: block{'' if len(chosen) == 1 else 's'} {shown} of {every:,} "
+                 f"({sum(stop - start for start, stop in spans):,} of {self._blocks.size:,} positions on "
+                 f"{self._blocks.axis}); collect() runs every block")
+        frame = self._wrap(self, sample, self._steps, self._plan)
+        frame._record = dataclasses.replace(frame._record, preview=words)
+        _scan([frame])
+        result = frame._result
+        return result._evolve(notes=[*result._notes, f"preview: {words}"])
 
     @property
     def _summarised(self) -> bool:
@@ -314,15 +363,42 @@ class ChunkedFrame(TidyArray):
         return self._run().__tidy__(**options)
 
     def explain(self) -> Any:
-        """Each step's effect on the first block, or on every block once a result has been computed."""
+        """Each step's effect on the schema (``?`` for sizes the data decides), or on every block once a result has
+        been computed."""
         return self._result.explain() if self._result is not None else TidyArray.explain(self)
 
     @translating
     def __repr__(self) -> str:
         if self._result is not None:
             return repr(self._result)
-        return (f"{TidyArray.__repr__(self)}\nblocks: {self._blocks.words()}; the first block is shown, and every "
-                "block runs when a result is asked for")
+        last = self._record.steps[-1].after if self._record is not None and self._record.steps else None
+        shown = last if last is not None else self._record.start if self._record is not None else _unknown(
+            snapshot(self))
+        lines = [f"<TidyArray source: {self._source or 'data'}; nothing read yet>"]
+        lines += [_variable(entry) for entry in shown.variables]
+        if shown.field_axis is not None:
+            lines.append(f"field axis: {shown.field_axis}")
+        if shown.groups:
+            lines.append(f"groups: {', '.join(shown.groups)}")
+        lines += [note for note in shown.notes]
+        lines.append(f"blocks: {self._blocks.words()}; ? is a size the data decides; preview() runs a sample, and "
+                     "collect() or pull() every block")
+        return "\n".join(lines)
+
+
+def _emptied(note: str) -> bool:
+    """A note only the empty block's emptiness wrote: a filter on no positions removes them all."""
+    return "(all removed by " in note
+
+
+def _unknown(shot: Snapshot) -> Snapshot:
+    """A snapshot of a frame on the empty block, with the sizes the data decides unknown (None, shown as ?): those that
+    are 0 there, the blocked axis and the groups a key finds; and without the notes its emptiness wrote."""
+    sizes = tuple((dim, None if size == 0 else size) for dim, size in shot.sizes)
+    variables = tuple((name, dims, tuple(None if size == 0 else size for size in shape), dtype)
+                      for name, dims, shape, dtype in shot.variables)
+    return dataclasses.replace(shot, variables=variables, sizes=sizes,
+                               notes=tuple(note for note in shot.notes if not _emptied(note)))
 
 
 # ── Checks at verb time ─────────────────────────────────────────────────────
@@ -551,7 +627,7 @@ class _Table:
                 held[:sums.TERMS, at] += piece[:sums.TERMS]
                 held[sums.TERMS, at] = np.maximum(held[sums.TERMS, at], piece[sums.TERMS])
             elif kind in ("extreme", "flag"):
-                held[at] = _extreme(self.plan.reductions[hidden])(held[at], piece)
+                held[at] = _merged(self.plan.reductions[hidden], held[at], piece)
             elif kind == "moments":
                 held[:, at] = _combine_moments(held[:, at], piece)
             else:
@@ -597,8 +673,8 @@ class _Table:
                 columns[hidden] = result
                 if undecided.any():
                     unsure[hidden] = np.flatnonzero(undecided)
-            elif kind == "extreme":  # an empty group has no extreme, whatever filled its slot
-                columns[hidden] = np.where(self.counts > 0, held, np.nan) if held.dtype.kind == "f" else held
+            elif kind == "extreme":
+                columns[hidden] = _settled_extreme(held, self.counts)
             elif kind == "flag":
                 columns[hidden] = held
             elif kind == "moments":
@@ -730,11 +806,12 @@ def _walk(node: _Node, frame: TidyArray, visit: Callable[[_Leaf, TidyArray], Non
 @contextmanager
 def _naming(blocks: Blocks, span: tuple[int, int]) -> Iterator[None]:
     """An error raised while a block runs, of its own class, with the block named after its message: a value the
-    first block did not have can fail any block, and the verb's message alone does not say where."""
+    verb was checked on (the empty block has none) can fail any block, and the verb's message alone does not say
+    where."""
     try:
         yield
     except (TidyError, LabelArrayError) as error:
-        spans = blocks.spans
+        spans = blocks.every
         where = (f"in block {spans.index(span) + 1:,} of {len(spans):,} "
                  f"(positions {span[0] + 1:,}–{span[1]:,} on {blocks.axis})")
         named = copy.copy(error)
@@ -973,6 +1050,8 @@ def _pieces(node: Reduce, value: np.ndarray, codes: np.ndarray, count: int) -> t
         starts = np.concatenate([[0], np.cumsum(np.bincount(codes, minlength=count))[:-1]])
         if node.op in ("any", "all"):
             return "flag", _extreme(node).reduceat(value[order].astype(bool), starts)
+        if value.dtype.kind in "US":  # text compares as Python objects, as the backends compare it
+            value = value.astype(object)
         return "extreme", _extreme(node).reduceat(value[order], starts)
     if node.op in ("std", "var"):
         return "moments", _moments(value, codes, count)
@@ -1025,20 +1104,54 @@ def _combine_moments(held: np.ndarray, piece: np.ndarray) -> np.ndarray:
     return np.stack([n, ma + delta * share, sa + sb + delta * delta * na * share, nana + nanb])
 
 
+_UNSEEN = object()  # an object accumulator's slot for a group no block has had yet
+
+
 def _fill(kind: str, dtype: np.dtype, node: Reduce) -> Any:
     """The value a group not yet seen holds in an accumulator."""
     if kind == "flag":
         return node.op == "all"
     if kind != "extreme":
         return 0
-    if dtype.kind == "f":  # NaN where NaN is skipped (fmin, fmax), so a group of NaN stays NaN; else the far end
+    if dtype.kind in "fc":  # NaN where NaN is skipped (fmin, fmax), so a group of NaN stays NaN; else the far end
         return np.nan if node.na_rm else (np.inf if node.op == "min" else -np.inf)
+    if dtype.kind in "mM":  # the far ends of the int64 the times are held in; its smallest is NaT
+        limits = np.iinfo(np.int64)
+        return np.array(limits.max if node.op == "min" else limits.min + 1, dtype=np.int64).view(dtype)[()]
+    if dtype.kind == "O":
+        return _UNSEEN
     limits = np.iinfo(dtype)
     return limits.max if node.op == "min" else limits.min
 
 
+def _merged(node: Reduce, held: np.ndarray, piece: np.ndarray) -> np.ndarray:
+    """An accumulator's values for some groups and a block's pieces for them, combined; an object accumulator's
+    unseen slots take the piece, since no other value compares with them."""
+    if held.dtype == object:
+        unseen = np.frompyfunc(lambda item: item is _UNSEEN, 1, 1)(held).astype(bool)
+        held = np.where(unseen, piece, held)
+    return _extreme(node)(held, piece)
+
+
+def _settled_extreme(held: np.ndarray, counts: np.ndarray) -> np.ndarray:
+    """A min or max per group, missing where a group had no positions (an empty bin), as in memory: NaN of a float's
+    own type, NaT, NaN among objects; integers and booleans have no missing value, so float64 when a group is empty."""
+    empty = counts == 0
+    kind = held.dtype.kind
+    if kind == "O":
+        unseen = np.frompyfunc(lambda item: item is _UNSEEN, 1, 1)(held).astype(bool)
+        return np.where(empty | unseen, np.nan, held)
+    if not empty.any():
+        return held
+    if kind in "fc":
+        return np.where(empty, np.nan, held).astype(held.dtype)
+    if kind in "mM":
+        return np.where(empty, np.array("NaT", dtype=held.dtype), held)
+    return np.where(empty, np.nan, held.astype(np.float64))
+
+
 def _result(frame: ChunkedFrame, plan: _Plan, table: _Table, columns: dict[str, np.ndarray]) -> TidyArray:
-    """The merged summaries as the frame ``summarise`` gave on the first block, with every block's values."""
+    """The merged summaries as the frame ``summarise`` gave on the empty block, with every block's values."""
     backend, key = frame._backend, plan.key
     codes = table.group_codes()
     results: dict[Hashable, Any] = {}
@@ -1060,8 +1173,8 @@ def _result(frame: ChunkedFrame, plan: _Plan, table: _Table, columns: dict[str, 
     for name, node in plan.summaries.items():
         value = evaluate(node, ctx)
         values = value.values if backend.is_array(value) else np.asarray(value)
-        if name in given and values.dtype != given[name]:  # the type the summary has in memory
-            values = values.astype(given[name])
+        if name in given and values.dtype != given[name] and not _data_decides(values.dtype, given[name]):
+            values = values.astype(given[name])  # the type the summary has in memory
         if key is None:
             values = np.asarray(values).reshape(-1)[0] if np.ndim(values) else values
             results[name] = backend.array(values, name=name)
@@ -1075,8 +1188,14 @@ def _result(frame: ChunkedFrame, plan: _Plan, table: _Table, columns: dict[str, 
     return _recorded(result)
 
 
+def _data_decides(merged: np.dtype, empty: np.dtype) -> bool:
+    """Whether a summary's type is one the data decides, so the empty block's type is no guide: an integer min or max
+    is float64 when a group is empty (on the empty block, always) and the integers' own type when none is."""
+    return {merged.kind, empty.kind} <= set("biuf") and "f" in (merged.kind, empty.kind) and merged.kind != empty.kind
+
+
 def _recorded(result: TidyArray) -> TidyArray:
-    """*result* with its last recorded step's effect taken from it, not from the first block."""
+    """*result* with its last recorded step's effect taken from it, not from the empty block."""
     record = result._record
     if record is not None and record.steps:
         steps = record.steps
@@ -1086,10 +1205,11 @@ def _recorded(result: TidyArray) -> TidyArray:
 
 
 def _notes(frame: ChunkedFrame, plan: _Plan, table: _Table) -> list[str]:
-    """The first block's notes, with the count of positions dropped for a missing key from every block."""
+    """The notes the verbs wrote on the empty block, but those its emptiness wrote, with the count of positions
+    dropped for a missing key from every block."""
     key = plan.key
     prefix = f"changed: group_by({key.label}) dropped " if key is not None else None
-    notes = [note for note in frame._notes if prefix is None or not note.startswith(prefix)]
+    notes = [note for note in frame._notes if (prefix is None or not note.startswith(prefix)) and not _emptied(note)]
     dropped = table.dropped
     if key is not None and dropped:
         lacking = [part.subject for part in table.parts if part.dropped]

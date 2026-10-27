@@ -116,17 +116,23 @@ class Plan:
     __repr__ = __str__
 
 
+def _size(size: int | None) -> str:
+    """A size, or ? for one the data decides, which a frame read in blocks does not know before it runs."""
+    return "?" if size is None else f"{size:,}"
+
+
 def _variable(entry: tuple) -> str:
     name, dims, shape, dtype = entry  # the type is a NumPy dtype, printed as its name
-    return f"{name} ({', '.join(f'{dim}: {size}' for dim, size in zip(dims, shape))}) {dtype}"
+    return f"{name} ({', '.join(f'{dim}: {_size(size)}' for dim, size in zip(dims, shape))}) {dtype}"
 
 
 def _effect(before: Snapshot, after: Snapshot) -> list[str]:
     lines = []
     old, new = dict(before.sizes), dict(after.sizes)
     lines += [f"- axis {dim}" for dim in old if dim not in new]
-    lines += [f"+ axis {dim}: {size:,}" for dim, size in new.items() if dim not in old]
-    lines += [f"{dim}: {old[dim]:,} → {size:,}" for dim, size in new.items() if dim in old and old[dim] != size]
+    lines += [f"+ axis {dim}: {_size(size)}" for dim, size in new.items() if dim not in old]
+    lines += [f"{dim}: {_size(old[dim])} → {_size(size)}" for dim, size in new.items()
+              if dim in old and old[dim] != size]
     was = {entry[0]: entry for entry in before.variables}
     now = {entry[0]: entry for entry in after.variables}
     lines += [f"- {name}" for name in was if name not in now]

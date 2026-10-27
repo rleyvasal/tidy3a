@@ -36,6 +36,24 @@ def _dask_backed(array: xr.DataArray) -> bool:
     return array.chunks is not None and type(array.data).__module__.split(".")[0] == "dask"
 
 
+def _as_objects(array: xr.DataArray, op: str) -> xr.DataArray:
+    """Text as Python objects for min and max, so the result is objects whether grouped or not, as on the NumPy
+    backend, and an empty group's NaN has a place."""
+    return array.astype(object) if op in ("min", "max") and array.dtype.kind in "US" else array
+
+
+def _missing_of(dtype: np.dtype) -> tuple[Any, np.dtype]:
+    """The missing value of *dtype* and the type that holds it, as labelarray's empty min and max give them: a float
+    or complex type's own NaN, a time type's NaT, text and objects as NaN in an object array; else float64's NaN."""
+    if dtype.kind in "fc":
+        return np.nan, dtype
+    if dtype.kind in "mM":
+        return np.array("NaT", dtype=dtype)[()], dtype
+    if dtype.kind in "OUS":
+        return np.nan, np.dtype(object)
+    return np.nan, np.dtype(np.float64)
+
+
 def _reductions_keep_attrs() -> bool:
     """Whether xarray's reductions keep attributes, under the current ``keep_attrs`` setting.
 
@@ -318,6 +336,7 @@ class XarrayBackend:
         axes = list(axes)
         if not axes:
             return array
+        array = _as_objects(array, op)
         if op == "median" and na_rm and array.chunks is not None and set(axes) == set(array.dims):
             raise TidyError(
                 "median(..., na_rm=True) over every axis of a chunked array requires gathering "
@@ -325,8 +344,10 @@ class XarrayBackend:
                 "then wrap the result with tidy() to compute the median."
             )
         if op in ("min", "max") and builtins.any(array.sizes[axis] == 0 for axis in axes):
-            # NumPy cannot take min or max of nothing; the result is missing.
-            return xr.full_like(array.astype(float).sum(dim=axes), np.nan)
+            # NumPy cannot take min or max of nothing; the result is missing, in the values' own type where it has a
+            # missing value (NaN of float32, NaT), as labelarray gives it.
+            value, dtype = _missing_of(array.dtype)
+            return xr.full_like(array.isnull().sum(dim=axes), value, dtype=dtype)
         with warnings.catch_warnings(), np.errstate(all="ignore"):
             warnings.simplefilter("ignore", RuntimeWarning)
             if op in ("any", "all"):
@@ -442,6 +463,7 @@ class XarrayBackend:
     def group_reduce(self, array: xr.DataArray, op: str, groups: Any, others: Sequence[Hashable],
                      na_rm: bool, min_count: int | None) -> xr.DataArray:
         """*op* per group of *groups* (``tidy3a.expr.Groups``), over its axis and *others*."""
+        array = _as_objects(array, op)
         if op in ("sum", "mean") and array.dtype == np.float32 and (array.chunks is None or _dask_backed(array)):
             if array.chunks is None:
                 axes = (array.get_axis_num(groups.axis), *(array.get_axis_num(o) for o in others))

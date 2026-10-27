@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Nothing is read until a result is asked for: a frame read with `blocks=`
+  checks each verb as it is called on a block of no positions with the
+  data's schema, instead of reading and running the first block, and
+  `repr` and `explain()` show each step's variables, axes, and types, with
+  `?` for a size the data decides (plan decision 4). `preview()` runs the
+  verbs on a sample of blocks, by default the first, middle, and last
+  (`preview(blocks=[2, 5])` names others), and gives that result in
+  memory, labelled as a sample. A value-level error (a value outside every
+  bin) is now found when the blocks run, and names its block; a
+  Dask-backed source has each chunk computed once, the first included.
+- `min()` and `max()` of no positions, or of an empty bin, keep the
+  values' type where it has a missing value: NaN of float32 stays float32
+  and times give NaT (a float NaN among times failed on the NumPy
+  backend); integers have none, so they still become float64. Text takes
+  `min()` and `max()` on both backends, as objects; `any()` and `all()`
+  of text are refused, as in R and dplyr (the backends gave `True` and
+  `1.0`), and so are `std()` and `var()` of durations. The mean of times is
+  the xarray backend's, and the NumPy backend says so. On blocks, `min()`
+  and `max()` of times, durations, and text merge as in memory. Needs
+  labelarray 0.1.4 (`labelarray>=0.1.4`).
 - Several results from one pass: `scan(*frames)` runs several frames read
   with `blocks=` over their source in one pass and gives their results as
   a tuple (`per_ring, voxels = scan(a, b)`). The frames' row-wise verbs
@@ -20,8 +40,6 @@
 - Reductions of text (`sum`, `mean`, `std`, `var`, `median`) and of times
   (`sum`, `std`, `var`, `median`, `any`, `all`) raise a `SummariseError`
   naming the reduction and the variable, instead of NumPy's `TypeError`.
-- An error raised while a block runs names the block: "in block 3 of 4
-  (positions 2,001–3,000 on point)".
 - Blocks over any source: `read_array(array, ..., blocks=rows)` runs an
   in-memory array block by block, so the verbs' intermediates stay
   block-sized, and `tidy(dataset, blocks={"time": 100})` runs an xarray

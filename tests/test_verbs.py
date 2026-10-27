@@ -765,3 +765,59 @@ def test_times_still_take_min_and_max():
     out = tidy(_labelled()) >> group_by(group) >> summarise(first=min(when), last=max(when))
     assert np.array_equal(out >> pull("first"), np.array(["2024-01-01", "2024-01-03"], dtype="datetime64[ns]"))
     assert np.array_equal(out >> pull("last"), np.array(["2024-01-02", "2024-01-04"], dtype="datetime64[ns]"))
+
+
+TIMES = np.array(["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"], dtype="datetime64[ns]")
+
+
+@pytest.mark.parametrize("values, missing", [
+    (np.arange(4, dtype="float32"), "nan"), (np.arange(4, dtype="complex64"), "nan"), (TIMES, "NaT"),
+    (TIMES - TIMES[0], "NaT"), (np.arange(4, dtype="int32"), "float64"),
+], ids=["float32", "complex64", "datetime", "timedelta", "int32"])
+@pytest.mark.parametrize("op", [min, max], ids=lambda op: op.__name__)
+def test_min_and_max_of_nothing_keep_the_values_type(values, missing, op):
+    """Of no positions, or of an empty bin, min and max are missing in the values' own type: float32 stays float32 and
+    times are NaT (a float NaN beside times failed); integers have no missing value, so they become float64."""
+    v, g = fields("v", "g")
+    frame = tidy(xr.Dataset({"v": ("point", values), "g": ("point", [1.0, 1.5, 5.5, 5.9])}))
+    want = np.dtype(np.float64) if missing == "float64" else values.dtype
+    nothing = frame >> filter(g > 9) >> summarise(s=op(v)) >> pull("s")
+    assert nothing.dtype == want and (np.isnat(nothing) if missing == "NaT" else np.isnan(nothing))
+    assert (frame >> filter(g > 9) >> group_by(g) >> summarise(s=op(v)) >> pull("s")).dtype == want
+    binned = frame >> group_by(bins(g, [0, 2, 4, 6])) >> summarise(s=op(v)) >> pull("s")
+    assert binned.dtype == want and (np.isnat(binned[1]) if missing == "NaT" else np.isnan(binned[1]))
+    assert binned[0] == (values[0] if op is min else values[1]) and binned[2] == (values[2] if op is min else values[3])
+
+
+def test_text_takes_min_and_max_alike_on_both_backends():
+    """The NumPy backend had no loop for text; both compare it as Python objects now."""
+    name, group = fields("name", "group")
+    numpy = tidy(_labelled(), backend="numpy") >> group_by(group) >> summarise(lo=min(name), hi=max(name))
+    xarray = tidy(_labelled(), backend="xarray") >> group_by(group) >> summarise(lo=min(name), hi=max(name))
+    for column in ("lo", "hi"):
+        assert (numpy >> pull(column)).tolist() == (xarray >> pull(column)).tolist()
+        assert (numpy >> pull(column)).dtype == (xarray >> pull(column)).dtype == object
+    assert (numpy >> pull("lo")).tolist() == ["a", "a"] and (numpy >> pull("hi")).tolist() == ["b", "c"]
+
+
+@pytest.mark.parametrize("op", [any, all], ids=lambda op: op.__name__)
+def test_any_and_all_of_text_are_refused(op):
+    """Text is not true or false (the backends gave True and 1.0), as in R and dplyr."""
+    name = fields("name")
+    with pytest.raises(SummariseError, match=rf"name holds text, which {op.__name__}\(\) cannot reduce"):
+        tidy(_labelled()) >> summarise(s=op(name))
+
+
+@pytest.mark.parametrize("op", [std, var], ids=lambda op: op.__name__)
+def test_spreads_of_durations_are_refused(op):
+    when = fields("when")
+    with pytest.raises(SummariseError, match=rf"holds durations, which {op.__name__}\(\) cannot reduce"):
+        tidy(_labelled()) >> mutate(gap=when - min(when)) >> summarise(s=op(col("gap")))
+
+
+def test_the_mean_of_times_is_the_xarray_backend_s():
+    when = fields("when")
+    with pytest.raises(SummariseError, match='mean of times is taken by the xarray backend.*backend="xarray"'):
+        tidy(_labelled(), backend="numpy") >> summarise(s=mean(when))
+    assert tidy(_labelled(), backend="xarray") >> summarise(s=mean(when)) >> pull("s") == np.datetime64(
+        "2024-01-02T12:00", "ns")

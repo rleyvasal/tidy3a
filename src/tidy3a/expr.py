@@ -783,7 +783,7 @@ def _evaluate_reduce(node: Reduce, ctx: Context) -> Any:
     array = evaluate(node.arg, ctx)
     if not backend.is_array(array):
         raise error(f"{node.text()} reduces a constant; reductions need data, e.g. {node.op}(intensity)")
-    _check_reducible(node, array.dtype, error)
+    _check_reducible(node, array.dtype, error, backend.name)
     if ctx.keys:
         _check_has_group_axes(node, array, ctx)
     if node.over is not None:
@@ -811,19 +811,28 @@ def _evaluate_reduce(node: Reduce, ctx: Context) -> Any:
     return group_result(stats, groups, ctx)
 
 
-# Reductions no backend can take for a kind of value, refused with the reduction's name rather than NumPy's error.
-_TEXT_REFUSED = ("sum", "mean", "std", "var", "median")
+# Reductions a kind of value cannot take, refused with the reduction's name rather than NumPy's error. Text is not
+# true or false, as in R and dplyr, so any() and all() refuse it too (the backends gave True and 1.0).
+_TEXT_REFUSED = ("sum", "mean", "std", "var", "median", "any", "all")
 _TIME_REFUSED = ("sum", "std", "var", "median", "any", "all")
+_DURATION_REFUSED = ("std", "var")
 
 
-def _check_reducible(node: Reduce, dtype: np.dtype, error: type[TidyError]) -> None:
-    """Refuse a reduction of text or times that would fail inside NumPy, naming what the value holds."""
+def _check_reducible(node: Reduce, dtype: np.dtype, error: type[TidyError], backend: str) -> None:
+    """Refuse a reduction of text, times, or durations that would fail inside NumPy, naming what the value holds."""
+    held = node.arg.text()
     if dtype.kind in "US" and node.op in _TEXT_REFUSED:
-        raise error(f"{node.text()}: {node.arg.text()} holds text, which {node.op}() cannot reduce; "
-                    f"n() counts positions, and group_by({node.arg.text()}) groups by the text")
+        raise error(f"{node.text()}: {held} holds text, which {node.op}() cannot reduce; "
+                    f"n() counts positions, min() and max() take text, and group_by({held}) groups by it")
     if dtype.kind == "M" and node.op in _TIME_REFUSED:
-        raise error(f"{node.text()}: {node.arg.text()} holds times, which {node.op}() cannot reduce; "
-                    f"min() and max() take times, and max({node.arg.text()}) - min({node.arg.text()}) is their span")
+        raise error(f"{node.text()}: {held} holds times, which {node.op}() cannot reduce; "
+                    f"min() and max() take times, and max({held}) - min({held}) is their span")
+    if dtype.kind == "m" and node.op in _DURATION_REFUSED:
+        raise error(f"{node.text()}: {held} holds durations, which {node.op}() cannot reduce; "
+                    f"sum(), mean(), median(), min(), and max() take durations")
+    if dtype.kind == "M" and node.op == "mean" and backend == "numpy":
+        raise error(f"{node.text()}: the mean of times is taken by the xarray backend, not the NumPy backend; "
+                    f'tidy(data, backend="xarray") takes it, or min({held}) + mean({held} - min({held})) by hand')
 
 
 def group_result(stats: Any, groups: Groups, ctx: Context) -> Any:
