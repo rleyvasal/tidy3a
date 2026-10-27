@@ -204,12 +204,14 @@ class Writer:
 
 
 def _portable(dataset: Any) -> Any:
-    """*dataset* as Zarr stores it: only the encodings Zarr shares with NetCDF, and text as variable-length strings."""
+    """*dataset* as Zarr stores it: only the encodings Zarr shares with NetCDF, and text as variable-length strings,
+    index coordinates included: fixed-width text has no Zarr 3 specification, so other Zarr libraries may not read
+    it, and a later block's longer text would not fit."""
     dataset = dataset.copy(deep=False)
     text = {}
     for name, variable in dataset.variables.items():
         variable.encoding = {key: value for key, value in variable.encoding.items() if key in _PORTABLE}
-        if variable.dtype.kind in "US" and name not in dataset.indexes:
+        if variable.dtype.kind in "US":
             text[name] = variable.astype(object)
     coords = {name: variable for name, variable in text.items() if name in dataset.coords}
     return dataset.assign({name: variable for name, variable in text.items() if name not in coords}).assign_coords(

@@ -32,6 +32,9 @@ from tidy3a import (
     write,
 )
 
+# Text Zarr 3 has no specification for (fixed-width) may not be readable by other Zarr libraries; write() avoids it.
+pytestmark = pytest.mark.filterwarnings("error:.*does not have a Zarr V3 specification")
+
 NAMES = ["x", "y", "z", "intensity", "ring"]
 x, y, z, intensity, ring = fields(*NAMES)
 OPTIONS = dict(dims={"point": infer, "feature": 5}, labels={"feature": NAMES}, field_axis="feature")
