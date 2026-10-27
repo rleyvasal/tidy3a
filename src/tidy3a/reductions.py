@@ -285,7 +285,153 @@ class Total(Reduction):
         return column
 
 
+DIGIT = 16  # the bits of a value's key one pass counts
+
+
+@dataclass(frozen=True)
+class _Selection:
+    """The values the median still looks for, one or two per group (``Ask.state``): each target's group, its rank
+    among the group's values present, the key bits decided so far, and how many passes have run."""
+
+    dtype: np.dtype  # the values' type
+    width: int  # the key's bits
+    group: np.ndarray  # per target
+    rank: np.ndarray  # per target, among the values in its group whose key starts with the prefix
+    prefix: np.ndarray  # per target, the key's decided bits (uint64)
+    done: int  # passes run
+    first: np.ndarray  # per group, its first target, or -1
+    second: np.ndarray  # per group, its second target (even counts), or -1
+
+
+def _key_type(dtype: np.dtype) -> tuple[np.dtype, int]:
+    """The unsigned type a value's order-preserving key is held in, and its width in bits."""
+    width = 32 if dtype.kind in "iu" and dtype.itemsize < 4 else dtype.itemsize * 8
+    return np.dtype(f"u{max(width // 8, 2)}"), max(width, 16)
+
+
+def _keys(value: np.ndarray) -> np.ndarray:
+    """Unsigned keys in the values' order: floats with the sign bit flipped (negatives inverted), as radix sorts
+    order them; signed integers and durations with the sign bit flipped; unsigned integers as they are."""
+    unsigned, width = _key_type(value.dtype)
+    top = np.array(1, dtype=unsigned) << np.array(width - 1, dtype=unsigned)
+    if value.dtype.kind == "f":
+        bits = value.view(unsigned)
+        return np.where(bits & top, ~bits, bits | top)
+    if value.dtype.kind in "im":
+        signed = value.view(np.int64) if value.dtype.kind == "m" else value.astype(f"i{width // 8}", copy=False)
+        return signed.view(unsigned) ^ top
+    return value.astype(unsigned, copy=False)
+
+
+def _values(keys: np.ndarray, dtype: np.dtype) -> np.ndarray:
+    """The values whose keys these are (``_keys`` undone)."""
+    unsigned, width = _key_type(dtype)
+    keys = keys.astype(unsigned)
+    top = np.array(1, dtype=unsigned) << np.array(width - 1, dtype=unsigned)
+    if dtype.kind == "f":
+        return np.where(keys & top, keys ^ top, ~keys).view(dtype)
+    if dtype.kind in "im":
+        signed = (keys ^ top).view(f"i{width // 8}")
+        return signed.view(dtype) if dtype.kind == "m" else signed.astype(dtype)
+    return keys.astype(dtype)
+
+
+class Median(Reduction):
+    """``median`` on blocks, exactly: a group's values are counted by the bits of an order-preserving key, a digit of
+    16 bits a pass, and each pass finds the digit holding the rank it looks for, so float32 and 32-bit integers take
+    two passes after the first and 64-bit values four; the one or two middle values then give ``np.median``'s answer,
+    the same bits as in memory. The first pass counts each group's values present and missing; without ``na_rm`` a
+    group with a missing one is missing, as in memory. Where both zeros, -0.0 and 0.0, lie in the middle, the sign of
+    a zero result may differ from NumPy's, which does not order them."""
+
+    name = "median"
+
+    def partial(self, node, value, codes, count):
+        if value.dtype.kind not in "fium" or value.dtype.kind == "f" and value.dtype.itemsize < 2:
+            raise BlockError(f"{node.text()}: the median of {value.dtype} values is not handled on blocks; {WHOLE_AXIS}")
+        missing = np.isnat(value) if value.dtype.kind == "m" else np.isnan(value) if value.dtype.kind == "f" else (
+            np.zeros(len(value), dtype=bool))
+        present = np.bincount(codes, weights=~missing, minlength=count).astype(np.int64)
+        return f"rank:{value.dtype.str}", np.stack([present, np.bincount(codes, weights=missing,
+                                                                          minlength=count).astype(np.int64)])
+
+    def merge(self, node, kind, held, piece):
+        return held + piece
+
+    def finish(self, node, kind, held, counts, blocks):
+        dtype = np.dtype(kind.split(":", 1)[1])
+        result = np.median(np.zeros(1, dtype)).dtype
+        present, missing = held
+        column = np.full(len(present), np.array("NaT" if result.kind == "m" else np.nan).astype(result))
+        wanted = (present > 0) & ((missing == 0) | node.na_rm)
+        groups = np.flatnonzero(wanted)
+        if not len(groups):
+            return column, []
+        low, high = (present[groups] - 1) // 2, present[groups] // 2  # the middle rank, or the two middle ones
+        two = high != low
+        group = np.concatenate([groups, groups[two]])
+        rank = np.concatenate([low, high[two]]).astype(np.int64)
+        first = np.full(len(present), -1, dtype=np.int64)
+        second = np.full(len(present), -1, dtype=np.int64)
+        first[groups] = np.arange(len(groups))
+        second[groups[two]] = len(groups) + np.arange(int(two.sum()))
+        _, width = _key_type(dtype)
+        state = _Selection(dtype, width, group, rank, np.zeros(len(group), dtype=np.uint64), 0, first, second)
+        return column, [Ask(state, len(group))]
+
+    def again(self, node, ask, value, codes, groups):
+        """One block's count of each target's candidates by their next digit: as ``(target × 2**16 + digit, count)``,
+        the candidates being the group's values present whose key starts with the target's prefix."""
+        state = ask.state
+        keys = _keys(value).astype(np.uint64)
+        present = ~(np.isnat(value) if value.dtype.kind == "m" else np.isnan(value)) if value.dtype.kind in "fm" else (
+            np.ones(len(value), dtype=bool))
+        above = state.width - DIGIT * state.done  # the bits decided lie above this one
+        digits = (keys >> np.uint64(above - DIGIT)) & np.uint64(0xFFFF)
+        found = []
+        for target in (state.first[codes], state.second[codes]):
+            match = present & (target >= 0)
+            if state.done:
+                match &= (keys >> np.uint64(above)) == state.prefix[np.maximum(target, 0)]
+            found.append(target[match].astype(np.int64) * 65_536 + digits[match].astype(np.int64))
+        pairs, tally = np.unique(np.concatenate(found), return_counts=True)
+        return pairs, tally.astype(np.int64)
+
+    def join(self, node, ask, first, second):
+        pairs, inverse = np.unique(np.concatenate([first[0], second[0]]), return_inverse=True)
+        return pairs, np.bincount(inverse.reshape(-1), weights=np.concatenate([first[1], second[1]])).astype(np.int64)
+
+    def resolve(self, node, ask, total, column):
+        """Each target's digit: the one where its group's candidates, counted digit by digit, pass its rank; with every
+        digit found, the values, and the median of the one or two per group."""
+        state = ask.state
+        pairs, tally = total
+        target, digit = pairs // 65_536, (pairs % 65_536).astype(np.uint64)
+        before = np.cumsum(tally) - tally  # candidates before each (target, digit), over all targets
+        start = np.searchsorted(target, np.arange(len(state.group)))
+        below = before - before[start[target]]  # within the target
+        passed = (below + tally > state.rank[target]) & (below <= state.rank[target])
+        chosen = np.flatnonzero(passed)
+        rank = state.rank.copy()
+        prefix = state.prefix.copy()
+        rank[target[chosen]] -= below[chosen]
+        prefix[target[chosen]] = (prefix[target[chosen]] << np.uint64(DIGIT)) | digit[chosen]
+        done = state.done + 1
+        if DIGIT * done < state.width:
+            step = _Selection(state.dtype, state.width, state.group, rank, prefix, done, state.first, state.second)
+            return column, [Ask(step, ask.size)]
+        values = _values(prefix, state.dtype)
+        groups = np.flatnonzero(state.first >= 0)
+        one = values[state.first[groups]]
+        other = np.where(state.second[groups] >= 0, values[np.maximum(state.second[groups], 0)], one)
+        with np.errstate(all="ignore"):  # an odd group's (v + v) / 2 may overflow; its value is taken whole below
+            middle = np.median(np.stack([one, other], axis=1), axis=1)
+        alone = state.second[groups] < 0  # an odd count: the value itself, as np.median of one value gives it
+        column[groups] = np.where(alone, np.asarray(one).astype(middle.dtype), middle)
+        return column, []
+
+
 REGISTRY: dict[str, Reduction] = {entry.name: entry for entry in (
     Count(), Total("sum"), Total("mean"), Extreme("min"), Extreme("max"), Spread("std"), Spread("var"),
-    Flag("any"), Flag("all"),
+    Flag("any"), Flag("all"), Median(),
 )}

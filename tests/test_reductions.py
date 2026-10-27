@@ -10,13 +10,14 @@ integer means, spreads).
 import numpy as np
 import pytest
 
-from tidy3a import all, any, fields, group_by, max, mean, min, n, pull, std, sum, summarise, tidy, var
+from tidy3a import all, any, fields, group_by, max, mean, median, min, n, pull, std, sum, summarise, tidy, var
 from tidy3a.chunked import COMBINABLE
 from tidy3a.reductions import REGISTRY, Reduction
 
-FUNCTIONS = {"sum": sum, "mean": mean, "min": min, "max": max, "std": std, "var": var, "any": any, "all": all}
+FUNCTIONS = {"sum": sum, "mean": mean, "min": min, "max": max, "std": std, "var": var, "any": any, "all": all,
+             "median": median}
 EXACT = {("sum", "f"), ("mean", "f"), ("sum", "i"), ("min", "f"), ("max", "f"), ("min", "i"), ("max", "i"),
-         ("any", "f"), ("all", "f"), ("any", "i"), ("all", "i")}
+         ("any", "f"), ("all", "f"), ("any", "i"), ("all", "i"), ("median", "f"), ("median", "d"), ("median", "i")}
 
 
 def test_the_registry_is_what_blocks_can_answer():

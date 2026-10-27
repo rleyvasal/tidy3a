@@ -252,7 +252,6 @@ def test_verbs_are_checked_on_the_empty_block_and_nothing_is_read_until_a_result
     (mutate(centred=intensity - mean(intensity)) >> group_by(ring) >> summarise(points=n()), "whole axis"),
     (group_by(ring) >> mutate(centred=intensity - mean(intensity)), "after group_by, only summarise"),
     (group_by("point") >> summarise(points=n()), "keeps an axis"),
-    (group_by(ring) >> summarise(points=n(), middle=median(intensity)), "cannot be combined"),
 ])
 def test_what_a_block_cannot_answer_is_refused_when_the_verb_is_called(npy, pipeline, message):
     path, _ = npy
@@ -448,12 +447,10 @@ def test_spread_and_flags_combine(tmp_path, make, rows):
         assert same_bits(got["total"], want["total"]) and same_bits(got["average"], want["average"])
 
 
-def test_a_block_cannot_answer_median_or_over(npy):
+def test_a_block_cannot_answer_over(npy):
     path, _ = npy
     frame = read_array(path, dims={"point": infer, "feature": 5}, labels={"feature": NAMES}, field_axis="feature",
                        blocks=3_000)
-    with pytest.raises(BlockError, match="median\\(\\) cannot be combined"):
-        frame >> group_by(ring) >> summarise(middle=median(intensity))
     with pytest.raises(BlockError, match="names axes"):
         frame >> summarise(total=sum(intensity, over="point"))
 
@@ -1210,3 +1207,73 @@ def test_any_and_all_of_missing_values_on_blocks(rows, na_rm):
                 want = tidy(source) >> pipeline >> pull("s")
                 got = tidy(source, blocks={"point": rows}) >> pipeline >> pull("s")
                 assert same_bits(got, want), (values.dtype, op, got, want)
+
+
+# ── Milestone 13, step 3: the median on blocks, exactly ─────────────────────
+
+
+@pytest.mark.parametrize("dtype, passes", [("float32", 2), ("float64", 4), ("int16", 2), ("int64", 4),
+                                           ("timedelta64[ns]", 4)])
+@pytest.mark.parametrize("na_rm", [False, True])
+def test_the_median_on_blocks_is_np_median_s_and_costs_its_passes(tmp_path, dtype, passes, na_rm):
+    """The median is found by counting each group's values a 16-bit digit of their key a pass: two passes after the
+    first for 32-bit values, four for 64-bit ones; odd and even counts, ties, missing values, an empty bin, and a
+    single-value group give np.median's answer, the same bits."""
+    xr = pytest.importorskip("xarray")
+    rng = np.random.default_rng(7)
+    count = 3_001
+    if dtype.startswith("float"):
+        values = (rng.normal(size=count) * 50).astype(dtype)
+        values[rng.choice(count, 25, replace=False)] = np.nan
+        values[:300] = np.round(values[:300]) + 0.0  # ties, without -0.0 (below)
+    elif dtype.startswith("timedelta"):
+        values = rng.integers(-10**12, 10**12, count).astype(dtype)
+        values[:9] = np.timedelta64("NaT")
+    else:
+        values = rng.integers(-30_000, 30_000, count).astype(dtype)
+    group = rng.integers(0, 5, count).astype(float)
+    group[-1] = 40.5  # a group of one value
+    source = xr.Dataset({"v": ("point", values), "g": ("point", group), "other": ("point", np.zeros(count))})
+    path = tmp_path / "m.zarr"
+    v, g = fields("v", "g")
+    pipeline = group_by(bins(g, [0, 2, 2.5, 5, 50])) >> summarise(points=n(), middle=median(v, na_rm=na_rm))
+    want = tidy(source) >> pipeline
+    frame = tidy(source, blocks={"point": 250})
+    loads = []
+    load = frame._blocks.source.block
+    frame._blocks.source.block = lambda start, stop, names=None: loads.append(names) or load(start, stop, names)
+    got = frame >> pipeline
+    assert same_bits(got >> pull("middle"), want >> pull("middle"))
+    assert len(loads) == 13 * (1 + passes)  # the first pass, then one a digit
+    assert all(names == frozenset({"v", "g"}) for names in loads)  # only what the median reads, every pass
+    assert not path.exists()
+
+
+def test_medians_of_two_frames_share_their_passes():
+    xr = pytest.importorskip("xarray")
+    rng = np.random.default_rng(3)
+    source = xr.Dataset({"a": ("point", rng.normal(size=2_000).astype("float32")),
+                         "b": ("point", rng.normal(size=2_000).astype("float32")),
+                         "g": ("point", rng.integers(0, 4, 2_000))})
+    a, b, g = fields("a", "b", "g")
+    frame = tidy(source, blocks={"point": 500})
+    loads = []
+    load = frame._blocks.source.block
+    frame._blocks.source.block = lambda start, stop, names=None: loads.append(1) or load(start, stop, names)
+    first = frame >> group_by(g) >> summarise(m=median(a))
+    second = frame >> group_by(g) >> summarise(m=median(b))
+    got_first, got_second = scan(first, second)
+    assert len(loads) == 4 * (1 + 2)  # both medians' two passes in the same rounds
+    assert same_bits(got_first >> pull("m"), tidy(source) >> group_by(g) >> summarise(m=median(a)) >> pull("m"))
+    assert same_bits(got_second >> pull("m"), tidy(source) >> group_by(g) >> summarise(m=median(b)) >> pull("m"))
+
+
+def test_a_median_of_zeros_of_both_signs_is_zero():
+    """-0.0 and 0.0 are equal and NumPy does not order them, so which one its partition leaves at the middle depends
+    on the data's order; the block median orders -0.0 first. The value is the same; its sign may differ."""
+    xr = pytest.importorskip("xarray")
+    v = fields("v")
+    source = xr.Dataset({"v": ("point", np.array([0.0, -0.0, -0.0, 0.0, 1.0, -1.0], dtype="float32"))})
+    got = tidy(source, blocks={"point": 2}) >> summarise(middle=median(v)) >> pull("middle")
+    want = tidy(source) >> summarise(middle=median(v)) >> pull("middle")
+    assert got == want == 0.0 and got.dtype == want.dtype
