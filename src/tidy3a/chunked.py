@@ -677,8 +677,8 @@ class _Table:
             if kind == "estimate":
                 held[:sums.TERMS, at] += piece[:sums.TERMS]
                 held[sums.TERMS, at] = np.maximum(held[sums.TERMS, at], piece[sums.TERMS])
-            elif kind in ("extreme", "flag"):
-                held[at] = _merged(self.plan.reductions[hidden], held[at], piece)
+            elif kind in ("extreme", "flag", "flagged"):
+                held[..., at] = _merged(self.plan.reductions[hidden], held[..., at], piece)
             elif kind == "moments":
                 held[:, at] = _combine_moments(held[:, at], piece)
             else:
@@ -728,6 +728,10 @@ class _Table:
                 columns[hidden] = _settled_extreme(held, self.counts)
             elif kind == "flag":
                 columns[hidden] = held
+            elif kind == "flagged":  # missing where a group had a missing value, as in memory, unless na_rm
+                answer, marks = held
+                missing = marks if node.op == "any" else ~marks
+                columns[hidden] = answer if node.na_rm else np.where(missing, np.nan, answer.astype(np.float64))
             elif kind == "moments":
                 present, _, squares, missing = held
                 with np.errstate(invalid="ignore", divide="ignore"):
@@ -1161,7 +1165,7 @@ def _pieces(node: Reduce, value: np.ndarray, codes: np.ndarray, count: int) -> t
         order = np.argsort(codes, kind="stable")
         starts = np.concatenate([[0], np.cumsum(np.bincount(codes, minlength=count))[:-1]])
         if node.op in ("any", "all"):
-            return "flag", _extreme(node).reduceat(value[order].astype(bool), starts)
+            return _flags(node, value, codes, count, order, starts)
         if value.dtype.kind in "US":  # text compares as Python objects, as the backends compare it
             value = value.astype(object)
         return "extreme", _extreme(node).reduceat(value[order], starts)
@@ -1182,6 +1186,21 @@ def _pieces(node: Reduce, value: np.ndarray, codes: np.ndarray, count: int) -> t
         starts = np.concatenate([[0], np.cumsum(np.bincount(codes, minlength=count))[:-1]])
         return "int", np.stack([np.add.reduceat(value[order].astype(np.int64), starts), counted.astype(np.int64)])
     raise BlockError(f"{node.text()}: {node.op} of {value.dtype} values is not handled on blocks; {WHOLE_AXIS}")
+
+
+def _flags(node: Reduce, value: np.ndarray, codes: np.ndarray, count: int, order: np.ndarray,
+           starts: np.ndarray) -> tuple[str, np.ndarray]:
+    """``any`` or ``all`` per group, a missing value counted as in memory: left out (False for any, True for all), and,
+    for values that can be missing, whether the group had one, merged by the same or and and as the answer: for
+    ``all`` the row says the group had none, so one fill (False for any, True for all) serves both rows."""
+    flags = value.astype(bool)
+    if value.dtype.kind not in "fcmM":
+        return "flag", _extreme(node).reduceat(flags[order], starts)
+    missing = np.isnat(value) if value.dtype.kind in "mM" else np.isnan(value)
+    flags[missing] = node.op == "all"
+    answer = _extreme(node).reduceat(flags[order], starts)
+    marks = missing if node.op == "any" else ~missing
+    return "flagged", np.stack([answer, _extreme(node).reduceat(marks[order], starts)])
 
 
 def _extreme(node: Reduce) -> Any:
@@ -1221,7 +1240,7 @@ _UNSEEN = object()  # an object accumulator's slot for a group no block has had 
 
 def _fill(kind: str, dtype: np.dtype, node: Reduce) -> Any:
     """The value a group not yet seen holds in an accumulator."""
-    if kind == "flag":
+    if kind in ("flag", "flagged"):
         return node.op == "all"
     if kind != "extreme":
         return 0

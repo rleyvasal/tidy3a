@@ -1190,3 +1190,23 @@ def test_the_backend_is_chosen_once_for_the_whole_data():
     assert (out >> pull("total")) == 45.0
     assert frame._backend is tidy(source)._backend is out._run()._backend
     assert frame._blocks.source.block(0, 4, frozenset({"b"}))._backend is frame._backend
+
+
+@pytest.mark.parametrize("rows", [1, 2, 4])
+@pytest.mark.parametrize("na_rm", [False, True])
+def test_any_and_all_of_missing_values_on_blocks(rows, na_rm):
+    """A missing value is left out as in memory (False for any, True for all), where NaN cast to bool was True; and
+    without na_rm a group that had one is missing, float64 as in memory, where blocks gave bool."""
+    xr = pytest.importorskip("xarray")
+    v, g = fields("v", "g")
+    floats = np.array([0.0, np.nan, 1.0, 0.0, 0.0, 2.0])
+    durations = np.array([0, 1, 0, 0, 0, 2], dtype="timedelta64[ns]")
+    durations[1] = np.timedelta64("NaT", "ns")
+    for values in (floats, durations):
+        source = xr.Dataset({"v": ("point", values), "g": ("point", [1.0, 1, 2, 2, 5, 5])})
+        for op in (any, all):
+            for pipeline in (group_by(g) >> summarise(s=op(v, na_rm=na_rm)),
+                             group_by(bins(g, [0, 1.5, 3, 4, 6])) >> summarise(s=op(v, na_rm=na_rm))):
+                want = tidy(source) >> pipeline >> pull("s")
+                got = tidy(source, blocks={"point": rows}) >> pipeline >> pull("s")
+                assert same_bits(got, want), (values.dtype, op, got, want)
