@@ -227,8 +227,8 @@ import os
 import tempfile
 
 import numpy as np
-from tidy3a import (cells, fields, filter, formula, group_by, infer, mean, mutate, n, pull, read_array, scan, select,
-                    summarise, write)
+from tidy3a import (cells, fields, filter, formula, group_by, infer, mean, median, mutate, n, pull, read_array, scan,
+                    select, summarise, write)
 
 rng = np.random.default_rng(0)
 points = (rng.normal(size=(100_000, 5)) * 30).astype("float32")
@@ -241,7 +241,8 @@ cloud = read_array(path, dims={"point": infer, "feature": 5},
                    labels={"feature": ["x", "y", "z", "intensity", "ring"]}, field_axis="feature",
                    blocks=20_000, threads=2)
 near = cloud >> mutate(distance = formula(r"\sqrt{x^2 + y^2 + z^2}")) >> filter(distance <= 60)
-per_ring = near >> group_by(ring) >> summarise(points = n(), brightness = mean(intensity))
+per_ring = near >> group_by(ring) >> summarise(points = n(), brightness = mean(intensity),
+                                               middle = median(distance))  # exact: two more passes
 voxels = near >> group_by(cells(x, 30), cells(y, 30), axis="voxel") >> summarise(points = n())
 sample = per_ring.preview()  # blocks 1, 3, and 5 of 5, in memory; nothing else is read
 per_ring, voxels = scan(per_ring, voxels)  # one pass over the file for both
@@ -281,17 +282,21 @@ in the same pass.
 A summarised pipeline is `select`, `filter`, and `mutate` of row-wise
 expressions, `group_by` of value keys (fields, `cells`, `bins`, `rounded`,
 several at once, with or without `dropna`), then `summarise` of `n`,
-`sum`, `mean`, `min`, `max`, `std`, `var`, `any`, `all`, or expressions
-of them (`mean(x) / n()`). Each key's groups merge across blocks in the
+`sum`, `mean`, `min`, `max`, `median`, `quantile`, `std`, `var`, `any`,
+`all`, or expressions of them (`mean(x) / n()`). Each key's groups merge across blocks in the
 order `group_by` gives them, and float32 sums and means are the same bits
 as in memory whatever the block size; float64 sums and means, integer
 means, and `std` and `var` add per block in float64 and are close, not
-identical; integer sums add in int64, wrapping as `np.sum` does. A
-pipeline without `summarise` joins the blocks' rows in memory,
+identical; integer sums add in int64, wrapping as `np.sum` does. The
+median and quantiles are exact, the same bits as in memory: each group's
+values are counted by the bits of an order-preserving key, 16 bits a pass,
+until the rank is found, so float32 takes two passes after the first and
+float64 four, which a `scan` shares and which read only the variables
+used. A pipeline without `summarise` joins the blocks' rows in memory,
 for data that fits once filtered; a verb that needs the whole axis
 (`slice`, joins) then runs on the joined rows. What a block cannot answer
 (a reduction inside `mutate` or `filter`, a grouped `mutate`, an axis key,
-`median`, `over=`) is refused when the verb is called, naming `lazy=True`,
+`over=`) is refused when the verb is called, naming `lazy=True`,
 which memory-maps the file, as the whole-axis alternative. Measured on all
 122.6M points of nuScenes Mini's lidar sweeps (2.45 GB) through a distance
 filter and 1 m voxels (`cells(x, 1), cells(y, 1), cells(z, 1)`, 84,475 of
@@ -301,6 +306,43 @@ same file written twelve times (29.4 GB, on a 24 GB machine, from a USB
 drive reading at 36 MB/s) ran at the drive's speed with a peak of 1.85 GB
 and the same voxels and mean bits; the plan has the measurements
 (decision 10, stage (b)).
+
+A reduction of your own (experimental): `register_reduction` takes its
+NumPy function for data in memory and, for blocks, how one block's pieces
+are made, merged, and finished. The function is also given no values, for
+an empty group and for the block of no positions a frame read in blocks is
+checked on, so it must answer then:
+
+```python
+import numpy as np
+from tidy3a import fields, infer, pull, read_array, register_reduction, summarise
+
+
+def eager(values, axes, na_rm):  # max - min over the axes; NaN for no values
+    if any(values.shape[axis] == 0 for axis in axes):
+        return np.full([size for axis, size in enumerate(values.shape) if axis not in axes], np.nan)
+    return values.max(axis=axes) - values.min(axis=axes)
+
+
+def partial(values, codes, groups, na_rm):  # one block: each group's lowest and highest value
+    low, high = np.full(groups, np.inf), np.full(groups, -np.inf)
+    np.minimum.at(low, codes, values)
+    np.maximum.at(high, codes, values)
+    return np.stack([low, high])
+
+
+spread = register_reduction(
+    "spread", eager, partial=partial,
+    merge=lambda held, piece: np.stack([np.minimum(held[0], piece[0]), np.maximum(held[1], piece[1])]),
+    finish=lambda held, counts: held[1] - held[0], fill=np.array([[np.inf], [-np.inf]]))
+v = fields("v")
+values = np.array([[3.0], [9.0], [4.0], [1.0]])
+options = dict(dims={"point": infer, "feature": 1}, labels={"feature": ["v"]}, field_axis="feature")
+in_memory = read_array(values, **options) >> summarise(s=spread(v))
+in_blocks = read_array(values, blocks=2, **options) >> summarise(s=spread(v))
+print(in_memory >> pull("s"))  # 8.0
+print(in_blocks >> pull("s"))  # 8.0
+```
 
 ## Tables: Polars and tidy3
 
@@ -365,7 +407,7 @@ first (`nir * 1.0 - red`) when a result can be negative.
 | Reading | `read_array` (raw files, `.npy`, NumPy arrays, `lazy=True` to memory-map, `blocks=` to run the verbs block by block), `read_binary` (fixed-width mixed records), `fixed_text`, `infer`, `tidy()` (xarray objects, or Polars and tidy3 tables with `axis=`) |
 | Verbs | `select`, `filter`, `slice`, `slice_head`, `slice_tail`, `mutate`, `group_by`, `ungroup`, `summarise`, `left_join`, `inner_join`, `full_join`, `bind_cols`, `pull` |
 | Grouping keys | a field or an axis name, `bins`, `rounded`, `cells` |
-| Reductions | `mean`, `sum`, `min`, `max`, `median`, `std`, `var`, `any`, `all`, `n`, with `over=` and `na_rm=` |
+| Reductions | `mean`, `sum`, `min`, `max`, `median`, `quantile`, `std`, `var`, `any`, `all`, `n`, with `over=` and `na_rm=`; `register_reduction` adds one of your own (experimental) |
 | Expressions | `fields`, `col`, `variable`, `label`, `env`, `if_else`, `[x, y, z]` vectors, `assign`, `formula` (plain maths or a strict LaTeX dialect) |
 | Arrays | `dot`, `pack`, `rename_axes`, `conj`, `real`, `imag`, `angle`, `sqrt`, `exp`, `log`, trigonometric functions, … |
 | Selecting fields | `where`, `starts_with`, `ends_with`, `contains`, `matches`, `everything`, `is_numeric`, … |

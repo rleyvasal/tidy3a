@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+- `quantile(x, q)`, in memory and on blocks: NumPy's quantile with its
+  default (linear) rule, `np.nanquantile` with `na_rm`, in NumPy's type
+  (float32 stays float32 on both backends, where xarray's own gives
+  float64; integers give float64; durations stay durations); text, times,
+  and booleans are refused by name. Requires labelarray 0.1.5.
+- The median and quantiles on blocks, exactly: a group's values are
+  counted by the bits of an order-preserving key, 16 bits a pass, until
+  the rank (or the two around it) is found, so float32 and 32-bit
+  integers take two passes after the first and 64-bit values and durations
+  four; `np.median` or `np.quantile` of the one or two values found gives
+  each group's answer, the same bits as in memory. A `scan` shares the
+  passes, and each reads only the variables used. Where both zeros lie in
+  a median's middle, the zero's sign may differ from NumPy's, which does
+  not order them.
+- `register_reduction(name, eager, *, partial=, merge=, finish=, fill=)`
+  (experimental) adds a reduction: its own NumPy function in memory on
+  either backend, and, with block steps, on blocks; without them, data
+  read in blocks refuses it when `summarise` is called. The function is
+  given no values for an empty group and for the block of no positions a
+  frame read in blocks is checked on, so it must answer then.
+- Inside: each reduction a block can answer is one entry of
+  `tidy3a.reductions`, with its partial, merge, and finish, keyed by name;
+  the block driver runs the passes reductions ask for after the first,
+  shared by the frames of a scan (plan milestone 13).
+
 ## 0.7.0 — 2026-10-27
 
 - On blocks, `any()` and `all()` of floats and durations count a missing

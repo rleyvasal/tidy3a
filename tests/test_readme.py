@@ -30,8 +30,21 @@ def test_the_readme_has_its_examples():
     assert len(BLOCKS) >= 4, "the README's Python examples were not found"
 
 
+@pytest.fixture
+def registry_kept():
+    """An example may register a reduction, which is global: the registries are restored after it, in place, since
+    the block driver holds the registry itself."""
+    import tidy3a.reductions as reductions
+
+    saved = [(registry, dict(registry)) for registry in (reductions.REGISTRY, reductions.EAGER)]
+    yield
+    for registry, contents in saved:
+        registry.clear()
+        registry.update(contents)
+
+
 @pytest.mark.parametrize("number", range(len(BLOCKS)))
-def test_each_readme_example_runs_and_prints_what_it_says(number, monkeypatch):
+def test_each_readme_example_runs_and_prints_what_it_says(number, monkeypatch, registry_kept):
     monkeypatch.setattr(backend_module, "_default", None)  # no set_backend(), as for a new reader
     code = BLOCKS[number]
     needs = set(re.findall(r"^(?:import|from) (\w+)", code, re.MULTILINE))
