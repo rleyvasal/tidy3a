@@ -59,3 +59,56 @@ def test_each_registered_reduction_on_blocks_gives_the_in_memory_result(name, dt
     else:
         tolerance = 1e-6 if a.dtype == np.float32 else 1e-12  # a float32 result is one rounding away at most
         assert np.allclose(a, b, rtol=tolerance, atol=0, equal_nan=True), (a, b)
+
+
+# ── Passes after the first (step 2) ─────────────────────────────────────────
+
+
+def test_passes_are_shared_by_frames_run_in_rounds_and_ask_again(monkeypatch, tmp_path):
+    """A max that asks for two more passes: the first counts each group's values equal to its max, and its resolve
+    asks for a second that counts them again. Two frames' asks share each round, a round reads every block once,
+    a resolve's further ask runs in the next round, and the budget packs rounds; the max is unchanged."""
+    from labelarray import sums as labelarray_sums
+
+    import tidy3a.reductions as reductions
+    from tidy3a import infer, read_array, scan
+    from tidy3a.reductions import Ask, Extreme
+
+    log = []
+
+    class Asking(Extreme):
+        def finish(self, node, kind, held, counts, blocks):
+            column, asks = super().finish(node, kind, held, counts, blocks)
+            return column, [Ask(("count", column.copy()), len(column))]
+
+        def again(self, node, ask, value, codes, groups):
+            return np.bincount(codes, weights=value == ask.state[1][codes], minlength=groups)
+
+        def resolve(self, node, ask, total, column):
+            log.append((ask.state[0], total.tolist()))
+            return column, ([Ask(("again", column.copy()), len(column))] if ask.state[0] == "count" else [])
+
+    rng = np.random.default_rng(1)
+    values = rng.normal(size=(1_000, 2)).astype("float32")
+    values[:, 1] = rng.integers(0, 4, 1_000)
+    path = tmp_path / "v.npy"
+    np.save(path, values)
+    v, g = fields("v", "g")
+    options = dict(dims={"point": infer, "feature": 2}, labels={"feature": ["v", "g"]}, field_axis="feature")
+    want = read_array(values, **options) >> group_by(g) >> summarise(top=max(v), low=max(-v))
+    monkeypatch.setitem(reductions.REGISTRY, "max", Asking("max"))
+    for budget, rounds in ((1_000, 2), (4, 4)):  # both frames' asks in one round, or one ask a round
+        monkeypatch.setattr(labelarray_sums, "EXACT_PAIRS", budget)
+        log.clear()
+        frame = read_array(path, blocks=250, **options)
+        source, opened = frame._blocks.source, []
+        reopen = source.reopen
+        source.reopen = lambda: opened.append(1) or reopen()
+        top = frame >> group_by(g) >> summarise(top=max(v))
+        low = frame >> group_by(g) >> summarise(low=max(-v))
+        got_top, got_low = scan(top, low)
+        assert len(opened) == 4 * (1 + rounds)  # the first pass, then each round reads the 4 blocks once
+        assert [stage for stage, _ in log] == ["count", "count", "again", "again"]
+        assert all(min(total) >= 1 for _, total in log)  # every group's max is among its values
+        assert np.array_equal(got_top >> pull("top"), want >> pull("top"))
+        assert np.array_equal(got_low >> pull("low"), want >> pull("low"))

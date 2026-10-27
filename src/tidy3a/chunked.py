@@ -65,7 +65,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
-from labelarray import sums
 from labelarray.errors import LabelArrayError
 from labelarray.transforms import Bins, Duration, GridCells
 
@@ -91,7 +90,7 @@ from tidy3a.expr import (
 )
 from tidy3a.frame import TidyArray
 from tidy3a.plan import Record, Snapshot, Step, _variable, snapshot
-from tidy3a.reductions import REGISTRY, WHOLE_AXIS
+from tidy3a.reductions import REGISTRY, WHOLE_AXIS, pass_budget
 
 ROW_WISE = ("select", "filter", "mutate")
 COMBINABLE = tuple(REGISTRY)  # the reductions a block can answer (``tidy3a.reductions``)
@@ -701,30 +700,27 @@ class _Table:
             self.pieces[hidden] = (kind, _spread(held, where, len(full), REGISTRY[node.op].fill(node, kind, held.dtype)))
         self.keys = full
 
-    def settle(self) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
-        """Each reduction's values per combination from the pieces, and the combinations a reduction cannot settle
-        from them (a float32 sum the error bound does not settle), whose exact values a second pass finds."""
+    def settle(self) -> tuple[dict[str, np.ndarray], dict[str, list[Any]]]:
+        """Each reduction's values per combination from the pieces, and the passes each asks for where the pieces do
+        not settle every combination (a float32 sum the error bound does not settle), which ``_passes`` runs."""
         assert self.keys is not None
         columns: dict[str, np.ndarray] = {}
-        unsure: dict[str, np.ndarray] = {}
+        asks: dict[str, list[Any]] = {}
         for hidden, node in self.plan.reductions.items():
             entry = REGISTRY[node.op]
             if entry.counted:
                 columns[hidden] = self.counts
                 continue
             kind, held = self.pieces[hidden]
-            columns[hidden], undecided = entry.finish(node, kind, held, self.counts, self.blocks)
-            if undecided is not None:
-                unsure[hidden] = undecided
-        return columns, unsure
+            columns[hidden], asked = entry.finish(node, kind, held, self.counts, self.blocks)
+            if asked:
+                asks[hidden] = asked
+        return columns, asks
 
-    def finish(self, columns: dict[str, np.ndarray],
-               exact: dict[str, list[tuple[np.ndarray, np.ndarray]]]) -> dict[str, np.ndarray]:
-        """*columns* with the values the second pass found in their places, each closed by its reduction (a float32
-        sum's ``min_count``, as ``from_chunks`` applies it in memory)."""
+    def finish(self, columns: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        """*columns*, every pass done, each closed by its reduction (a float32 sum's ``min_count``, as ``from_chunks``
+        applies it in memory)."""
         for hidden, node in self.plan.reductions.items():
-            for chosen, found in exact.get(hidden, ()):
-                columns[hidden][chosen] = found
             if not REGISTRY[node.op].counted:
                 kind, held = self.pieces[hidden]
                 columns[hidden] = REGISTRY[node.op].close(node, kind, held, columns[hidden])
@@ -808,8 +804,6 @@ class _Leaf:
     frame: ChunkedFrame
     table: _Table | None  # a summarised frame's merging table; else the frame joins its rows
     parts: list[Any]  # a joining frame's rows per block, as the backend holds them
-    exact: dict[str, list[tuple[np.ndarray, np.ndarray]]]  # per float32 sum: the combinations a second pass settled
-    # (their places in the table, their correctly rounded results)
     writer: Any = None  # a writing frame's file (``tidy3a.write.Writer``): its blocks go there, not into parts
 
 
@@ -906,8 +900,8 @@ def _scan(frames: Sequence[ChunkedFrame], writers: Sequence[tuple[ChunkedFrame, 
 def _scan_once(frames: Sequence[ChunkedFrame], writers: Sequence[tuple[ChunkedFrame, Any]]) -> None:
     every = [*frames, *(frame for frame, _ in writers)]
     blocks = every[0]._blocks
-    leaves = [_Leaf(frame, _Table(frame._plan) if frame._summarised else None, [], {}) for frame in frames]
-    leaves += [_Leaf(frame, None, [], {}, writer) for frame, writer in writers]
+    leaves = [_Leaf(frame, _Table(frame._plan) if frame._summarised else None, []) for frame in frames]
+    leaves += [_Leaf(frame, None, [], writer) for frame, writer in writers]
     root = _trie(leaves)
     needs = [_needs(frame) for frame in every]
     names = None if any(need is None for need in needs) else frozenset().union(*needs)
@@ -934,12 +928,12 @@ def _scan_once(frames: Sequence[ChunkedFrame], writers: Sequence[tuple[ChunkedFr
                     leaf.parts.append(part)
                 else:
                     leaf.table.merge(*part)
-        settled: dict[int, tuple[dict[str, np.ndarray], dict[str, np.ndarray]]] = {}
+        settled: dict[int, tuple[dict[str, np.ndarray], dict[str, list[Any]]]] = {}
         for leaf in leaves:
             if leaf.table is not None and leaf.table.keys is not None:
                 leaf.table.complete()
                 settled[id(leaf)] = leaf.table.settle()
-        _exact_pass(leaves, blocks, pool, {key: unsure for key, (_, unsure) in settled.items()}, names)
+        _passes(leaves, blocks, pool, settled, names)
     for leaf in leaves:
         frame, table = leaf.frame, leaf.table
         if leaf.writer is not None:
@@ -949,33 +943,32 @@ def _scan_once(frames: Sequence[ChunkedFrame], writers: Sequence[tuple[ChunkedFr
         elif table.keys is None:  # no block kept a row, the first included, so its summary is the answer
             frame._result = frame._evolve()
         else:
-            frame._result = _result(frame, table.plan, table, table.finish(settled[id(leaf)][0], leaf.exact))
+            frame._result = _result(frame, table.plan, table, table.finish(settled[id(leaf)][0]))
 
 
-def _exact_pass(leaves: Sequence[_Leaf], blocks: Blocks, pool: ThreadPoolExecutor,
-                unsure: Mapping[int, dict[str, np.ndarray]], names: frozenset | None = None) -> None:
-    """The second pass, shared by the leaves: each block's exact sums for every combination the first pass could not
-    settle, over every leaf's float32 sums at once (``labelarray.sums.chunk_exact``), added across the blocks. At most
-    ``EXACT_PAIRS`` combinations' buckets are in flight per block, so a larger set takes several passes."""
-    asked = [(leaf, hidden, rows[start:start + sums.EXACT_PAIRS])
-             for leaf in leaves for hidden, rows in unsure.get(id(leaf), {}).items()
-             for start in range(0, len(rows), sums.EXACT_PAIRS)]
-    passes: list[list[tuple[_Leaf, str, np.ndarray]]] = []
-    held = sums.EXACT_PAIRS
-    for request in asked:  # whole requests, in order, until a pass is full
-        if held + len(request[2]) > sums.EXACT_PAIRS:
-            passes.append([])
-            held = 0
-        passes[-1].append(request)
-        held += len(request[2])
-    for requests in passes:
-        wanted: dict[int, list[tuple[int, str, np.ndarray]]] = {}
-        for index, (leaf, hidden, chosen) in enumerate(requests):
-            wanted.setdefault(id(leaf), []).append((index, hidden, chosen))
-        root = _trie(list({id(leaf): leaf for leaf, _, _ in requests}.values()))
+def _passes(leaves: Sequence[_Leaf], blocks: Blocks, pool: ThreadPoolExecutor,
+            settled: Mapping[int, tuple[dict[str, np.ndarray], dict[str, list[Any]]]],
+            names: frozenset | None = None) -> None:
+    """The passes reductions ask for after the first (``tidy3a.reductions.Ask``), shared by every frame of the scan:
+    the asks are packed, whole and in order, into rounds whose answers hold at most ``pass_budget()`` values per
+    block; each round reads the blocks once, every block answers every ask in it (``again``), the answers join across
+    the blocks in any order (``join``), and each reduction resolves its ask into its column, perhaps asking again
+    (``resolve``), until no ask is left."""
+    pending = [(leaf, hidden, ask) for leaf in leaves if id(leaf) in settled
+               for hidden, asks in settled[id(leaf)][1].items() for ask in asks]
+    budget = pass_budget()
+    while pending:
+        round_, held = [], 0
+        while pending and (not round_ or held + pending[0][2].size <= budget):
+            round_.append(pending.pop(0))
+            held += round_[-1][2].size
+        wanted: dict[int, list[tuple[int, str, Any]]] = {}
+        for index, (leaf, hidden, ask) in enumerate(round_):
+            wanted.setdefault(id(leaf), []).append((index, hidden, ask))
+        root = _trie(list({id(leaf): leaf for leaf, _, _ in round_}.values()))
 
-        def block(span: tuple[int, int]) -> list[tuple[int, np.ndarray]]:
-            buckets: list[tuple[int, np.ndarray]] = []
+        def block(span: tuple[int, int]) -> list[tuple[int, Any]]:
+            answers: list[tuple[int, Any]] = []
 
             def visit(leaf: _Leaf, frame: TidyArray) -> None:
                 assert leaf.table is not None and leaf.table.keys is not None
@@ -983,26 +976,28 @@ def _exact_pass(leaves: Sequence[_Leaf], blocks: Blocks, pool: ThreadPoolExecuto
                 if rows.kept == 0:
                     return
                 codes = _table_codes(leaf.table, rows)
-                for index, hidden, chosen in wanted[id(leaf)]:
+                for index, hidden, ask in wanted[id(leaf)]:
                     value, each = rows.values[hidden]
                     node = leaf.table.plan.reductions[hidden]
-                    buckets.append((index, REGISTRY[node.op].exact(node, value,
-                                                                   codes if each == 1 else np.repeat(codes, each),
-                                                                   chosen, len(leaf.table.keys))))
+                    answers.append((index, REGISTRY[node.op].again(node, ask, value, codes if each == 1 else
+                                                                   np.repeat(codes, each), len(leaf.table.keys))))
 
             with _naming(blocks, span):
                 _walk(root, blocks.load(*span, names), visit)
-            return buckets
+            return answers
 
-        totals: dict[int, np.ndarray] = {}
-        for buckets in _in_order(pool, block, blocks.spans):  # the buckets add in any order
-            for index, part in buckets:
-                totals[index] = part if index not in totals else totals[index] + part
-        for index, (leaf, hidden, chosen) in enumerate(requests):  # finished now, so the buckets go with the pass
-            if index in totals:
+        totals: dict[int, Any] = {}
+        for answers in _in_order(pool, block, blocks.spans):
+            for index, answer in answers:
+                leaf, hidden, ask = round_[index]
                 node = leaf.table.plan.reductions[hidden]  # type: ignore[union-attr]
-                leaf.exact.setdefault(hidden, []).append((chosen, REGISTRY[node.op].exact_finish(node,
-                                                                                                totals[index])))
+                totals[index] = answer if index not in totals else REGISTRY[node.op].join(node, ask, totals[index],
+                                                                                          answer)
+        for index, (leaf, hidden, ask) in enumerate(round_):  # resolved now, so a round's answers go with it
+            columns = settled[id(leaf)][0]
+            node = leaf.table.plan.reductions[hidden]  # type: ignore[union-attr]
+            columns[hidden], more = REGISTRY[node.op].resolve(node, ask, totals.get(index), columns[hidden])
+            pending.extend((leaf, hidden, again) for again in more)
         del totals
 
 

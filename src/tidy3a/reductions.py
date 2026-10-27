@@ -13,10 +13,11 @@ reduction's own business, so each is one entry in ``REGISTRY``:
   order;
 - ``fill(node, kind, dtype)``: a group's pieces before any block has had it;
 - ``finish(node, kind, held, counts, blocks)``: each group's answer, and
-  the groups it cannot settle from the pieces (or None);
-- for a reduction with a second pass, ``exact`` (one block's part of it for
-  the groups chosen) and ``exact_finish``, and ``close``, applied once the
-  second pass has filled its groups in.
+  the passes it asks for, if the pieces do not settle every group;
+- for a reduction that asks for passes (``Ask``): ``again`` (one block's
+  answer to an ask), ``join`` (two blocks' answers as one, in any order),
+  and ``resolve`` (the answer over every block, into the column, with any
+  further asks); and ``close``, once every pass is done.
 
 ``n()`` is the table's own count of positions per group; its entry has no
 pieces. The executor looks reductions up by name and knows none of them.
@@ -24,6 +25,7 @@ pieces. The executor looks reductions up by name and knows none of them.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -33,6 +35,21 @@ from tidy3a.errors import BlockError
 
 WHOLE_AXIS = "read the data with lazy=True, which memory-maps a file, or load it, to run this on every position"
 _UNSEEN = object()  # an object accumulator's slot for a group no block has had yet
+
+
+@dataclass(frozen=True)
+class Ask:
+    """A reduction's request for one more pass over the blocks: what it wants of each block (``state``, its own), and
+    how many values one block's answer holds (``size``), which the driver packs passes by."""
+
+    state: Any
+    size: int
+
+
+def pass_budget() -> int:
+    """How many values the answers to one pass's asks may hold per block, together: ``labelarray.sums.EXACT_PAIRS``,
+    the float32 exact pass's batch, read when a scan runs."""
+    return sums.EXACT_PAIRS
 
 
 class Reduction:
@@ -51,14 +68,17 @@ class Reduction:
         return 0
 
     def finish(self, node: Any, kind: str, held: np.ndarray, counts: np.ndarray,
-               blocks: int) -> tuple[np.ndarray, np.ndarray | None]:
+               blocks: int) -> tuple[np.ndarray, list[Ask]]:
         raise NotImplementedError
 
-    def exact(self, node: Any, value: np.ndarray, codes: np.ndarray, chosen: np.ndarray, groups: int) -> np.ndarray:
-        raise NotImplementedError(f"{self.name} has no second pass")
+    def again(self, node: Any, ask: Ask, value: np.ndarray, codes: np.ndarray, groups: int) -> Any:
+        raise NotImplementedError(f"{self.name} asks for no pass")
 
-    def exact_finish(self, node: Any, buckets: np.ndarray) -> np.ndarray:
-        raise NotImplementedError(f"{self.name} has no second pass")
+    def join(self, node: Any, ask: Ask, first: Any, second: Any) -> Any:
+        return first + second
+
+    def resolve(self, node: Any, ask: Ask, total: Any, column: np.ndarray) -> tuple[np.ndarray, list[Ask]]:
+        raise NotImplementedError(f"{self.name} asks for no pass")
 
     def close(self, node: Any, kind: str, held: np.ndarray, column: np.ndarray) -> np.ndarray:
         return column
@@ -114,14 +134,14 @@ class Extreme(Reduction):
         empty = counts == 0
         if held.dtype.kind == "O":
             unseen = np.frompyfunc(lambda item: item is _UNSEEN, 1, 1)(held).astype(bool)
-            return np.where(empty | unseen, np.nan, held), None
+            return np.where(empty | unseen, np.nan, held), []
         if not empty.any():
-            return held, None
+            return held, []
         if held.dtype.kind in "fc":
-            return np.where(empty, np.nan, held).astype(held.dtype), None
+            return np.where(empty, np.nan, held).astype(held.dtype), []
         if held.dtype.kind in "mM":
-            return np.where(empty, np.array("NaT", dtype=held.dtype), held), None
-        return np.where(empty, np.nan, held.astype(np.float64)), None
+            return np.where(empty, np.array("NaT", dtype=held.dtype), held), []
+        return np.where(empty, np.nan, held.astype(np.float64)), []
 
 
 class Flag(Reduction):
@@ -155,10 +175,10 @@ class Flag(Reduction):
 
     def finish(self, node, kind, held, counts, blocks):
         if kind == "flag":
-            return held, None
+            return held, []
         answer, marks = held  # missing where a group had a missing value, as in memory, unless na_rm
         missing = marks if self.name == "any" else ~marks
-        return (answer if node.na_rm else np.where(missing, np.nan, answer.astype(np.float64))), None
+        return (answer if node.na_rm else np.where(missing, np.nan, answer.astype(np.float64))), []
 
 
 class Spread(Reduction):
@@ -192,7 +212,7 @@ class Spread(Reduction):
             variance = np.where(present > 0, squares / present, np.nan)  # the population variance, as np.var
         if not node.na_rm:
             variance = np.where(missing > 0, np.nan, variance)
-        return (np.sqrt(variance) if self.name == "std" else variance), None
+        return (np.sqrt(variance) if self.name == "std" else variance), []
 
 
 class Total(Reduction):
@@ -229,16 +249,18 @@ class Total(Reduction):
         return held + piece
 
     def finish(self, node, kind, held, counts, blocks):
-        if kind == "estimate":
+        if kind == "estimate":  # the groups the error bound cannot settle ask for their exact sums, a batch a pass
             result, undecided = sums.settle(np.asarray(held, dtype=np.float64), blocks, self.name, node.na_rm)
-            return result, (np.flatnonzero(undecided) if undecided.any() else None)
+            rows, batch = np.flatnonzero(undecided), pass_budget()
+            return result, [Ask(rows[start:start + batch], len(rows[start:start + batch]))
+                            for start in range(0, len(rows), batch)]
         if kind == "float":
             total, present, counted = held
             with np.errstate(invalid="ignore", divide="ignore"):
                 result = total if self.name == "sum" else total / (present if node.na_rm else counted)
-            return self._at_least(node, result, present), None
+            return self._at_least(node, result, present), []
         total, counted = held
-        return self._at_least(node, total, counted), None
+        return self._at_least(node, total, counted), []
 
     def _at_least(self, node: Any, result: np.ndarray, present: np.ndarray) -> np.ndarray:
         """A sum as NaN where fewer than ``min_count`` values are present."""
@@ -246,11 +268,15 @@ class Total(Reduction):
             return result
         return np.where(present >= node.min_count, result, np.nan)
 
-    def exact(self, node, value, codes, chosen, groups):
-        return sums.chunk_exact(value, (0,), chosen, codes=codes, groups=groups)
+    def again(self, node, ask, value, codes, groups):
+        """One block's exact sums, as integer buckets, for the groups asked about (``labelarray.sums.chunk_exact``)."""
+        return sums.chunk_exact(value, (0,), ask.state, codes=codes, groups=groups)
 
-    def exact_finish(self, node, buckets):
-        return sums.exact_results(buckets, self.name, node.na_rm)
+    def resolve(self, node, ask, total, column):
+        """The correctly rounded results from the buckets added over every block, in the groups' places."""
+        if total is not None:
+            column[ask.state] = sums.exact_results(total, self.name, node.na_rm)
+        return column, []
 
     def close(self, node, kind, held, column):
         """A float32 sum's ``min_count``, once the second pass has filled its groups in, as ``from_chunks`` does."""
