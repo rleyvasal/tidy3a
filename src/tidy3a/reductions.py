@@ -25,6 +25,7 @@ pieces. The executor looks reductions up by name and knows none of them.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Any
 
@@ -289,6 +290,13 @@ DIGIT = 16  # the bits of a value's key one pass counts
 
 
 @dataclass(frozen=True)
+class _Q:
+    """A stand-in node with a quantile's q, for its result type."""
+
+    q: float
+
+
+@dataclass(frozen=True)
 class _Selection:
     """The values the median still looks for, one or two per group (``Ask.state``): each target's group, its rank
     among the group's values present, the key bits decided so far, and how many passes have run."""
@@ -301,6 +309,7 @@ class _Selection:
     done: int  # passes run
     first: np.ndarray  # per group, its first target, or -1
     second: np.ndarray  # per group, its second target (even counts), or -1
+    fraction: np.ndarray | None = None  # per group, a quantile's place between its two values
 
 
 def _key_type(dtype: np.dtype) -> tuple[np.dtype, int]:
@@ -348,7 +357,8 @@ class Median(Reduction):
 
     def partial(self, node, value, codes, count):
         if value.dtype.kind not in "fium" or value.dtype.kind == "f" and value.dtype.itemsize < 2:
-            raise BlockError(f"{node.text()}: the median of {value.dtype} values is not handled on blocks; {WHOLE_AXIS}")
+            raise BlockError(f"{node.text()}: the {self.name} of {value.dtype} values is not handled on blocks; "
+                             f"{WHOLE_AXIS}")
         missing = np.isnat(value) if value.dtype.kind == "m" else np.isnan(value) if value.dtype.kind == "f" else (
             np.zeros(len(value), dtype=bool))
         present = np.bincount(codes, weights=~missing, minlength=count).astype(np.int64)
@@ -360,14 +370,14 @@ class Median(Reduction):
 
     def finish(self, node, kind, held, counts, blocks):
         dtype = np.dtype(kind.split(":", 1)[1])
-        result = np.median(np.zeros(1, dtype)).dtype
+        result = self._result_type(dtype, node)
         present, missing = held
         column = np.full(len(present), np.array("NaT" if result.kind == "m" else np.nan).astype(result))
         wanted = (present > 0) & ((missing == 0) | node.na_rm)
         groups = np.flatnonzero(wanted)
         if not len(groups):
             return column, []
-        low, high = (present[groups] - 1) // 2, present[groups] // 2  # the middle rank, or the two middle ones
+        low, high, fraction = self._ranks(present[groups], node)
         two = high != low
         group = np.concatenate([groups, groups[two]])
         rank = np.concatenate([low, high[two]]).astype(np.int64)
@@ -376,8 +386,18 @@ class Median(Reduction):
         first[groups] = np.arange(len(groups))
         second[groups[two]] = len(groups) + np.arange(int(two.sum()))
         _, width = _key_type(dtype)
-        state = _Selection(dtype, width, group, rank, np.zeros(len(group), dtype=np.uint64), 0, first, second)
+        whole = None if fraction is None else np.zeros(len(present))
+        if whole is not None:
+            whole[groups] = fraction
+        state = _Selection(dtype, width, group, rank, np.zeros(len(group), dtype=np.uint64), 0, first, second, whole)
         return column, [Ask(state, len(group))]
+
+    def _result_type(self, dtype: np.dtype, node: Any) -> np.dtype:
+        return np.median(np.zeros(1, dtype)).dtype
+
+    def _ranks(self, present: np.ndarray, node: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+        """The ranks to find per group: the middle one, or the two middle ones of an even count."""
+        return (present - 1) // 2, present // 2, None
 
     def again(self, node, ask, value, codes, groups):
         """One block's count of each target's candidates by their next digit: as ``(target × 2**16 + digit, count)``,
@@ -418,20 +438,53 @@ class Median(Reduction):
         prefix[target[chosen]] = (prefix[target[chosen]] << np.uint64(DIGIT)) | digit[chosen]
         done = state.done + 1
         if DIGIT * done < state.width:
-            step = _Selection(state.dtype, state.width, state.group, rank, prefix, done, state.first, state.second)
+            step = _Selection(state.dtype, state.width, state.group, rank, prefix, done, state.first, state.second,
+                              state.fraction)
             return column, [Ask(step, ask.size)]
         values = _values(prefix, state.dtype)
         groups = np.flatnonzero(state.first >= 0)
         one = values[state.first[groups]]
         other = np.where(state.second[groups] >= 0, values[np.maximum(state.second[groups], 0)], one)
+        column[groups] = self._combine(one, other, state.second[groups] < 0, state, groups)
+        return column, []
+
+    def _combine(self, one: np.ndarray, other: np.ndarray, alone: np.ndarray, state: _Selection,
+                 groups: np.ndarray) -> np.ndarray:
+        """The median of each group's one or two middle values, as ``np.median`` gives it."""
         with np.errstate(all="ignore"):  # an odd group's (v + v) / 2 may overflow; its value is taken whole below
             middle = np.median(np.stack([one, other], axis=1), axis=1)
-        alone = state.second[groups] < 0  # an odd count: the value itself, as np.median of one value gives it
-        column[groups] = np.where(alone, np.asarray(one).astype(middle.dtype), middle)
-        return column, []
+        return np.where(alone, np.asarray(one).astype(middle.dtype), middle)  # an odd count: the value itself
+
+
+class Quantile(Median):
+    """``quantile(x, q)`` on blocks, as the median: NumPy's linear rule takes the values at ranks ``floor(h)`` and the
+    next (the last, at the end), ``h = q × (n − 1)``, so the passes find both, and ``np.quantile`` of the two at
+    ``h − floor(h)`` gives each group's answer as NumPy gives it from all of them, the same bits, its edge cases
+    included (an infinity next to the rank makes NaN, as in NumPy)."""
+
+    name = "quantile"
+
+    def _result_type(self, dtype, node):
+        return np.quantile(np.zeros(1, dtype), node.q).dtype
+
+    def _ranks(self, present, node):
+        place = node.q * (present - 1)  # NumPy's virtual index, computed as it computes it
+        low = np.floor(place).astype(np.int64)
+        return low, np.minimum(low + 1, present - 1), place - low
+
+    def _combine(self, one, other, alone, state, groups):
+        fraction = state.fraction[groups]
+        result = np.empty(len(groups), dtype=self._result_type(state.dtype, _Q(0.5)))
+        pairs = np.stack([one, other], axis=1)
+        with np.errstate(all="ignore"), warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            for place in np.unique(fraction):  # groups with the same place in one call
+                rows = fraction == place
+                result[rows] = np.quantile(pairs[rows], place, axis=1)
+        return result
 
 
 REGISTRY: dict[str, Reduction] = {entry.name: entry for entry in (
     Count(), Total("sum"), Total("mean"), Extreme("min"), Extreme("max"), Spread("std"), Spread("var"),
-    Flag("any"), Flag("all"), Median(),
+    Flag("any"), Flag("all"), Median(), Quantile(),
 )}

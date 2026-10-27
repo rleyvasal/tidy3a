@@ -10,14 +10,15 @@ integer means, spreads).
 import numpy as np
 import pytest
 
-from tidy3a import all, any, fields, group_by, max, mean, median, min, n, pull, std, sum, summarise, tidy, var
+from tidy3a import all, any, fields, group_by, max, mean, median, min, n, pull, quantile, std, sum, summarise, tidy, var
 from tidy3a.chunked import COMBINABLE
 from tidy3a.reductions import REGISTRY, Reduction
 
 FUNCTIONS = {"sum": sum, "mean": mean, "min": min, "max": max, "std": std, "var": var, "any": any, "all": all,
-             "median": median}
+             "median": median, "quantile": lambda x, na_rm=False: quantile(x, 0.3, na_rm=na_rm)}
 EXACT = {("sum", "f"), ("mean", "f"), ("sum", "i"), ("min", "f"), ("max", "f"), ("min", "i"), ("max", "i"),
-         ("any", "f"), ("all", "f"), ("any", "i"), ("all", "i"), ("median", "f"), ("median", "d"), ("median", "i")}
+         ("any", "f"), ("all", "f"), ("any", "i"), ("all", "i"), ("median", "f"), ("median", "d"), ("median", "i"),
+         ("quantile", "f"), ("quantile", "d"), ("quantile", "i")}
 
 
 def test_the_registry_is_what_blocks_can_answer():

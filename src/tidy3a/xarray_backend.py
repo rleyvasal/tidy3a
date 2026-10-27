@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from labelarray import grouped, sums
+from labelarray.array import Array
 from labelarray import labels as exact
 from labelarray.contract import contract
 from xarray.indexes import PandasIndex
@@ -331,11 +332,14 @@ class XarrayBackend:
     # ── Reductions and grouping ─────────────────────────────────────────────
 
     def reduce(self, array: xr.DataArray, op: str, axes: Sequence[Hashable], na_rm: bool = False,
-               min_count: int | None = None) -> xr.DataArray:
+               min_count: int | None = None, q: float | None = None) -> xr.DataArray:
         """One reduction over *axes*, with missing values propagated unless *na_rm*."""
         axes = list(axes)
         if not axes:
             return array
+        if op == "quantile":  # labelarray's, NumPy's own, so both backends give its type (xarray's gives float64)
+            values = Array(np.asarray(array.values), tuple(array.dims)).reduce("quantile", axes, na_rm=na_rm, q=q)
+            return self._reduced_like(array, axes, values.data, "median")
         array = _as_objects(array, op)
         if op == "median" and na_rm and array.chunks is not None and set(axes) == set(array.dims):
             raise TidyError(
@@ -461,7 +465,7 @@ class XarrayBackend:
                              meta=np.empty((0,) * len(shape), dtype=np.float32))
 
     def group_reduce(self, array: xr.DataArray, op: str, groups: Any, others: Sequence[Hashable],
-                     na_rm: bool, min_count: int | None) -> xr.DataArray:
+                     na_rm: bool, min_count: int | None, q: float | None = None) -> xr.DataArray:
         """*op* per group of *groups* (``tidy3a.expr.Groups``), over its axis and *others*."""
         array = _as_objects(array, op)
         if op in ("sum", "mean") and array.dtype == np.float32 and (array.chunks is None or _dask_backed(array)):
@@ -481,13 +485,13 @@ class XarrayBackend:
         if fast is not None:
             return fast
         stats = [
-            self.reduce(part, op, [groups.axis, *others], na_rm, min_count)
+            self.reduce(part, op, [groups.axis, *others], na_rm, min_count, q)
             for part in self._group_parts(array, groups)
         ]
         index = label_index(groups.labels, groups.name)
         if stats:
             return xr.concat(stats, dim=index)
-        empty = self.reduce(array.isel({groups.axis: slice(0, 0)}), op, [groups.axis, *others], na_rm, min_count)
+        empty = self.reduce(array.isel({groups.axis: slice(0, 0)}), op, [groups.axis, *others], na_rm, min_count, q)
         return empty.expand_dims({groups.name: 0}).assign_coords({groups.name: index})
 
     def _one_pass(self, array: xr.DataArray, op: str, groups: Any, others: Sequence[Hashable],

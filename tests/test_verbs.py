@@ -821,3 +821,41 @@ def test_the_mean_of_times_is_the_xarray_backend_s():
         tidy(_labelled(), backend="numpy") >> summarise(s=mean(when))
     assert tidy(_labelled(), backend="xarray") >> summarise(s=mean(when)) >> pull("s") == np.datetime64(
         "2024-01-02T12:00", "ns")
+
+
+@pytest.mark.parametrize("q", [0.0, 0.25, 0.9, 1.0])
+@pytest.mark.parametrize("na_rm", [False, True])
+def test_quantile_is_numpy_s_on_both_backends(q, na_rm):
+    """quantile(x, q) in memory: NumPy's own (labelarray's), so float32 stays float32 on the xarray backend too, where
+    xarray's quantile gives float64; grouped and whole."""
+    from tidy3a import quantile
+
+    rng = np.random.default_rng(4)
+    values = (rng.normal(size=300) * 9).astype("float32")
+    values[:4] = np.nan
+    group = rng.integers(0, 3, 300)
+    data = xr.Dataset({"v": ("point", values), "g": ("point", group)})
+    v, g = fields("v", "g")
+    reference = np.nanquantile if na_rm else np.quantile
+    want = np.array([reference(values[group == code], q) for code in range(3)])
+    for backend in ("numpy", "xarray"):
+        got = tidy(data, backend=backend) >> group_by(g) >> summarise(s=quantile(v, q, na_rm=na_rm)) >> pull("s")
+        assert got.dtype == np.float32 and got.tobytes() == want.tobytes()
+        whole = tidy(data, backend=backend) >> summarise(s=quantile(v, q, na_rm=na_rm)) >> pull("s")
+        assert np.asarray(whole).tobytes() == np.asarray(reference(values, q)).tobytes()
+
+
+def test_quantile_s_q_and_values_are_checked():
+    from tidy3a import quantile
+
+    name, group, when = fields("name", "group", "when")
+    for q in (-0.1, 1.5, True, "0.5"):
+        with pytest.raises(TypeError, match="q between 0 and 1"):
+            quantile(name, q)
+    assert quantile(name, 0.9, na_rm=True).text() == "quantile(name, 0.9, na_rm=True)"
+    with pytest.raises(SummariseError, match="holds text, which quantile"):
+        tidy(_labelled()) >> summarise(s=quantile(name, 0.5))
+    with pytest.raises(SummariseError, match="holds times, which quantile"):
+        tidy(_labelled()) >> summarise(s=quantile(when, 0.5))
+    with pytest.raises(SummariseError, match="holds true and false, which quantile"):
+        tidy(_labelled()) >> summarise(s=quantile(group > 1, 0.5))

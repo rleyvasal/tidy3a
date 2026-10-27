@@ -36,6 +36,7 @@ from tidy3a import (
     mutate,
     n,
     pull,
+    quantile,
     read_array,
     rounded,
     scan,
@@ -1277,3 +1278,29 @@ def test_a_median_of_zeros_of_both_signs_is_zero():
     got = tidy(source, blocks={"point": 2}) >> summarise(middle=median(v)) >> pull("middle")
     want = tidy(source) >> summarise(middle=median(v)) >> pull("middle")
     assert got == want == 0.0 and got.dtype == want.dtype
+
+
+@pytest.mark.parametrize("q", [0.0, 0.1, 0.5, 0.73, 1.0])
+def test_a_quantile_on_blocks_is_np_quantile_s_with_its_edges(q):
+    """The two values around NumPy's virtual index q × (n − 1), found as the median finds its middle, give
+    np.quantile's answer, the same bits: ties, infinities beside the rank (NaN, as in NumPy), missing values,
+    an empty bin, a group of one."""
+    xr = pytest.importorskip("xarray")
+    rng = np.random.default_rng(11)
+    values = (rng.normal(size=2_001) * 30).astype("float32")
+    values[:9] = np.nan
+    values[9:200] = np.round(values[9:200]) + 0.0
+    values[200:203], values[203] = np.inf, -np.inf
+    group = rng.integers(0, 6, 2_001).astype(float)
+    group[-1] = 30.5
+    source = xr.Dataset({"v": ("point", values), "g": ("point", group)})
+    v, g = fields("v", "g")
+    for na_rm in (False, True):
+        pipeline = group_by(bins(g, [0, 3, 3.5, 6, 40])) >> summarise(s=quantile(v, q, na_rm=na_rm))
+        want = tidy(source) >> pipeline >> pull("s")
+        frame = tidy(source, blocks={"point": 333})
+        loads = []
+        load = frame._blocks.source.block
+        frame._blocks.source.block = lambda start, stop, names=None: loads.append(1) or load(start, stop, names)
+        assert same_bits(frame >> pipeline >> pull("s"), want)
+        assert len(loads) == 7 * (1 + 2)  # float32: two passes after the first

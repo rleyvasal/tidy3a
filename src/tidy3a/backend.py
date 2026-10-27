@@ -278,10 +278,11 @@ class Backend(Protocol):
 
     # ── Reductions and grouping ───────────────────────────────────────────────
 
-    def reduce(self, array: Any, op: Any, axes: Any, na_rm: Any = False, min_count: Any = None) -> Any:
-        """*op* over *axes* with tidy3a's missing-value rules (``na_rm``, ``min_count``)."""
+    def reduce(self, array: Any, op: Any, axes: Any, na_rm: Any = False, min_count: Any = None, q: Any = None) -> Any:
+        """*op* over *axes* with tidy3a's missing-value rules (``na_rm``, ``min_count``); a quantile takes ``q``."""
 
-    def group_reduce(self, array: Any, op: Any, groups: Any, others: Any, na_rm: Any, min_count: Any) -> Any:
+    def group_reduce(self, array: Any, op: Any, groups: Any, others: Any, na_rm: Any, min_count: Any,
+                     q: Any = None) -> Any:
         """*op* per group of *groups* over its axis and *others*."""
 
     def group_counts(self, groups: Any, per_position: Any) -> Any:

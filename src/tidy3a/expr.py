@@ -259,12 +259,15 @@ class Reduce(Expr):
     over: Any = None
     na_rm: bool = False
     min_count: int | None = None
+    q: float | None = None  # a quantile's, between 0 and 1
 
     def children(self) -> Sequence[Expr]:
         return () if self.arg is None else (self.arg,)
 
     def text(self) -> str:
         parts = [] if self.arg is None else [self.arg.text()]
+        if self.q is not None:
+            parts.append(repr(self.q))
         if self.over is not None:
             over = f'"{self.over}"' if isinstance(self.over, str) else repr(self.over)
             parts.append(f"over={over}")
@@ -389,6 +392,19 @@ min = _reduction("min", builtins.min)  # noqa: A001
 max = _reduction("max", builtins.max)  # noqa: A001
 any = _reduction("any", builtins.any)  # noqa: A001
 all = _reduction("all", builtins.all)  # noqa: A001
+
+
+def quantile(x: Any, q: float, *, over: Any = None, na_rm: bool = False) -> Reduce:
+    """The *q* quantile (between 0 and 1) over observation axes, per group when grouped: NumPy's, its default (linear)
+    rule between the two nearest values; ``quantile(x, 0.5)`` is the median. ``over=`` names the axes instead; missing
+    values propagate unless ``na_rm=True``."""
+    if not _is_data(x):
+        raise TypeError("quantile() needs an expression and q, e.g. quantile(intensity, 0.9)")
+    if isinstance(q, (bool, np.bool_)) or not isinstance(q, (int, float, np.integer, np.floating)) or not 0 <= q <= 1:
+        raise TypeError(f"quantile() takes q between 0 and 1, not {q!r}")
+    if not isinstance(na_rm, bool):
+        raise TypeError("quantile() na_rm must be True or False")
+    return Reduce("quantile", as_expr(x), over, na_rm, None, float(q))
 
 
 def n() -> Reduce:
@@ -834,21 +850,21 @@ def _evaluate_reduce(node: Reduce, ctx: Context) -> Any:
         clash = [axis for axis in axes if axis in ctx.group_axes]
         if clash:
             raise error(f"{node.text()}: over= includes {clash[0]}, which group_by keeps")
-        return backend.reduce(array, node.op, axes, node.na_rm, node.min_count)
+        return backend.reduce(array, node.op, axes, node.na_rm, node.min_count, node.q)
 
     axes = [axis for axis in ctx.observation_axes(array) if axis not in ctx.group_axes]
     if ctx.value_key is None:
-        return backend.reduce(array, node.op, axes, node.na_rm, node.min_count)
+        return backend.reduce(array, node.op, axes, node.na_rm, node.min_count, node.q)
     groups = ctx.groups()
     others = [axis for axis in axes if axis != groups.axis]
-    stats = backend.group_reduce(array, node.op, groups, others, node.na_rm, node.min_count)
+    stats = backend.group_reduce(array, node.op, groups, others, node.na_rm, node.min_count, node.q)
     return group_result(stats, groups, ctx)
 
 
 # Reductions a kind of value cannot take, refused with the reduction's name rather than NumPy's error. Text is not
 # true or false, as in R and dplyr, so any() and all() refuse it too (the backends gave True and 1.0).
-_TEXT_REFUSED = ("sum", "mean", "std", "var", "median", "any", "all")
-_TIME_REFUSED = ("sum", "std", "var", "median", "any", "all")
+_TEXT_REFUSED = ("sum", "mean", "std", "var", "median", "quantile", "any", "all")
+_TIME_REFUSED = ("sum", "std", "var", "median", "quantile", "any", "all")
 _DURATION_REFUSED = ("std", "var")
 
 
@@ -861,6 +877,9 @@ def _check_reducible(node: Reduce, dtype: np.dtype, error: type[TidyError], back
     if dtype.kind == "M" and node.op in _TIME_REFUSED:
         raise error(f"{node.text()}: {held} holds times, which {node.op}() cannot reduce; "
                     f"min() and max() take times, and max({held}) - min({held}) is their span")
+    if dtype.kind == "b" and node.op == "quantile":
+        raise error(f"{node.text()}: {held} holds true and false, which quantile() cannot reduce; "
+                    f"mean({held}) is the share that are true")
     if dtype.kind == "m" and node.op in _DURATION_REFUSED:
         raise error(f"{node.text()}: {held} holds durations, which {node.op}() cannot reduce; "
                     f"sum(), mean(), median(), min(), and max() take durations")

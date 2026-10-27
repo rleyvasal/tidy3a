@@ -358,12 +358,13 @@ class NumpyBackend:
     # ── Reductions and grouping ─────────────────────────────────────────────
 
     def reduce(self, array: Array, op: str, axes: Sequence[Hashable], na_rm: bool = False,
-               min_count: int | None = None) -> Array:
-        return array.reduce(op, axes, na_rm=na_rm, min_count=min_count)
+               min_count: int | None = None, q: float | None = None) -> Array:
+        return array.reduce(op, axes, na_rm=na_rm, min_count=min_count, **({"q": q} if op == "quantile" else {}))
 
     def group_reduce(self, array: Array, op: str, groups: Any, others: Sequence[Hashable],
-                     na_rm: bool, min_count: int | None) -> Array:
-        return grouped.reduce(array, op, groups, groups.axis, groups.name, others, na_rm=na_rm, min_count=min_count)
+                     na_rm: bool, min_count: int | None, q: float | None = None) -> Array:
+        return grouped.reduce(array, op, groups, groups.axis, groups.name, others, na_rm=na_rm, min_count=min_count,
+                              **({"q": q} if op == "quantile" else {}))
 
     def group_counts(self, groups: Any, per_position: int) -> Array:
         return grouped.counts(groups, groups.name, per_position)
