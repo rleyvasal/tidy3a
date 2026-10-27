@@ -17,6 +17,8 @@ from tidy3a import (
     MutateError,
     ReadError,
     SummariseError,
+    all,
+    any,
     bins,
     cells,
     fields,
@@ -38,6 +40,7 @@ from tidy3a import (
     std,
     sum,
     summarise,
+    var,
 )
 from tidy3a import slice as take
 
@@ -229,8 +232,6 @@ def test_verbs_run_on_the_first_block_as_they_are_called(npy):
     (group_by(ring) >> mutate(centred=intensity - mean(intensity)), "after group_by, only summarise"),
     (group_by("point") >> summarise(points=n()), "keeps an axis"),
     (group_by(ring) >> summarise(points=n(), middle=median(intensity)), "cannot be combined"),
-    (group_by(ring) >> summarise(total=sum(intensity, min_count=2)), "min_count"),
-    (group_by(ring) >> summarise(spread=std(intensity)), "cannot be combined"),
 ])
 def test_what_a_block_cannot_answer_is_refused_when_the_verb_is_called(npy, pipeline, message):
     path, _ = npy
@@ -394,3 +395,43 @@ def test_no_rows_kept_anywhere(tmp_path, npy):
     result, got = in_blocks(path, pipeline, ["x"], 3_000)
     assert got["x"].shape == want["x"].shape == (0,)
     assert "point: 0 (all removed by filter(" in repr(result)
+
+
+# ── Phase 3: what combines closely, not bit for bit ─────────────────────────
+
+
+@pytest.mark.parametrize("make, rows", [(lambda: cloud(), 3_000), (lambda: cloud().astype("float64"), 997),
+                                        (lambda: np.rint(cloud()).astype("int32"), 7_000)])
+def test_spread_and_flags_combine(tmp_path, make, rows):
+    values = make()
+    if values.dtype.kind == "f":
+        values[::40, 3] = np.nan
+    path = tmp_path / "spread.npy"
+    np.save(path, values)
+    pipeline = (group_by(ring) >> summarise(
+        points=n(), spread=std(intensity), v=var(intensity), spread_present=std(intensity, na_rm=True),
+        v_present=var(intensity, na_rm=True), some=any(intensity > 10), every=all(z > -200),
+        total=sum(intensity, min_count=3), total_present=sum(intensity, na_rm=True, min_count=600),
+        average=mean(intensity, na_rm=True)))
+    columns = ["ring", "points", "spread", "v", "spread_present", "v_present", "some", "every", "total",
+               "total_present", "average"]
+    want = in_memory(values, pipeline, columns)
+    _, got = in_blocks(path, pipeline, columns, rows, threads=2)
+    for name in ("ring", "points", "some", "every"):
+        assert same_bits(got[name], want[name]), name
+    for name in ("spread", "v", "spread_present", "v_present", "total", "total_present", "average"):
+        assert got[name].dtype == want[name].dtype, name
+        assert np.allclose(got[name], want[name], rtol=1e-5, equal_nan=True), name
+    assert np.isnan(want["total_present"]).any()  # min_count took effect in memory and on blocks alike
+    if values.dtype == np.float32:
+        assert same_bits(got["total"], want["total"]) and same_bits(got["average"], want["average"])
+
+
+def test_a_block_cannot_answer_median_or_over(npy):
+    path, _ = npy
+    frame = read_array(path, dims={"point": infer, "feature": 5}, labels={"feature": NAMES}, field_axis="feature",
+                       blocks=3_000)
+    with pytest.raises(BlockError, match="median\\(\\) cannot be combined"):
+        frame >> group_by(ring) >> summarise(middle=median(intensity))
+    with pytest.raises(BlockError, match="names axes"):
+        frame >> summarise(total=sum(intensity, over="point"))

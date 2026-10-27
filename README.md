@@ -241,15 +241,16 @@ print(per_ring >> pull("ring"))  # [0. 1. 2. 3.]
 A summarised pipeline is `select`, `filter`, and `mutate` of row-wise
 expressions, `group_by` of value keys (fields, `cells`, `bins`, `rounded`,
 several at once, with or without `dropna`), then `summarise` of `n`,
-`sum`, `mean`, `min`, `max`, or expressions of them (`mean(x) / n()`).
-Each key's groups merge across blocks in the order `group_by` gives them,
-and float32 sums and means are the same bits as in memory whatever the
-block size; float64 and integer ones add per block and are close, not
+`sum`, `mean`, `min`, `max`, `std`, `var`, `any`, `all`, or expressions
+of them (`mean(x) / n()`). Each key's groups merge across blocks in the
+order `group_by` gives them, and float32 sums and means are the same bits
+as in memory whatever the block size; float64 and integer sums and means,
+and `std` and `var`, add per block in float64 and are close, not
 identical. A pipeline without `summarise` joins the blocks' rows in memory,
 for data that fits once filtered; a verb that needs the whole axis
 (`slice`, joins) then runs on the joined rows. What a block cannot answer
 (a reduction inside `mutate` or `filter`, a grouped `mutate`, an axis key,
-`median`, `std`) is refused when the verb is called, naming `lazy=True`,
+`median`, `over=`) is refused when the verb is called, naming `lazy=True`,
 which memory-maps the file, as the whole-axis alternative. Measured on all
 122.6M points of nuScenes Mini's lidar sweeps (2.45 GB) through a distance
 filter and 1 m voxels (`cells(x, 1), cells(y, 1), cells(z, 1)`, 84,475 of

@@ -11,14 +11,15 @@
   the groups, not the file. A summarised pipeline is `select`, `filter`,
   and `mutate` of row-wise expressions, `group_by` of value keys (fields,
   `cells`, `bins`, `rounded`, several at once, with or without `dropna`),
-  then `summarise` of `n`, `sum`, `mean`, `min`, `max`, or expressions of
-  them; each key's groups merge across blocks in the order `group_by`
-  gives them. Float32 sums and means are the same bits as in memory
-  whatever the block size; float64 and integer ones add per block and are
+  then `summarise` of `n`, `sum`, `mean`, `min`, `max`, `std`, `var`,
+  `any`, `all`, or expressions of them; each key's groups merge across
+  blocks in the order `group_by` gives them. Float32 sums and means are
+  the same bits as in memory whatever the block size; float64 and integer
+  sums and means, and `std` and `var`, add per block in float64 and are
   close, not identical. A pipeline without `summarise` joins the blocks'
-  rows in memory. What a block cannot answer is refused with a
-  `BlockError` when the verb is called (plan decision 10, stage (b),
-  phases 1 and 2). On nuScenes Mini's 122.6M lidar points, a distance
+  rows in memory. What a block cannot answer (`median`, `over=`, a
+  reduction inside `mutate` or `filter`) is refused with a `BlockError`
+  when the verb is called (plan decision 10, stage (b), phases 1 to 3). On nuScenes Mini's 122.6M lidar points, a distance
   filter and 1 m voxels took 8.0 s at 1.65 GB in blocks against 36.5 s at
   7.14 GB in memory.
 

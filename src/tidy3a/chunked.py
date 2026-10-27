@@ -64,7 +64,7 @@ from tidy3a.frame import TidyArray
 from tidy3a.plan import Pipeline, Record, Step, snapshot
 
 ROW_WISE = ("select", "filter", "mutate")
-COMBINABLE = ("n", "sum", "mean", "min", "max")
+COMBINABLE = ("n", "sum", "mean", "min", "max", "std", "var", "any", "all")
 WHOLE_AXIS = "read the file with lazy=True, which memory-maps it, to run this on every position"
 
 
@@ -233,8 +233,8 @@ def _hidden(node: Any, reductions: dict[str, Reduce], name: str) -> Any:
         if node.op not in COMBINABLE:
             raise BlockError(f"{name} = {node.text()}: {node.op}() cannot be combined across blocks; "
                              f"{', '.join(COMBINABLE)} can; {WHOLE_AXIS}")
-        if node.over is not None or node.min_count is not None:
-            raise BlockError(f"{name} = {node.text()}: over= and min_count= are not handled on blocks; {WHOLE_AXIS}")
+        if node.over is not None:
+            raise BlockError(f"{name} = {node.text()}: over= names axes, which blocks split; {WHOLE_AXIS}")
         if node.arg is not None and any(isinstance(inner, Reduce) for inner in walk(node.arg)):
             raise BlockError(f"{name} = {node.text()}: a reduction inside a reduction needs the whole axis; "
                              f"{WHOLE_AXIS}")
@@ -389,8 +389,10 @@ class _Table:
             if kind == "estimate":
                 held[:sums.TERMS, at] += piece[:sums.TERMS]
                 held[sums.TERMS, at] = np.maximum(held[sums.TERMS, at], piece[sums.TERMS])
-            elif kind == "extreme":
+            elif kind in ("extreme", "flag"):
                 held[at] = _extreme(self.plan.reductions[hidden])(held[at], piece)
+            elif kind == "moments":
+                held[:, at] = _combine_moments(held[:, at], piece)
             else:
                 held[..., at] += piece
 
@@ -406,20 +408,36 @@ class _Table:
             kind, held = self.pieces[hidden]
             if kind == "estimate":
                 columns[hidden] = sums.from_chunks(held, self.blocks, node.op, lambda chosen: exact(chosen, hidden),
-                                                   na_rm=node.na_rm)
-            elif kind == "extreme":
+                                                   na_rm=node.na_rm, min_count=node.min_count)
+            elif kind in ("extreme", "flag"):
                 columns[hidden] = held
+            elif kind == "moments":
+                present, _, squares, missing = held
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    variance = np.where(present > 0, squares / present, np.nan)  # the population variance, as np.var
+                if not node.na_rm:
+                    variance = np.where(missing > 0, np.nan, variance)
+                columns[hidden] = np.sqrt(variance) if node.op == "std" else variance
             elif kind == "float":
                 total, present = held
-                columns[hidden] = total if node.op == "sum" else total / (present if node.na_rm else self.counts)
+                result = total if node.op == "sum" else total / (present if node.na_rm else self.counts)
+                columns[hidden] = _at_least(result, present, node)
             else:
-                columns[hidden] = held if node.op == "sum" else held / self.counts
+                result = held if node.op == "sum" else held / self.counts
+                columns[hidden] = _at_least(result, self.counts, node)
         return columns
 
     def group_codes(self) -> list[np.ndarray]:
         """Each part's code for every combination in the table."""
         assert self.keys is not None
         return list(np.unravel_index(self.keys, self.sizes)) if self.parts else []
+
+
+def _at_least(result: np.ndarray, present: np.ndarray, node: Reduce) -> np.ndarray:
+    """A sum as NaN where fewer than ``min_count`` values are present."""
+    if node.op != "sum" or node.min_count is None:
+        return result
+    return np.where(present >= node.min_count, result, np.nan)
 
 
 def _spread(held: np.ndarray, where: np.ndarray, size: int, fill: Any) -> np.ndarray:
@@ -521,11 +539,16 @@ def _partial(plan: _Plan, blocks: Blocks, span: tuple[int, int]):
         if node.op == "n":
             continue
         value = values[hidden]
-        if node.op in ("min", "max"):
+        if node.op in ("min", "max", "any", "all"):
             if order is None:
                 order = np.argsort(codes, kind="stable")
                 starts = np.concatenate([[0], np.cumsum(counts)[:-1]])
-            pieces[hidden] = ("extreme", _extreme(node).reduceat(value[order], starts))
+            if node.op in ("any", "all"):
+                pieces[hidden] = ("flag", _extreme(node).reduceat(value[order].astype(bool), starts))
+            else:
+                pieces[hidden] = ("extreme", _extreme(node).reduceat(value[order], starts))
+        elif node.op in ("std", "var"):
+            pieces[hidden] = ("moments", _moments(value, codes, count))
         elif value.dtype == np.float32:
             pieces[hidden] = ("estimate", sums.chunk_estimate(value, (0,), na_rm=node.na_rm, codes=codes,
                                                                groups=count))
@@ -546,13 +569,41 @@ def _partial(plan: _Plan, blocks: Blocks, span: tuple[int, int]):
 
 
 def _extreme(node: Reduce) -> Any:
+    if node.op == "any":
+        return np.logical_or
+    if node.op == "all":
+        return np.logical_and
     if node.op == "min":
         return np.fmin if node.na_rm else np.minimum
     return np.fmax if node.na_rm else np.maximum
 
 
+def _moments(value: np.ndarray, codes: np.ndarray, count: int) -> np.ndarray:
+    """Per group, in float64: the values present, their mean, their squared deviations' sum, and the NaN among them."""
+    floats = value.astype(np.float64)
+    missing = np.isnan(floats)
+    present = np.bincount(codes, weights=~missing, minlength=count)
+    total = np.bincount(codes, weights=np.where(missing, 0.0, floats), minlength=count)
+    mean = np.divide(total, present, out=np.zeros(count), where=present > 0)
+    deviations = np.where(missing, 0.0, floats - mean[codes]) ** 2
+    squares = np.bincount(codes, weights=deviations, minlength=count)
+    return np.stack([present, mean, squares, np.bincount(codes, weights=missing, minlength=count)])
+
+
+def _combine_moments(held: np.ndarray, piece: np.ndarray) -> np.ndarray:
+    """Two groups' moments as one (Chan, Golub, and LeVeque's parallel update), in float64."""
+    na, ma, sa, nana = held
+    nb, mb, sb, nanb = piece
+    n = na + nb
+    delta = mb - ma
+    share = np.divide(nb, n, out=np.zeros_like(n), where=n > 0)
+    return np.stack([n, ma + delta * share, sa + sb + delta * delta * na * share, nana + nanb])
+
+
 def _fill(kind: str, dtype: np.dtype, node: Reduce) -> Any:
     """The value a group not yet seen holds in an accumulator."""
+    if kind == "flag":
+        return node.op == "all"
     if kind != "extreme":
         return 0
     if dtype.kind == "f":
@@ -605,9 +656,12 @@ def _result(frame: ChunkedFrame, plan: _Plan, table: _Table, columns: dict[str, 
     hidden = {name: backend.array(values, dims=(axis,), coords=coords, name=name) for name, values in columns.items()}
     held = TidyArray(backend.summary(hidden, {}, {}), backend=backend)
     ctx = Context(held, verb="summarise", error=SummariseError, grouped=False)
+    given = {name: variable.dtype for name, variable in backend.variables(frame._data).items()}
     for name, node in plan.summaries.items():
         value = evaluate(node, ctx)
         values = value.values if backend.is_array(value) else np.asarray(value)
+        if name in given and values.dtype != given[name]:  # the type the summary has in memory
+            values = values.astype(given[name])
         if key is None:
             values = np.asarray(values).reshape(-1)[0] if np.ndim(values) else values
             results[name] = backend.array(values, name=name)
