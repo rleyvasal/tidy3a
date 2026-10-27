@@ -80,7 +80,10 @@ def in_blocks(path, pipeline, names, rows, threads=1, **options):
 def same_bits(a, b):
     a, b = np.asarray(a), np.asarray(b)
     if a.dtype.kind in "OU" or b.dtype.kind in "OU":  # text labels: equal as values, as objects or NumPy text
-        return a.dtype.kind in "OU" and b.dtype.kind in "OU" and a.shape == b.shape and a.tolist() == b.tolist()
+        # NaN among objects is equal to NaN: list equality would ask whether both are the same NaN object, which
+        # depends on how NumPy and Python made them (they differ on Python 3.11 and the minimum NumPy).
+        return (a.dtype.kind in "OU" and b.dtype.kind in "OU" and a.shape == b.shape
+                and all(x == y or (x != x and y != y) for x, y in zip(a.ravel().tolist(), b.ravel().tolist())))
     return a.dtype == b.dtype and a.shape == b.shape and a.tobytes() == b.tobytes()
 
 
