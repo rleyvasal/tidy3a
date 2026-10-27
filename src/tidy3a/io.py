@@ -211,6 +211,8 @@ def read_array(
     order: str | None = None,
     offset: int | None = None,
     lazy: bool = False,
+    blocks: int | None = None,
+    threads: int = 1,
     backend: str | None = None,
 ) -> TidyArray:
     """Read a homogeneous numeric array and name its axes.
@@ -235,6 +237,14 @@ def read_array(
     (bytes to skip, default 0). ``lazy=True`` memory-maps the file instead
     of loading it.
 
+    ``blocks=rows`` reads a file larger than memory in blocks of that many
+    positions on its first axis: the result holds the first block, so each
+    verb runs on it as it is called, and the verbs run over every block,
+    ``threads`` blocks at a time, when a result is asked for
+    (``docs/plan.md``, decision 10, stage (b)). The pipeline must end in
+    ``summarise()``; what a block cannot answer is refused when the verb is
+    called.
+
     ``backend=`` is ``"xarray"`` or ``"numpy"``; without it, the default
     from ``set_backend()`` is used, or with none chosen, NumPy.
     Memory-mapped data stays on xarray.
@@ -245,6 +255,9 @@ def read_array(
 
     names, sizes = _parse_dims(dims, kind)
     notes: list[str] = []
+    if blocks is not None:
+        _check_blocks(kind, description, blocks, threads, lazy, order, names, field_axis, variables_from)
+        lazy = True  # the file is memory-mapped, and each block copied out of the map
 
     if kind == "raw":
         values, inferred = _read_raw(
@@ -264,7 +277,7 @@ def read_array(
         _check_value_type(value_type, values.dtype, description)
         inferred = _match_stored_shape(values.shape, names, sizes, description)
         source_text = description
-    if lazy:
+    if lazy and blocks is None:
         source_text += ", memory-mapped"
     if inferred is not None:
         notes.append(inferred)
@@ -280,6 +293,30 @@ def read_array(
     if name is not None and (not isinstance(name, str) or not name):
         raise ReadError("name= must be a non-empty string")
 
+    if blocks is not None:
+        from tidy3a.chunked import ChunkedFrame
+
+        axis = names[0]
+        if kind == "raw":
+            def reopen() -> np.ndarray:
+                return _read_raw(path, value_type, names, sizes, byte_order or "little", "C", offset or 0, True)[0]
+        else:
+            def reopen() -> np.ndarray:
+                return _load_stored(source, kind, path, True)
+
+        def build(block: np.ndarray, start: int, stop: int) -> TidyArray:
+            block_coords = {dim: (held[start:stop] if dim == axis else held) for dim, held in coords.items()}
+            return _frame(block, names, block_coords, field_axis, variables_from, name, backend, source_text, notes)
+
+        del values  # the map closes; each block reopens the file
+        return ChunkedFrame.open(reopen, int(shape[0]), axis, blocks, threads, build)
+    return _frame(values, names, coords, field_axis, variables_from, name, backend, source_text, notes)
+
+
+def _frame(values: np.ndarray, names: list[str], coords: Mapping[str, Any], field_axis: str | None,
+           variables_from: str | None, name: str | None, backend: str | None, source_text: str,
+           notes: Sequence[str]) -> TidyArray:
+    """The frame of an array read with its options checked: the single array, or one variable per label."""
     holder = reader_backend({name or "values": values}, backend, ReadError)
     origins: dict[Hashable, tuple[str, tuple[Any, ...]]] = {}
     if variables_from is not None:
@@ -328,6 +365,26 @@ def _describe_source(kind: str, path: Path | None) -> str:
         return "NumPy array"
     assert path is not None
     return f'{".npy file" if kind == "npy" else "raw file"} "{path.name}"'
+
+
+def _check_blocks(kind: str, description: str, blocks: Any, threads: Any, lazy: bool, order: Any,
+                  names: list[str], field_axis: str | None, variables_from: str | None) -> None:
+    for option, value in (("blocks", blocks), ("threads", threads)):
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 1:
+            raise ReadError(f"{option}= must be a positive number, not {value!r}")
+    if kind == "array":
+        raise ReadError("blocks= reads a file in blocks; an in-memory array is already loaded")
+    if lazy:
+        raise ReadError("blocks= and lazy=True both keep the file on disk; use one of them")
+    if order == "F":
+        raise ReadError(f"blocks= reads runs of the first axis, which {description} stores scattered "
+                        '(order="F"); store the file row-major to read it in blocks')
+    if not names:
+        raise ReadError("blocks= needs an axis to read along: name the axes with dims=")
+    if names[0] in (field_axis, variables_from):
+        role = "field_axis" if names[0] == field_axis else "variables_from"
+        raise ReadError(f'blocks= reads runs of the first axis, "{names[0]}", which {role}= turns into columns; '
+                        "put the observation axis first")
 
 
 def _check_raw_options(

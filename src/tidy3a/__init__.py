@@ -4,6 +4,7 @@ from tidy3a.__version__ import __version__
 from tidy3a.backend import set_backend
 from tidy3a.errors import (
     AlignError,
+    BlockError,
     FilterError,
     GroupError,
     MutateError,
@@ -102,7 +103,7 @@ from tidy3a.verbs import (
 nan = float("nan")
 
 __all__ = [
-    "AlignError", "FilterError", "GroupError", "MutateError", "ReadError", "RefError",
+    "AlignError", "BlockError", "FilterError", "GroupError", "MutateError", "ReadError", "RefError",
     "Pipeline", "Plan", "SelectError", "SliceError", "SummariseError", "TidyArray", "TidyError", "__version__",
     "all", "all_of", "any", "any_of", "as_table", "assign", "bind_cols", "bins", "cells", "col", "contains",
     "ends_with", "env", "everything", "fields", "filter", "fixed_text", "full_join", "group_by", "if_else",

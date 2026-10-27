@@ -11,6 +11,13 @@ plan milestone 9). Its label index and tests moved with it
 implemented every verb a second time, was replaced by tidy3a's verbs running
 on the backend. The prototype as it was is in git history (commit `c878eac`).
 
+`chunked_executor.py` is the prototype of running a pipeline over a
+memory-mapped file block by block (plan decision 10, stage b), measured
+against the Dask path before the engine went into the package as
+`read_array(..., blocks=rows)` (`src/tidy3a/chunked.py`). Its tests became
+`tests/test_blocks.py`. The prototype returns NumPy columns; the package
+returns a frame.
+
 `demo_numpy_pipeline.py` runs the point-cloud example on the NumPy backend:
 
 ```bash

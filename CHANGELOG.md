@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- Files larger than memory: `read_array(path, ..., blocks=rows)` reads a
+  file in blocks of that many positions on its first axis. The result holds
+  the first block, so each verb runs on it as it is called, with its checks,
+  notes, and `explain()`; when a result is asked for (`collect()`, `pull`,
+  `to_dict()`), the verbs run over every block, `threads` blocks at a time,
+  and the blocks' summaries merge, so memory is the blocks in flight and
+  the groups, not the file. The pipeline is `select`, `filter`, and
+  `mutate` of row-wise expressions, at most one `group_by` on a plain
+  field, then `summarise` of `n`, `sum`, `mean`, `min`, `max`, or
+  expressions of them. Float32 sums and means are the same bits as in
+  memory whatever the block size; float64 and integer ones add per block
+  and are close, not identical. What a block cannot answer is refused with
+  a `BlockError` when the verb is called (plan decision 10, stage (b),
+  phase 1).
+
 ## 0.5.1 — 2026-10-26
 
 - Requires labelarray 0.1.3: summaries by several keys pass their groups'

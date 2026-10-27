@@ -202,6 +202,55 @@ pipeline on a large array quickly. `per_ring.plan()` gives the verbs that
 made a result as a pipeline, so `other_cloud >> per_ring.plan()` repeats
 them on other data.
 
+## Files larger than memory
+
+`read_array(path, ..., blocks=rows)` reads a file in blocks of that many
+positions on its first axis. The result holds the first block, so each verb
+runs on it as it is called, with its checks, notes, and `explain()`; when a
+result is asked for (`pull`, `collect()`, `to_dict()`), the verbs run over
+every block, `threads` blocks at a time, and the blocks' summaries merge,
+so memory is the blocks in flight and the groups, not the file:
+
+```python
+import os
+import tempfile
+
+import numpy as np
+from tidy3a import fields, filter, formula, group_by, infer, mean, mutate, n, pull, read_array, summarise
+
+rng = np.random.default_rng(0)
+points = (rng.normal(size=(100_000, 5)) * 30).astype("float32")
+points[:, 4] = rng.integers(0, 4, 100_000)
+path = os.path.join(tempfile.mkdtemp(), "cloud.npy")
+np.save(path, points)
+
+x, y, z, intensity, ring, distance = fields("x", "y", "z", "intensity", "ring", "distance")
+cloud = read_array(path, dims={"point": infer, "feature": 5},
+                   labels={"feature": ["x", "y", "z", "intensity", "ring"]}, field_axis="feature",
+                   blocks=20_000, threads=2)
+per_ring = (
+    cloud
+    >> mutate(distance = formula(r"\sqrt{x^2 + y^2 + z^2}"))
+    >> filter(distance <= 60)
+    >> group_by(ring)
+    >> summarise(points = n(), brightness = mean(intensity))
+)
+print(per_ring >> pull("ring"))  # [0. 1. 2. 3.]
+```
+
+The pipeline is `select`, `filter`, and `mutate` of row-wise expressions,
+at most one `group_by` on a plain field, then `summarise` of `n`, `sum`,
+`mean`, `min`, `max`, or expressions of them (`mean(x) / n()`). Float32
+sums and means are the same bits as in memory whatever the block size;
+float64 and integer ones add per block and are close, not identical. What
+a block cannot answer (a reduction inside `mutate` or `filter`, `slice`,
+joins, several keys, `cells()`, `median`, `std`) is refused when the verb
+is called, naming `lazy=True`, which memory-maps the file, as the
+whole-axis alternative. Measured on 80M points in five float32 fields
+(1.5 GB), the pipeline above took 1.5 s with four threads and 500,000-point
+blocks at a peak of 0.39 GB, against 5.4 GB on the Dask path and 5.9 GB in
+memory; the plan has the measurements (decision 10, stage (b)).
+
 ## Tables: Polars and tidy3
 
 With [Polars](https://pola.rs) installed (`pip install "tidy3a[polars]"`),
@@ -262,7 +311,7 @@ first (`nir * 1.0 - red`) when a result can be negative.
 
 | | |
 |---|---|
-| Reading | `read_array` (raw files, `.npy`, NumPy arrays, `lazy=True` to memory-map), `read_binary` (fixed-width mixed records), `fixed_text`, `infer`, `tidy()` (xarray objects, or Polars and tidy3 tables with `axis=`) |
+| Reading | `read_array` (raw files, `.npy`, NumPy arrays, `lazy=True` to memory-map, `blocks=` to run the verbs block by block), `read_binary` (fixed-width mixed records), `fixed_text`, `infer`, `tidy()` (xarray objects, or Polars and tidy3 tables with `axis=`) |
 | Verbs | `select`, `filter`, `slice`, `slice_head`, `slice_tail`, `mutate`, `group_by`, `ungroup`, `summarise`, `left_join`, `inner_join`, `full_join`, `bind_cols`, `pull` |
 | Grouping keys | a field or an axis name, `bins`, `rounded`, `cells` |
 | Reductions | `mean`, `sum`, `min`, `max`, `median`, `std`, `var`, `any`, `all`, `n`, with `over=` and `na_rm=` |
@@ -279,6 +328,8 @@ An array from the calling code, such as a rotation matrix, can be an xarray
 Laziness: `read_array(..., lazy=True)` memory-maps a file and `tidy()` keeps
 a lazy xarray input lazy until `collect()`, but the verbs themselves run
 eagerly: arithmetic allocates results and `filter` evaluates its mask.
+`read_array(..., blocks=rows)` runs them block by block instead, for
+pipelines that end in `summarise` (above).
 `read_binary`'s options are in [the reader contract](docs/m6-read-binary.md).
 
 ## Notebooks

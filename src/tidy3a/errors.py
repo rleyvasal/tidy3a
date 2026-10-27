@@ -54,6 +54,10 @@ class SummariseError(TidyError):
     """``summarise`` cannot reduce a summary to one value per group."""
 
 
+class BlockError(TidyError):
+    """A verb or summary that cannot run block by block over a file read with ``blocks=``."""
+
+
 class AlignError(TidyError, labelarray.AlignError):
     """Labels on a shared axis do not match."""
 
