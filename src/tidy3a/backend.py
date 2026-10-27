@@ -222,6 +222,16 @@ class Backend(Protocol):
     def keep(self, data: Any, axis: Any, index: Any) -> Any:
         """Positions on *axis* (a mask, a slice, or positions); an unlabelled axis is labelled with the 1-based positions kept."""
 
+    def label_positions(self, data: Any, axis: Any, start: Any) -> Any:
+        """An unlabelled *axis* labelled with its 1-based positions counted from *start* (a block of a larger axis)."""
+
+    def unlabel(self, data: Any, axis: Any) -> Any:
+        """The collection without *axis*'s labels."""
+
+    def join_along(self, parts: Any, axis: Any) -> Any:
+        """Collections with the same variables joined along *axis*, an axis they all have, keeping attributes, storage
+        encodings, and the coordinates along it; what does not vary along *axis* comes from the first."""
+
     # ── Arrays ────────────────────────────────────────────────────────────────
 
     def is_array(self, value: Any) -> bool:

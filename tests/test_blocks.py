@@ -22,6 +22,8 @@ from tidy3a import (
     any,
     bins,
     cells,
+    col,
+    dot,
     fields,
     filter,
     formula,
@@ -705,3 +707,180 @@ def test_scan_refuses_frames_from_different_sources_and_frames_in_memory(npy):
     assert scan() == ()
     (got,) = scan(one)
     assert got >> pull("points") == len(values)
+
+
+# ── Review of 3c453fd: eager and block equivalence, and bounded memory ───────
+
+
+def test_positions_are_the_whole_axis_s_in_every_block(npy):
+    """A block sees its own positions: col(axis) counts from the block's start, and a filter by position keeps the
+    same rows as in memory; without a filter, the joined rows have no labels, as in memory."""
+    path, values = npy
+    options = dict(dims={"point": infer, "feature": 5}, labels={"feature": NAMES}, field_axis="feature")
+    eager = read_array(values, **options)
+    for source in (path, values):
+        frame = read_array(source, blocks=3_000, **options)
+        assert "unlabeled, positions 1 … 3,000" in repr(frame)  # the first block, shown as in memory
+        positions = mutate(p=col("point")) >> select("p")
+        assert same_bits(frame >> positions >> pull("p"), eager >> positions >> pull("p"))
+        assert not (frame >> positions).collect().coords  # no filter ran, so the axis stays unlabelled
+        by_position = filter((col("point") > 7_000) & (col("point") <= 9_010)) >> select("x")
+        got, want = frame >> by_position, eager >> by_position
+        assert same_bits(got >> pull("x"), want >> pull("x")) and same_bits(got >> pull("point"), want >> pull("point"))
+
+
+@pytest.mark.parametrize("pipeline, message", [
+    (mutate(t=dot(x, x)), "dot\\(x, x\\) sums over point"),
+    (mutate(t=dot(x, y, over="point")), "sums over point"),
+    (filter(x > dot(x, x) / 100), "sums over point"),
+    (mutate(t=formula(r"\sum_p x_p", bind={"p": "point"})), "sum\\(x, over=\"point\"\\) needs the whole axis"),
+    (mutate(t=formula(r"x - \sum_p x_p / 3", bind={"p": "point"})), "needs the whole axis"),
+])
+def test_sums_hidden_in_dot_and_formulas_are_refused(npy, pipeline, message):
+    frame = read_array(npy[0], dims={"point": infer, "feature": 5}, labels={"feature": NAMES}, field_axis="feature",
+                       blocks=3_000)
+    with pytest.raises(BlockError, match=message):
+        frame >> pipeline
+
+
+def test_integer_means_add_in_float64_and_integer_sums_wrap_as_in_memory():
+    xr = pytest.importorskip("xarray")
+    v = fields("v")
+    source = xr.Dataset({"v": ("point", np.array([2**62] * 4 + [1, 2, 3], dtype="int64"))})
+    pipeline = summarise(m=mean(v), t=sum(v))
+    eager, blocked = tidy(source) >> pipeline, tidy(source, blocks={"point": 2}) >> pipeline
+    assert same_bits(blocked >> pull("m"), eager >> pull("m"))
+    assert same_bits(blocked >> pull("t"), eager >> pull("t"))  # wrapped the same way
+
+
+def test_joined_rows_keep_coordinates_attributes_and_encodings():
+    xr = pytest.importorskip("xarray")
+    v = fields("v")
+    source = xr.Dataset({"v": ("time", np.arange(6.0), {"units": "K"}), "site": ((), "A", {"role": "name"})},
+                        coords={"station": ("time", list("aabbcc"), {"kind": "id"}), "time": np.arange(6)},
+                        attrs={"title": "t"})
+    source["v"].encoding["dtype"] = "float32"
+    pipeline = filter(v > 0) >> mutate(w=v * 2)
+    eager, blocked = (tidy(source) >> pipeline).collect(), (tidy(source, blocks={"time": 2}) >> pipeline).collect()
+    xr.testing.assert_identical(blocked, eager)
+    assert blocked.attrs == eager.attrs == {"title": "t"}
+    assert blocked["v"].attrs == {"units": "K"} and blocked["station"].attrs == eager["station"].attrs
+    assert blocked["v"].encoding == eager["v"].encoding
+
+
+def test_a_frame_s_field_axis_and_backend_carry_into_blocks_and_its_groups_are_refused(npy):
+    _, values = npy
+    frame = read_array(values, dims={"point": infer, "feature": 5}, labels={"feature": NAMES}, field_axis="feature")
+    blocked = tidy(frame, blocks={"point": 3_000})
+    assert blocked._backend is frame._backend and blocked._field_axis == "feature"
+    want = in_memory(values, PIPELINE, COLUMNS)
+    out = blocked >> PIPELINE
+    for name in COLUMNS:
+        assert same_bits(out >> pull(name), want[name]), name
+    with pytest.raises(TidyError, match="ungroup\\(\\) first"):
+        tidy(frame >> group_by(ring), blocks={"point": 3_000})
+    with pytest.raises(TidyError, match='already has field axis "feature"'):
+        tidy(frame, blocks={"point": 3_000}, field_axis="point")
+
+
+def test_a_group_of_missing_values_first_seen_in_a_later_block(tmp_path):
+    values = np.array([[1, 1.0], [1, np.nan], [2, np.nan], [2, np.nan], [3, 5.0], [3, 6.0], [4, np.nan]],
+                      dtype="float32")
+    path = tmp_path / "missing.npy"
+    np.save(path, values)
+    g, v = fields("g", "v")
+    options = dict(dims={"point": infer, "feature": 2}, labels={"feature": ["g", "v"]}, field_axis="feature")
+    for na_rm in (True, False):
+        pipeline = group_by(g) >> summarise(lo=min(v, na_rm=na_rm), hi=max(v, na_rm=na_rm))
+        eager = read_array(values, **options) >> pipeline
+        for rows in (1, 2, 3):
+            blocked = read_array(path, blocks=rows, **options) >> pipeline
+            for name in ("lo", "hi"):
+                assert same_bits(blocked >> pull(name), eager >> pull(name)), (na_rm, rows, name)
+
+
+def test_a_single_bins_key_lists_every_bin_as_in_memory(tmp_path):
+    values = np.array([[1, 1.0], [1, np.nan], [2, 5.0], [2, 6.0], [3, 13.0]], dtype="float32")
+    path = tmp_path / "bins.npy"
+    np.save(path, values)
+    g, v = fields("g", "v")
+    options = dict(dims={"point": infer, "feature": 2}, labels={"feature": ["g", "v"]}, field_axis="feature")
+    summary = summarise(c=n(), s=sum(v), m=mean(v), lo=min(v), hi=max(v), sd=std(v), a=any(v > 0), al=all(v > 0),
+                        s2=sum(v, na_rm=True), lo2=min(v, na_rm=True))
+    columns = ["v_bin", "c", "s", "m", "lo", "hi", "sd", "a", "al", "s2", "lo2"]
+    edges = [0, 2, 4, 6, 8, 10, 12, 14]
+    for pipeline in (group_by(bins(v, edges)) >> summary, group_by(bins(v, edges), dropna=False) >> summary):
+        eager = read_array(values, **options) >> pipeline
+        for rows in (1, 2, 5):
+            blocked = read_array(path, blocks=rows, **options) >> pipeline
+            for name in columns:
+                got, want = blocked >> pull(name), eager >> pull(name)
+                if name == "sd":
+                    assert got.dtype == want.dtype and np.allclose(got, want, equal_nan=True), (rows, name)
+                else:
+                    assert same_bits(got, want), (rows, name)
+    several = group_by(bins(v, edges), g, axis="cell") >> summarise(c=n())  # several keys: the combinations seen
+    assert same_bits(read_array(path, blocks=2, **options) >> several >> pull("c"),
+                     read_array(values, **options) >> several >> pull("c"))
+
+
+def test_variables_with_different_dask_chunks_take_an_explicit_block_size():
+    da = pytest.importorskip("dask.array")
+    xr = pytest.importorskip("xarray")
+    a, b = fields("a", "b")
+    source = xr.Dataset({"a": ("point", da.from_array(np.arange(10.0), chunks=2)),
+                         "b": ("point", da.from_array(np.arange(10.0), chunks=5))})
+    out = tidy(source, blocks={"point": 4}) >> summarise(t=sum(a + b))
+    assert out >> pull("t") == 90.0
+    with pytest.raises(ReadError, match="not chunked along point"):
+        tidy(source, blocks={"point": "chunks"})
+
+
+def test_blocks_started_ahead_of_the_one_consumed_next_are_bounded():
+    """A slow first block does not let the pool run ahead through every block: at most threads + 1 are started before
+    the first result is taken, so results waiting to be merged in order stay bounded."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from tidy3a.chunked import _in_order
+
+    release, started = threading.Event(), []
+
+    def work(item):
+        started.append(item)
+        if item == 0:
+            release.wait(5)
+        return item
+
+    with ThreadPoolExecutor(2) as pool:
+        results = _in_order(pool, work, list(range(10)))
+        taken = []
+        consumer = threading.Thread(target=lambda: taken.extend(results))
+        consumer.start()
+        deadline = threading.Event()
+        deadline.wait(0.3)
+        assert sorted(started) == [0, 1, 2]  # threads + 1, the rest waiting on the first
+        release.set()
+        consumer.join(5)
+    assert taken == list(range(10))
+
+
+def test_exact_sums_are_finished_as_each_pass_ends(npy, monkeypatch):
+    from labelarray import sums as labelarray_sums
+
+    finished = []
+    real = labelarray_sums.exact_results
+
+    def counting(buckets, op, na_rm):
+        finished.append(buckets.nbytes)
+        return real(buckets, op, na_rm)
+
+    monkeypatch.setattr(labelarray_sums, "exact_results", counting)
+    frame = read_array(npy[0], dims={"point": infer, "feature": 5}, labels={"feature": NAMES}, field_axis="feature",
+                       blocks=3_000)
+    totals = frame >> group_by(ring) >> summarise(total=sum(intensity))
+    halves = frame >> group_by(ring) >> summarise(total=sum(intensity * 0.5))
+    got, _ = scan(totals, halves)
+    assert len(finished) == 2  # each request's buckets finished within its pass, not kept until the end
+    assert same_bits(got >> pull("total"), in_memory(npy[1], group_by(ring) >> summarise(total=sum(intensity)),
+                                                     ["total"])["total"])

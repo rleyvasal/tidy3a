@@ -248,9 +248,10 @@ several at once, with or without `dropna`), then `summarise` of `n`,
 `sum`, `mean`, `min`, `max`, `std`, `var`, `any`, `all`, or expressions
 of them (`mean(x) / n()`). Each key's groups merge across blocks in the
 order `group_by` gives them, and float32 sums and means are the same bits
-as in memory whatever the block size; float64 and integer sums and means,
-and `std` and `var`, add per block in float64 and are close, not
-identical. A pipeline without `summarise` joins the blocks' rows in memory,
+as in memory whatever the block size; float64 sums and means, integer
+means, and `std` and `var` add per block in float64 and are close, not
+identical; integer sums add in int64, wrapping as `np.sum` does. A
+pipeline without `summarise` joins the blocks' rows in memory,
 for data that fits once filtered; a verb that needs the whole axis
 (`slice`, joins) then runs on the joined rows. What a block cannot answer
 (a reduction inside `mutate` or `filter`, a grouped `mutate`, an axis key,

@@ -270,6 +270,30 @@ class NumpyBackend:
         coords[axis] = labels_from(kept)
         return out.evolve(coords=coords)
 
+    def label_positions(self, data: Collection, axis: Hashable, start: int) -> Collection:
+        coords = dict(data.coords)
+        coords[axis] = labels_from(np.arange(start + 1, start + 1 + data.sizes[axis]))
+        return data.evolve(coords=coords)
+
+    def unlabel(self, data: Collection, axis: Hashable) -> Collection:
+        return data.evolve(coords={dim: labels for dim, labels in data.coords.items() if dim != axis})
+
+    def join_along(self, parts: Sequence[Collection], axis: Hashable) -> Collection:
+        """The parts' variables along *axis* concatenated; the rest, and the attributes, come from the first part."""
+        first = parts[0]
+        variables = {}
+        for name, variable in first.variables.items():
+            if axis in variable.dims:
+                number = variable.dims.index(axis)
+                values = np.concatenate([part.variables[name].data for part in parts], number)
+                variables[name] = Array._make(values, variable.dims, {}, variable.attrs, name)
+            else:
+                variables[name] = variable
+        coords = dict(first.coords)
+        if axis in coords:
+            coords[axis] = labels_from(np.concatenate([part.coords[axis] for part in parts]))
+        return Collection(variables, coords, first.attrs, first.coord_attrs)
+
     # ── Arrays ──────────────────────────────────────────────────────────────
 
     def is_array(self, value: Any) -> bool:

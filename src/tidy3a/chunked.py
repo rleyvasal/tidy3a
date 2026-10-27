@@ -59,7 +59,7 @@ import numpy as np
 from labelarray import sums
 from labelarray.transforms import Bins, Duration, GridCells
 
-from tidy3a.errors import BlockError, ReadError, SummariseError, TidyError, translating
+from tidy3a.errors import BlockError, FilterError, MutateError, ReadError, SummariseError, TidyError, translating
 from tidy3a.expr import (
     AxisKey,
     BinOp,
@@ -152,7 +152,10 @@ class DatasetSource(Source):
 
 def _chunks_along(data: Any, axis: str) -> list[tuple[int, int]] | None:
     """A Dask-backed dataset's chunk boundaries along *axis*, or None when it is not chunked there."""
-    chunks = getattr(data, "chunks", None)
+    try:
+        chunks = getattr(data, "chunks", None)
+    except ValueError:  # the variables' chunks along the axis disagree: no boundaries to take
+        return None
     if not chunks:
         return None
     sizes = chunks.get(axis) if isinstance(chunks, Mapping) else chunks[data.dims.index(axis)]
@@ -169,7 +172,7 @@ class Blocks:
     source: Source
     rows: int | str  # positions per block, or "chunks" for the source's own boundaries
     threads: int
-    labelled: bool = False  # else filter labels the axis by position, counted within each block
+    labelled: bool = False  # else each block is labelled with its positions, so a verb sees them as in memory
 
     @property
     def axis(self) -> str:
@@ -187,7 +190,10 @@ class Blocks:
         return [(start, min(start + rows, self.size)) for start in range(0, self.size, rows)] or [(0, 0)]
 
     def load(self, start: int, stop: int) -> TidyArray:
-        return self.source.block(start, stop)
+        block = self.source.block(start, stop)
+        if self.labelled:
+            return block
+        return block._evolve(block._backend.label_positions(block._data, self.axis, start))
 
     def words(self, counted: str = "") -> str:
         """How many blocks of what: "7 blocks of 3,000 positions on point", or "7 on point, the data's own chunks"."""
@@ -218,7 +224,7 @@ class ChunkedFrame(TidyArray):
     def open(cls, source: Source, rows: int | str, threads: int) -> ChunkedFrame:
         check_rows(rows, threads, source)
         blocks = Blocks(source, rows, threads)
-        first = blocks.load(*blocks.spans[0])
+        first = source.block(*blocks.spans[0])  # shown as in memory: the first block's positions are its own
         blocks = Blocks(source, rows, threads, first._backend.has_labels(first._data, source.axis))
         frame = cls._wrap(first, blocks, ())
         count = len(blocks.spans)
@@ -298,12 +304,22 @@ def _check(frame: ChunkedFrame, verb: Any, result: TidyArray, steps: Sequence[An
                          f"needs every position of a group, which blocks split; {WHOLE_AXIS}")
     if operation in ("filter", "mutate"):
         values = [step.value for step in verb._arguments] if operation == "mutate" else verb._arguments
+        error = MutateError if operation == "mutate" else FilterError
+        axis = frame._blocks.axis
         for value in values:
             node = as_expr(value)
-            found = next((inner for inner in walk(node) if isinstance(inner, Reduce)), None)
-            if found is not None:
-                raise BlockError(f"{verb.text}: {found.text()} needs the whole axis, which blocks split; "
-                                 f"summarise it per group instead, or {WHOLE_AXIS}")
+            if hasattr(node, "lower"):  # a formula: what it sums is known once it is read against the data
+                node, _ = node.lower(Context(frame, verb=operation, error=error, grouped=False))
+            for inner in walk(node):
+                if isinstance(inner, Reduce):
+                    raise BlockError(f"{verb.text}: {inner.text()} needs the whole axis, which blocks split; "
+                                     f"summarise it per group instead, or {WHOLE_AXIS}")
+                if isinstance(inner, Call) and inner.name == "dot":
+                    over = inner.options.get("over")
+                    over = [over] if isinstance(over, str) else list(over or [])
+                    if not over or axis in over:
+                        raise BlockError(f"{verb.text}: {inner.text()} sums over {axis}, which blocks split; "
+                                         f"name other axes with over=, or {WHOLE_AXIS}")
         return None
     if operation == "group_by":
         for key in result._groups:
@@ -512,6 +528,22 @@ class _Table:
         if local is not None:
             self.add(_combined(local, self), counts, pieces)
 
+    def complete(self) -> None:
+        """A single ``bins()`` key lists every bin, as it does in memory: the bins no block had get an empty group."""
+        plan = self.plan
+        if (self.keys is None or len(self.parts) != 1 or isinstance(plan.key, MultiKey)
+                or not isinstance(self.parts[0].key.transform, Bins)):
+            return
+        full = np.arange(self.parts[0].size, dtype=np.int64)
+        if len(full) == len(self.keys):
+            return
+        where = np.searchsorted(full, self.keys)
+        self.counts = _spread(self.counts, where, len(full), 0)
+        for hidden, (kind, held) in self.pieces.items():
+            fill = _fill(kind, held.dtype, plan.reductions[hidden])
+            self.pieces[hidden] = (kind, _spread(held, where, len(full), fill))
+        self.keys = full
+
     def settle(self) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
         """Each reduction's values per combination from the pieces, and, per float32 sum, the combinations the
         error bound cannot settle (``labelarray.sums.settle``), whose exact sums a second pass finds."""
@@ -528,7 +560,9 @@ class _Table:
                 columns[hidden] = result
                 if undecided.any():
                     unsure[hidden] = np.flatnonzero(undecided)
-            elif kind in ("extreme", "flag"):
+            elif kind == "extreme":  # an empty group has no extreme, whatever filled its slot
+                columns[hidden] = np.where(self.counts > 0, held, np.nan) if held.dtype.kind == "f" else held
+            elif kind == "flag":
                 columns[hidden] = held
             elif kind == "moments":
                 present, _, squares, missing = held
@@ -539,21 +573,21 @@ class _Table:
                 columns[hidden] = np.sqrt(variance) if node.op == "std" else variance
             elif kind == "float":
                 total, present, counted = held
-                result = total if node.op == "sum" else total / (present if node.na_rm else counted)
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    result = total if node.op == "sum" else total / (present if node.na_rm else counted)
                 columns[hidden] = _at_least(result, present, node)
             else:
                 total, counted = held
-                result = total if node.op == "sum" else total / counted
-                columns[hidden] = _at_least(result, counted, node)
+                columns[hidden] = _at_least(total, counted, node)
         return columns, unsure
 
     def finish(self, columns: dict[str, np.ndarray],
                exact: dict[str, list[tuple[np.ndarray, np.ndarray]]]) -> dict[str, np.ndarray]:
-        """*columns* with the exact sums the second pass found (``labelarray.sums.exact_results``) in their places,
-        and a float32 sum's ``min_count`` applied, as ``from_chunks`` does in memory."""
+        """*columns* with the exact sums the second pass found in their places, and a float32 sum's ``min_count``
+        applied, as ``from_chunks`` does in memory."""
         for hidden, node in self.plan.reductions.items():
-            for chosen, buckets in exact.get(hidden, ()):
-                columns[hidden][chosen] = sums.exact_results(buckets, node.op, node.na_rm)
+            for chosen, found in exact.get(hidden, ()):
+                columns[hidden][chosen] = found
             if node.op == "sum" and node.min_count is not None and self.pieces[hidden][0] == "estimate":
                 present = self.pieces[hidden][1][sums.PRESENT]
                 columns[hidden] = np.where(present >= node.min_count, columns[hidden], np.float32(np.nan))
@@ -612,9 +646,9 @@ class _Leaf:
 
     frame: ChunkedFrame
     table: _Table | None  # a summarised frame's merging table; else the frame joins its rows
-    parts: list[tuple[int, dict]]  # a joining frame's rows per block, with the block's start
+    parts: list[Any]  # a joining frame's rows per block, as the backend holds them
     exact: dict[str, list[tuple[np.ndarray, np.ndarray]]]  # per float32 sum: the combinations a second pass settled
-    # (their places in the table, their buckets added over the blocks)
+    # (their places in the table, their correctly rounded results)
 
 
 class _Node:
@@ -655,6 +689,19 @@ def _walk(node: _Node, frame: TidyArray, visit: Callable[[_Leaf, TidyArray], Non
         _walk(child, frame >> verb, visit)
 
 
+def _in_order(pool: ThreadPoolExecutor, work: Callable[[Any], Any], items: Sequence[Any]):
+    """*work* on each item, *threads* + 1 at most started ahead of the one whose result is given next, so the results
+    waiting to be taken in order stay bounded however unevenly the blocks take."""
+    ahead = pool._max_workers + 1
+    pending = [pool.submit(work, item) for item in items[:ahead]]
+    for item in items[ahead:]:
+        done = pending.pop(0).result()
+        pending.append(pool.submit(work, item))
+        yield done
+    for future in pending:
+        yield future.result()
+
+
 def _scan(frames: Sequence[ChunkedFrame]) -> None:
     """One pass over the blocks for *frames*, then the shared second pass; each frame is left holding its result."""
     blocks = frames[0]._blocks
@@ -666,7 +713,7 @@ def _scan(frames: Sequence[ChunkedFrame]) -> None:
 
         def visit(leaf: _Leaf, frame: TidyArray) -> None:
             if leaf.table is None:
-                found.append((leaf, (span[0], frame.to_dict())))
+                found.append((leaf, frame._data))
             else:
                 found.append((leaf, _partial(leaf.table.plan, frame, blocks.axis)))
 
@@ -674,7 +721,7 @@ def _scan(frames: Sequence[ChunkedFrame]) -> None:
         return found
 
     with ThreadPoolExecutor(blocks.threads) as pool:
-        for found in pool.map(block, blocks.spans):  # merged as the blocks arrive, in order
+        for found in _in_order(pool, block, blocks.spans):  # merged as the blocks arrive, in order
             for leaf, part in found:
                 if leaf.table is None:
                     leaf.parts.append(part)
@@ -683,6 +730,7 @@ def _scan(frames: Sequence[ChunkedFrame]) -> None:
         settled: dict[int, tuple[dict[str, np.ndarray], dict[str, np.ndarray]]] = {}
         for leaf in leaves:
             if leaf.table is not None and leaf.table.keys is not None:
+                leaf.table.complete()
                 settled[id(leaf)] = leaf.table.settle()
         _exact_pass(leaves, blocks, pool, {key: unsure for key, (_, unsure) in settled.items()})
     for leaf in leaves:
@@ -736,12 +784,15 @@ def _exact_pass(leaves: Sequence[_Leaf], blocks: Blocks, pool: ThreadPoolExecuto
             return buckets
 
         totals: dict[int, np.ndarray] = {}
-        for buckets in pool.map(block, blocks.spans):  # the buckets add in any order
+        for buckets in _in_order(pool, block, blocks.spans):  # the buckets add in any order
             for index, part in buckets:
                 totals[index] = part if index not in totals else totals[index] + part
-        for index, (leaf, hidden, chosen) in enumerate(requests):
+        for index, (leaf, hidden, chosen) in enumerate(requests):  # finished now, so the buckets go with the pass
             if index in totals:
-                leaf.exact.setdefault(hidden, []).append((chosen, totals[index]))
+                node = leaf.table.plan.reductions[hidden]  # type: ignore[union-attr]
+                leaf.exact.setdefault(hidden, []).append((chosen, sums.exact_results(totals[index], node.op,
+                                                                                     node.na_rm)))
+        del totals
 
 
 def _table_codes(table: _Table, rows: _Rows) -> np.ndarray:
@@ -878,7 +929,9 @@ def _pieces(node: Reduce, value: np.ndarray, codes: np.ndarray, count: int) -> t
         summed = np.where(missing, 0.0, value) if node.na_rm else value
         return "float", np.stack([np.bincount(codes, weights=summed, minlength=count),
                                   np.bincount(codes, weights=~missing, minlength=count), counted])
-    if value.dtype.kind in "biu":
+    if value.dtype.kind in "biu" and node.op == "mean":  # added in float64, as np.mean adds integers
+        return "float", np.stack([np.bincount(codes, weights=value, minlength=count), counted, counted])
+    if value.dtype.kind in "biu":  # added in int64, wrapping as np.sum does
         order = np.argsort(codes, kind="stable")
         starts = np.concatenate([[0], np.cumsum(np.bincount(codes, minlength=count))[:-1]])
         return "int", np.stack([np.add.reduceat(value[order].astype(np.int64), starts), counted.astype(np.int64)])
@@ -923,8 +976,8 @@ def _fill(kind: str, dtype: np.dtype, node: Reduce) -> Any:
         return node.op == "all"
     if kind != "extreme":
         return 0
-    if dtype.kind == "f":
-        return np.inf if node.op == "min" else -np.inf
+    if dtype.kind == "f":  # NaN where NaN is skipped (fmin, fmax), so a group of NaN stays NaN; else the far end
+        return np.nan if node.na_rm else (np.inf if node.op == "min" else -np.inf)
     limits = np.iinfo(dtype)
     return limits.max if node.op == "min" else limits.min
 
@@ -994,28 +1047,12 @@ def _notes(frame: ChunkedFrame, plan: _Plan, table: _Table) -> list[str]:
 # ── Rows kept, concatenated ─────────────────────────────────────────────────
 
 
-def _joined(frame: ChunkedFrame, parts: Sequence[tuple[int, dict]]) -> TidyArray:
-    """The blocks' rows after the row-wise verbs (each block's start and ``to_dict()``), joined along the blocked axis,
-    in memory."""
+def _joined(frame: ChunkedFrame, parts: Sequence[Any]) -> TidyArray:
+    """The blocks' rows after the row-wise verbs, joined along the blocked axis, in memory."""
     blocks, backend, axis = frame._blocks, frame._backend, frame._blocks.axis
-    first = parts[0][1]
-    variables: dict[Hashable, tuple] = {}
-    for name, entry in first["data_vars"].items():
-        dims = tuple(entry["dims"])
-        if axis in dims:
-            number = dims.index(axis)
-            variables[name] = (dims, np.concatenate([part["data_vars"][name]["data"] for _, part in parts], number))
-        else:
-            variables[name] = (dims, entry["data"])
-    coords: dict[Hashable, np.ndarray] = {}
-    for name, entry in first["coords"].items():
-        if name != axis:
-            coords[name] = entry["data"]
-        elif blocks.labelled:
-            coords[name] = np.concatenate([part["coords"][name]["data"] for _, part in parts])
-        else:  # filter labelled the axis with the positions kept, counted within each block
-            coords[name] = np.concatenate([part["coords"][name]["data"] + start for start, part in parts])
-    data = backend.from_records(variables, coords)
+    data = backend.join_along(parts, axis)
+    if not blocks.labelled and not any(step._operation == "filter" for step in frame._steps):
+        data = backend.unlabel(data, axis)  # the blocks' positions served the verbs; in memory the axis has no labels
     size = backend.sizes(data).get(axis, 0)
     notes = [note for note in frame._notes if size == 0 or "(all removed by" not in note]
     result = TidyArray(data, backend=backend, field_axis=frame._field_axis, origins=frame._origins,

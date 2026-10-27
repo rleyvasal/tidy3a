@@ -192,7 +192,17 @@ def tidy(data: Any, *, axis: str | None = None, field_axis: str | None = None,
     if blocks is not None:
         from tidy3a.chunked import ChunkedFrame, DatasetSource
 
-        source = data.to_xarray() if isinstance(data, TidyArray) else data
+        source = data
+        if isinstance(data, TidyArray):  # its field axis and backend carry over; its groups cannot
+            if data._groups:
+                raise TidyError("blocks= reads data in blocks, and a grouping needs every position of a group; "
+                                "ungroup() first, then group_by() the blocked frame")
+            if field_axis is not None and data._field_axis is not None and field_axis != data._field_axis:
+                raise TidyError(f'this data already has field axis "{data._field_axis}"; '
+                                f'it cannot also use field_axis="{field_axis}"')
+            field_axis = data._field_axis if field_axis is None else field_axis
+            backend = data._backend.name if backend is None else backend
+            source = data.to_xarray()
         blocked, rows = _blocked_axis(blocks, source)
         return ChunkedFrame.open(DatasetSource(source, blocked, field_axis, backend), rows, threads)
     if isinstance(data, TidyArray):

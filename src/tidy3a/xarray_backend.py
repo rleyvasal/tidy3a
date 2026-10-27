@@ -219,6 +219,23 @@ class XarrayBackend:
         np.add(kept, 1, out=kept)  # the indexer has been used; it becomes the labels
         return out.assign_coords({axis: kept})
 
+    def label_positions(self, data: xr.Dataset, axis: Hashable, start: int) -> xr.Dataset:
+        return data.assign_coords({axis: np.arange(start + 1, start + 1 + data.sizes[axis])})
+
+    def unlabel(self, data: xr.Dataset, axis: Hashable) -> xr.Dataset:
+        return data.drop_vars(axis, errors="ignore")
+
+    def join_along(self, parts: Sequence[xr.Dataset], axis: Hashable) -> xr.Dataset:
+        """``xr.concat`` along an existing axis: only what varies along it is joined, the rest comes from the first
+        part, and the first part's attributes and storage encodings are kept."""
+        first = parts[0]
+        joined = xr.concat(list(parts), dim=axis, data_vars="minimal", coords="minimal", compat="override",
+                           join="exact", combine_attrs="override")
+        for name, variable in joined.variables.items():
+            if name in first.variables:
+                variable.encoding = dict(first.variables[name].encoding)
+        return joined
+
     # ── Arrays ──────────────────────────────────────────────────────────────
 
     def is_array(self, value: Any) -> bool:
