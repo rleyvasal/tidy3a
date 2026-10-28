@@ -377,7 +377,7 @@ class Median(Reduction):
         groups = np.flatnonzero(wanted)
         if not len(groups):
             return column, []
-        low, high, fraction = self._ranks(present[groups], node)
+        low, high, fraction = self._ranks(present[groups], node, dtype)
         two = high != low
         group = np.concatenate([groups, groups[two]])
         rank = np.concatenate([low, high[two]]).astype(np.int64)
@@ -395,7 +395,8 @@ class Median(Reduction):
     def _result_type(self, dtype: np.dtype, node: Any) -> np.dtype:
         return np.median(np.zeros(1, dtype)).dtype
 
-    def _ranks(self, present: np.ndarray, node: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    def _ranks(self, present: np.ndarray, node: Any, dtype: np.dtype) -> tuple[np.ndarray, np.ndarray,
+                                                                               np.ndarray | None]:
         """The ranks to find per group: the middle one, or the two middle ones of an even count."""
         return (present - 1) // 2, present // 2, None
 
@@ -456,31 +457,48 @@ class Median(Reduction):
         return np.where(alone, np.asarray(one).astype(middle.dtype), middle)  # an odd count: the value itself
 
 
+# NumPy 2.0 to 2.3 convert a quantile's q to the type of float data, so a float32 quantile's virtual index is computed
+# in float32; NumPy 2.4 keeps q a Python float, and computes it in float64. The block quantile follows the NumPy it runs.
+_INDEX_IN_DATA_TYPE = np.lib.NumpyVersion(np.__version__) < "2.4.0"
+
+
+def _index_type(dtype: np.dtype) -> np.dtype | None:
+    """The type NumPy computes a quantile's virtual index in for values of *dtype*, if not float64."""
+    return dtype if _INDEX_IN_DATA_TYPE and dtype.kind == "f" and dtype.itemsize < 8 else None
+
+
 class Quantile(Median):
     """``quantile(x, q)`` on blocks, as the median: NumPy's linear rule takes the values at ranks ``floor(h)`` and the
-    next (the last, at the end), ``h = q × (n − 1)``, so the passes find both, and ``np.quantile`` of the two at
+    next (the last, at the end), ``h = (n − 1) × q``, so the passes find both, and ``np.quantile`` of the two at
     ``h − floor(h)`` gives each group's answer as NumPy gives it from all of them, the same bits, its edge cases
-    included (an infinity next to the rank makes NaN, as in NumPy)."""
+    included (an infinity next to the rank makes NaN, as in NumPy). ``h`` is computed in the type the installed NumPy
+    computes it in (``_index_type``), and its fraction handed back in that type, so the bits follow the NumPy version."""
 
     name = "quantile"
 
     def _result_type(self, dtype, node):
         return np.quantile(np.zeros(1, dtype), node.q).dtype
 
-    def _ranks(self, present, node):
-        place = node.q * (present - 1)  # NumPy's virtual index, computed as it computes it
+    def _ranks(self, present, node, dtype):
+        index = _index_type(dtype)
+        if index is None:
+            place = (present - 1) * node.q  # NumPy's virtual index, as it computes it: in float64
+        else:
+            place = (present - 1).astype(index) * index.type(node.q)  # or in the data's float type
         low = np.floor(place).astype(np.int64)
         return low, np.minimum(low + 1, present - 1), place - low
 
     def _combine(self, one, other, alone, state, groups):
         fraction = state.fraction[groups]
+        index = _index_type(state.dtype)
         result = np.empty(len(groups), dtype=self._result_type(state.dtype, _Q(0.5)))
         pairs = np.stack([one, other], axis=1)
         with np.errstate(all="ignore"), warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
             for place in np.unique(fraction):  # groups with the same place in one call
                 rows = fraction == place
-                result[rows] = np.quantile(pairs[rows], place, axis=1)
+                weight = float(place) if index is None else index.type(place)  # the type NumPy's own weight has
+                result[rows] = np.quantile(pairs[rows], weight, axis=1)
         return result
 
 
