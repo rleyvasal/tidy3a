@@ -783,11 +783,13 @@ class _Table:
         if float(np.prod(self.sizes, dtype=np.float64)) >= 2.0**62:
             raise BlockError("too many combinations of the keys' groups to number on blocks; " + WHOLE_AXIS)
 
-    def add(self, keys: np.ndarray, counts: np.ndarray, pieces: dict[str, tuple[str, np.ndarray]]) -> None:
-        """A block's combinations, their counts, and each reduction's pieces, which add."""
+    def add(self, keys: np.ndarray, counts: np.ndarray, pieces: dict[str, tuple[str, np.ndarray]],
+            blocks: int = 1) -> None:
+        """*blocks* blocks' combinations (sorted, in the table's codes), their counts, and each reduction's pieces,
+        which add."""
         if len(keys) == 0:
             return
-        self.blocks += 1
+        self.blocks += blocks
         if self.keys is None:
             self.keys, self.counts, self.pieces = keys, counts, dict(pieces)
             return
@@ -813,6 +815,31 @@ class _Table:
         self.dropped += dropped
         if local is not None:
             self.add(_combined(local, self), counts, pieces)
+
+    def combine(self, other: _Table) -> None:
+        """*other* taken into this table, as if its blocks had been merged here after this table's (plan milestone
+        15): each key's groups widened by other's, both tables' codes renumbered to match, and its counts and pieces
+        merged by the reductions' own merges, which hold in any order."""
+        theirs = list(np.unravel_index(other.keys, other.sizes)) if other.keys is not None and other.parts else None
+        for index, (part, their) in enumerate(zip(self.parts, other.parts)):
+            part.dropped += their.dropped
+            if their.labels is None:
+                continue
+            old = self.sizes
+            moved = part.widen(their.labels, their.missing)
+            if moved is not None and self.keys is not None:
+                codes = list(np.unravel_index(self.keys, old))
+                codes[index] = moved[codes[index]]
+                self.keys = np.ravel_multi_index(codes, self.sizes)
+            if theirs is not None:
+                theirs[index] = part.codes(their.labels, their.missing is not None)[theirs[index]]
+        if float(np.prod(self.sizes, dtype=np.float64)) >= 2.0**62:
+            raise BlockError("too many combinations of the keys' groups to number on blocks; " + WHOLE_AXIS)
+        self.dropped += other.dropped
+        if other.keys is not None:
+            keys = np.ravel_multi_index(theirs, self.sizes) if theirs is not None else other.keys
+            self.add(keys, other.counts.copy(),  # copies: a table holds its arrays and adds into them
+                     {hidden: (kind, held.copy()) for hidden, (kind, held) in other.pieces.items()}, other.blocks)
 
     def complete(self) -> None:
         """A single ``bins()`` key lists every bin, as it does in memory: the bins no block had get an empty group."""
