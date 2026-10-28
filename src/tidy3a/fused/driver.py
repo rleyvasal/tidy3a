@@ -90,9 +90,10 @@ class Fused:
             groups = self._sorted(positions, keep, ks, missing, ranges)
         found, sizes, ranked, dense = groups
         combinations = math.prod(sizes) if sizes else 1
-        if combinations > DENSE_GROUPS or combinations * self.group_bytes > self.limit:
-            return None, (f"its keys' groups make {combinations:,} combinations, too many for dense tables of "
-                          f"{_bytes(self.limit)}")
+        if combinations > DENSE_GROUPS:  # the reasons say no block's own count, so the result counts blocks by them
+            return None, f"its keys' groups make more than {DENSE_GROUPS:,} combinations"
+        if combinations * self.group_bytes > self.limit:
+            return None, f"its keys' groups' dense tables would take more than {_bytes(self.limit)}"
         if dense is None:
             dense = np.empty(positions, np.intp)
             valid = self.dense(positions, keep, ks, missing, *ranked, np.array(sizes, np.int64), dense)

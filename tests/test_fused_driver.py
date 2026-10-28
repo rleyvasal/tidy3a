@@ -116,9 +116,14 @@ def test_too_many_groups_for_dense_tables_run_on_numpy(monkeypatch):
     values = cloud_values()
     frame = read_array(values, blocks=3_000, **OPTIONS) >> SUMMARIES["rings kept"]
     frame.collect()
-    assert frame._result._notes[-1].startswith("ran: 7 blocks on NumPy, as its keys' groups make 41 combinations, "
-                                               "too many for dense tables")
+    assert frame._result._notes[-1] == "ran: 7 blocks on NumPy, as its keys' groups make more than 30 combinations"
     same_bits(frame, read_array(values, **OPTIONS) >> SUMMARIES["rings kept"])
+    monkeypatch.setattr(driver, "DENSE_GROUPS", 16_000_000)
+    monkeypatch.setattr(driver, "DENSE_BYTES", 1_000)  # 41 groups of 88 bytes each
+    frame = read_array(values, blocks=3_000, **OPTIONS) >> SUMMARIES["rings kept"]
+    frame.collect()
+    assert frame._result._notes[-1] == ("ran: 7 blocks on NumPy, as its keys' groups' dense tables would take more "
+                                        "than 1 kB")
 
 
 def test_a_kernel_numba_refuses_runs_on_numpy(monkeypatch):
