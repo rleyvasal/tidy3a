@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- With `fast` installed, a summary of data read in blocks whose every step
+  compiles runs each block in compiled passes (Numba, released from the
+  GIL) instead of NumPy's steps: the filters and the keys' groups in one,
+  every reduction in another, the block's table merging as before. What
+  compiles: `+ - * /`, `**` with the exponents 2, 0.5, -1, and 1,
+  comparisons, `& | ~`, `sqrt`, `abs`, `floor`, and `if_else` on booleans,
+  integers, float32, and float64; keys of integer, boolean, and whole float
+  fields and their `cells`, `bins`, and `rounded`; the built-in reductions.
+  The rest runs on NumPy as before, and so does a block whose values the
+  kernel cannot match NumPy on, or whose groups are too many for dense
+  tables (16 million combinations, or a block's share of `memory=`). The
+  results are NumPy's bits, but for the sign of a tie of -0.0 and +0.0 in
+  `min` and `max` on x86, where NumPy's follows the order it meets them.
+  `repr` says what is planned and `explain()` every step that does not
+  compile and why; a result notes how its blocks ran. On 12 threads the
+  rings summary of 40M points took 0.10 s against 0.42 s on NumPy, and the
+  daytime summary of 2,000 grids 0.038 s against 0.069 s.
+  `TIDY3A_COMPILED=0` turns compiling off.
+- Compiled kernels are kept in `~/.cache/tidy3a/kernels` (`TIDY3A_KERNELS`
+  moves them), named by a hash of their source and of the tidy3a,
+  labelarray, Numba, llvmlite, NumPy, and Python versions and the CPU, so a
+  later run reads them instead of compiling; where the folder cannot be
+  written, they are compiled in memory each run.
+- Tested on free-threaded Python 3.14 with the GIL off, in CI and
+  `scripts/check.sh`. The new `test` extra is `dev` without Polars, which
+  has no free-threaded wheels; `scripts/check.sh` asks uv for the standard
+  build of every other version.
 - In notebooks, a variable named like a builtin or a tidy3a helper (`id`,
   `type`, `max`, `n`) works as a bare name wherever only data fits: a whole
   argument, either side of an operator, and the arguments of tidy3a's

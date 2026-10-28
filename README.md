@@ -20,11 +20,12 @@ Requires Python 3.11 or newer.
 ```bash
 pip install tidy3a                  # NumPy and labelarray only
 pip install "tidy3a[xarray]"        # with xarray and pandas: xarray inputs and outputs, lazy and file-backed data
-pip install "tidy3a[xarray,fast]"   # also Numba, for compiled grouped sums and means
+pip install "tidy3a[xarray,fast]"   # also Numba: compiled grouped sums and means, and summaries of blocks
 ```
 
 Results are the same with or without `fast`; it only makes large grouped
-sums and means faster.
+sums and means, and summaries of data read in blocks, faster. tidy3a is
+tested on Python 3.11 to 3.14 and on free-threaded 3.14 with the GIL off.
 
 ## Quick start
 
@@ -312,6 +313,39 @@ step grouped by month does, the reductions take each position's values
 together, which makes such summaries several times faster on any number
 of threads.
 
+With `fast` installed, a summary whose every step compiles runs each block
+in a few compiled passes instead of NumPy's steps, each of which makes
+whole arrays: one tests the filters and places each key's value, one adds
+every value into its group's reductions. They release the GIL, so blocks
+on many threads keep scaling. What compiles:
+`+ - * /`, `**` with the exponents 2, 0.5, -1, and 1 (so
+`\sqrt{x^2 + y^2 + z^2}` does), comparisons, `& | ~`, `sqrt`, `abs`,
+`floor`, and `if_else`, on booleans, integers, float32, and float64; keys
+of integer, boolean, and whole float fields and their `cells`, `bins`, and
+`rounded`; and the built-in reductions. The rest (`exp`, `log`, the
+trigonometric functions, other powers, `//`, `%`, half-precision and
+complex values, time and text keys, a reduction of your own) runs on NumPy
+as before. Before a run, `repr` says which ("planned run: a compiled kernel
+a block", or "NumPy, as mutate(e = exp(x)): exp() runs on NumPy") and
+`explain()` lists every step that does not compile and why; afterwards the
+result notes how its blocks ran ("ran: 40 blocks in a compiled kernel").
+A block runs on NumPy instead, with the same result, where one of its
+values is one the kernel cannot match NumPy on (a float key that is not
+whole, a negative zero, an infinity) or its keys' groups make more than 16
+million combinations, or more than a block's share of `memory=` allows. The
+results are NumPy's bits, but for one case: on x86, NumPy's `min` and `max`
+of a -0.0 and a +0.0 give whichever they meet second, where the kernels,
+as NumPy on ARM, give -0.0 and +0.0. Kernels are compiled the first time
+a summary of their shape runs and kept in `~/.cache/tidy3a/kernels`
+(`TIDY3A_KERNELS` moves them), so later runs, in any process, read them;
+`TIDY3A_COMPILED=0` turns compiling off. On a 12-core machine, the rings
+summary of 40M points in memory (the distance, a filter, and the count and
+mean brightness per ring) took 0.10 s on twelve threads against 0.42 s on
+NumPy, and the daytime summary of 2,000 grids 0.038 s against 0.069 s; the
+540,000-voxel summary gains less (2.41 s against 3.21 s), as most of it is
+merging the blocks' groups and the exact pass of its float32 mean, which
+run on NumPy.
+
 A summarised pipeline is `select`, `filter`, and `mutate` of row-wise
 expressions, `group_by` of value keys (fields, `cells`, `bins`, `rounded`,
 several at once, with or without `dropna`), then `summarise` of `n`,
@@ -446,7 +480,7 @@ first (`nir * 1.0 - red`) when a result can be negative.
 | Selecting fields | `where`, `starts_with`, `ends_with`, `contains`, `matches`, `everything`, `is_numeric`, … |
 | Plans | `explain()` (each step and its effect), `plan()` (the verbs as a pipeline), `verb >> verb` (a `Pipeline`), `Pipeline.explain(data, head=)` |
 | Results | `pull`, `collect()` (an xarray `Dataset`), `to_xarray()`, `to_dict()` (NumPy arrays, no xarray needed), `as_table()` (a Polars DataFrame) |
-| Settings | `set_backend` |
+| Settings | `set_backend`; the environment's `TIDY3A_COMPILED=0` (compile nothing) and `TIDY3A_KERNELS` (where kernels are kept) |
 
 An array from the calling code, such as a rotation matrix, can be an xarray
 `DataArray` or a one-variable `read_array(...)` result.
@@ -504,7 +538,9 @@ scripts/check.sh
 ```
 
 `scripts/check.sh --parallel` runs the jobs side by side, for a machine with
-cores to spare (about 2.5 minutes on 24 cores, against 10 one after another).
+cores to spare (about 5 minutes on 24 cores). The jobs are those CI runs:
+Python 3.11 to 3.14, free-threaded 3.14 with the GIL off, the minimum NumPy
+and xarray, and the distributions.
 
 `scripts/bench.sh` times both backends on the reference workloads in a
 pinned environment (`--fast` adds the compiled kernels). The
