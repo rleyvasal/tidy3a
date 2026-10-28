@@ -183,10 +183,11 @@ def _leaf(frame: ChunkedFrame, rows: TidyArray, axis: str) -> tuple[int, int, in
         each = _each(value, axis)
         if droppable or not isinstance(node.arg, Ref) or value.dims[0] != axis:
             values += each * _itemsize(dtype)  # computed, copied without the rows left out, or reshaped
-        spread = 8 * each if each > 1 else 0  # the rows' codes repeated for each value
-        working = REGISTRY[node.op].working(dtype)
+        entry = REGISTRY[node.op]
+        spread = 8 * each if each > 1 and not entry.by_position else 0  # the rows' codes repeated for each value
+        working = entry.working(dtype)
         first = max(first, spread + each * working.first)
-        if working.later:  # a slice at a time (``chunked.SLICE``), the rows' codes in the table per row
+        if working.later:  # a slice at a time (``chunked.SLICE``), the codes repeated in it, the rows' in the table
             later = max(later, 8 * len(keys) + 16)
             fixed = max(fixed, working.fixed + SLICE * (working.later + 8))
         fixed = max(fixed, working.fixed)

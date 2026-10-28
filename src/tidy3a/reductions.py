@@ -82,6 +82,14 @@ class Reduction:
     def partial(self, node: Any, value: np.ndarray, codes: np.ndarray, count: int) -> tuple[str, np.ndarray]:
         raise NotImplementedError
 
+    by_position = False  # whether partial_rows reduces each position's values first, without repeating its code
+
+    def partial_rows(self, node: Any, value: np.ndarray, codes: np.ndarray, count: int,
+                     each: int) -> tuple[str, np.ndarray]:
+        """``partial`` of a block whose positions each hold *each* values, one after another in *value*, with one code
+        per position (plan milestone 15): the built-ins reduce each position first; any other repeats the codes."""
+        return self.partial(node, value, codes if each == 1 else np.repeat(codes, each), count)
+
     def merge(self, node: Any, kind: str, held: np.ndarray, piece: np.ndarray) -> np.ndarray:
         raise NotImplementedError
 
@@ -138,6 +146,13 @@ class Extreme(Reduction):
             value = value.astype(object)
         return "extreme", self.ufunc(node).reduceat(value[order], starts)
 
+    by_position = True
+
+    def partial_rows(self, node, value, codes, count, each):
+        if each == 1 or value.dtype.kind not in "biufmM":  # text compares as objects, a value at a time
+            return super().partial_rows(node, value, codes, count, each)
+        return self.partial(node, self.ufunc(node).reduce(value.reshape(-1, each), axis=1), codes, count)
+
     def merge(self, node, kind, held, piece):
         if held.dtype == object:  # unseen slots take the piece, since no other value compares with them
             unseen = np.frompyfunc(lambda item: item is _UNSEEN, 1, 1)(held).astype(bool)
@@ -187,15 +202,24 @@ class Flag(Reduction):
         return np.logical_or if self.name == "any" else np.logical_and
 
     def partial(self, node, value, codes, count):
+        return self.partial_rows(node, value, codes, count, 1)
+
+    by_position = True
+
+    def partial_rows(self, node, value, codes, count, each):
+        """Each value's flag, and whether it is missing, reduced along its position first, then per group."""
         order, starts = _starts(codes, count)
         flags = value.astype(bool)
         if value.dtype.kind not in "fcmM":
-            return "flag", self.ufunc().reduceat(flags[order], starts)
+            return "flag", self.ufunc().reduceat(self._rows(flags, each)[order], starts)
         missing = np.isnat(value) if value.dtype.kind in "mM" else np.isnan(value)
         flags[missing] = self.name == "all"
         marks = missing if self.name == "any" else ~missing
-        return "flagged", np.stack([self.ufunc().reduceat(flags[order], starts),
-                                    self.ufunc().reduceat(marks[order], starts)])
+        return "flagged", np.stack([self.ufunc().reduceat(self._rows(flags, each)[order], starts),
+                                    self.ufunc().reduceat(self._rows(marks, each)[order], starts)])
+
+    def _rows(self, flags: np.ndarray, each: int) -> np.ndarray:
+        return flags if each == 1 else self.ufunc().reduce(flags.reshape(-1, each), axis=1)
 
     def merge(self, node, kind, held, piece):
         return self.ufunc()(held, piece)
@@ -231,6 +255,27 @@ class Spread(Reduction):
         squares = np.bincount(codes, weights=deviations, minlength=count)
         return "moments", np.stack([present, mean, squares, np.bincount(codes, weights=missing, minlength=count)])
 
+    by_position = True
+
+    def partial_rows(self, node, value, codes, count, each):
+        """Each position's moments first, then the group's by Chan, Golub, and LeVeque's update: the squared
+        deviations about the group's mean are each position's own plus its count times its mean's offset squared."""
+        if each == 1:
+            return self.partial(node, value, codes, count)
+        floats = value.astype(np.float64).reshape(-1, each)
+        missing = np.isnan(floats)
+        kept = np.where(missing, 0.0, floats)
+        rows_present = (~missing).sum(axis=1)
+        rows_mean = np.divide(kept.sum(axis=1), rows_present, out=np.zeros(len(kept)), where=rows_present > 0)
+        rows_squares = (np.where(missing, 0.0, floats - rows_mean[:, None]) ** 2).sum(axis=1)
+        present = np.bincount(codes, weights=rows_present, minlength=count)
+        total = np.bincount(codes, weights=rows_mean * rows_present, minlength=count)
+        mean = np.divide(total, present, out=np.zeros(count), where=present > 0)
+        squares = np.bincount(codes, weights=rows_squares + rows_present * (rows_mean - mean[codes]) ** 2,
+                              minlength=count)
+        return "moments", np.stack([present, mean, squares,
+                                    np.bincount(codes, weights=missing.sum(axis=1), minlength=count)])
+
     def merge(self, node, kind, held, piece):
         na, ma, sa, nana = held
         nb, mb, sb, nanb = piece
@@ -261,6 +306,32 @@ class Total(Reduction):
             # batch of groups: each the same whatever the block's size
             return Working(32, later=80, fixed=max(40 * 2**20, sums.EXACT_PAIRS * sums.BUCKETS * 8))
         return Working(16 if dtype.kind == "f" or self.name == "mean" else 32)
+
+    by_position = True
+
+    def partial_rows(self, node, value, codes, count, each):
+        """Each position's sum first: labelarray's estimate over both axes for float32, else a sum along the position
+        (in float64, or int64 for an integer sum), then per group."""
+        if each == 1:
+            return self.partial(node, value, codes, count)
+        if value.dtype == np.float32:
+            return "estimate", sums.chunk_estimate(value.reshape(-1, each), (0, 1), na_rm=node.na_rm, codes=codes,
+                                                    groups=count)
+        rows = value.reshape(-1, each)
+        counted = np.bincount(codes, minlength=count).astype(np.float64) * each
+        if value.dtype.kind == "f":
+            missing = np.isnan(rows)
+            summed = np.where(missing, 0.0, rows) if node.na_rm else rows
+            return "float", np.stack([np.bincount(codes, weights=summed.sum(axis=1, dtype=np.float64), minlength=count),
+                                      np.bincount(codes, weights=(~missing).sum(axis=1), minlength=count), counted])
+        if value.dtype.kind in "biu" and self.name == "mean":
+            return "float", np.stack([np.bincount(codes, weights=rows.sum(axis=1, dtype=np.float64), minlength=count),
+                                      counted, counted])
+        if value.dtype.kind in "biu":  # int64 sums wrap as np.sum's do, in any grouping
+            kind, piece = self.partial(node, rows.sum(axis=1, dtype=np.int64), codes, count)
+            piece[1] *= each  # the values counted, not the positions
+            return kind, piece
+        return super().partial_rows(node, value, codes, count, each)
 
     def partial(self, node, value, codes, count):
         if value.dtype == np.float32:
@@ -405,6 +476,19 @@ class Median(Reduction):
         present = np.bincount(codes, weights=~missing, minlength=count).astype(np.int64)
         return f"rank:{value.dtype.str}", np.stack([present, np.bincount(codes, weights=missing,
                                                                           minlength=count).astype(np.int64)])
+
+    by_position = True
+
+    def partial_rows(self, node, value, codes, count, each):
+        """Each position's values present and missing counted first, then per group."""
+        if each == 1:
+            return self.partial(node, value, codes, count)
+        kind, _ = self.partial(node, value[:0], codes[:0], count)  # the checks, and the kind
+        missing = (np.isnat(value) if value.dtype.kind == "m" else np.isnan(value) if value.dtype.kind == "f" else
+                   np.zeros(len(value), dtype=bool)).reshape(-1, each).sum(axis=1)
+        present = each - missing
+        return kind, np.stack([np.bincount(codes, weights=present, minlength=count).astype(np.int64),
+                               np.bincount(codes, weights=missing, minlength=count).astype(np.int64)])
 
     def merge(self, node, kind, held, piece):
         return held + piece

@@ -1336,13 +1336,14 @@ def _partial(plan: _Plan, block: TidyArray, axis: str):
         if node.op == "n":
             continue
         value, each = rows.values[hidden]
-        pieces[hidden] = _pieces(node, value, codes if each == 1 else np.repeat(codes, each), count)
+        pieces[hidden] = _pieces(node, value, codes, count, each)
     return rows.found, combos, counts, pieces, rows.dropped
 
 
-def _pieces(node: Reduce, value: np.ndarray, codes: np.ndarray, count: int) -> tuple[str, np.ndarray]:
-    """One reduction's pieces per group from a block's values and their codes (``tidy3a.reductions``)."""
-    return REGISTRY[node.op].partial(node, value, codes, count)
+def _pieces(node: Reduce, value: np.ndarray, codes: np.ndarray, count: int, each: int) -> tuple[str, np.ndarray]:
+    """One reduction's pieces per group from a block's values, *each* to a position, and the positions' codes
+    (``tidy3a.reductions``)."""
+    return REGISTRY[node.op].partial_rows(node, value, codes, count, each)
 
 
 def _result(frame: ChunkedFrame, plan: _Plan, table: _Table, columns: dict[str, np.ndarray]) -> TidyArray:
