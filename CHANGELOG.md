@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 — 2026-10-27
 
 - `quantile(x, q)`, in memory and on blocks: NumPy's quantile with its
   default (linear) rule, `np.nanquantile` with `na_rm`, in NumPy's type
