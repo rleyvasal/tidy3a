@@ -370,3 +370,88 @@ def test_rows_written_with_auto_are_read_back_with_auto(tmp_path):
     written = cloud_array(memory=SMALL) >> filter(x > 0) >> write(tmp_path / "x.npy")
     assert written._blocks.rows == "auto" and written._blocks.memory == SMALL
     assert f"sized for memory={describe(SMALL)}" in repr(written)
+
+
+# ── Whole storage chunks ────────────────────────────────────────────────────
+
+
+def grid():
+    xr = pytest.importorskip("xarray")
+    rng = np.random.default_rng(6)
+    return xr.Dataset({"a": (("time", "cell"), rng.normal(size=(1_000, 400)).astype(np.float32)),
+                       "g": ("time", np.arange(1_000) % 7)})
+
+
+def stored(tmp_path, size, **opening):
+    """The grid written to Zarr in chunks of *size* along time, opened lazily (``chunks=None``) or with Dask."""
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("zarr")
+    dataset = grid()
+    path = tmp_path / "stored.zarr"
+    dataset.chunk({"time": size}).to_zarr(path, consolidated=False)
+    return dataset, xr.open_zarr(path, consolidated=False, **opening)
+
+
+TOP = group_by(fields("g")) >> summarise(top=max(fields("a")))
+
+
+def edges(spans):
+    return {edge for span in spans for edge in span}
+
+
+@pytest.mark.parametrize("opening", [{"chunks": None}, {}], ids=["lazy", "dask"])
+def test_auto_blocks_are_whole_chunks_of_the_storage(tmp_path, opening):
+    dataset, opened = stored(tmp_path, 70, **opening)
+    frame = tidy(opened, blocks={"time": "auto"}, memory=RESERVE + 3 * 10**6) >> TOP
+    layout = frame._layout()
+    assert 70 <= layout.rows < 1_000
+    assert edges(layout.every) <= set(range(0, 1_000, 70)) | {1_000}
+    assert all(stop - start == layout.rows // 70 * 70 for start, stop in layout.every[:-1])
+    assert "whole chunks of its storage" in repr(frame)
+    assert np.array_equal(frame >> pull("top"), tidy(dataset) >> TOP >> pull("top"))
+
+
+def test_irregular_dask_chunks_are_grouped_whole():
+    pytest.importorskip("dask")
+    months = (31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31) * 2 + (31, 28, 31, 30, 31, 30, 31, 31, 27)
+    dataset = grid()
+    opened = dataset.chunk({"time": months})
+    frame = tidy(opened, blocks={"time": "auto"}, memory=RESERVE + 3 * 10**6) >> TOP
+    bounds = set(np.cumsum((0, *months)).tolist())
+    layout = frame._layout()
+    assert edges(layout.every) <= bounds
+    assert all(stop - start <= layout.rows for start, stop in layout.every)
+    assert np.array_equal(frame >> pull("top"), tidy(dataset) >> TOP >> pull("top"))
+
+
+def test_a_dask_chunk_larger_than_a_block_is_refused(tmp_path):
+    _, opened = stored(tmp_path, 500)
+    with pytest.raises(Exception, match=r"Dask chunks hold up to 500, each computed whole .* rechunk it smaller"):
+        tidy(opened, blocks={"time": "auto"}, memory=RESERVE + 3 * 10**6) >> TOP
+
+
+def test_a_files_chunk_larger_than_a_block_is_read_in_parts(tmp_path):
+    dataset, opened = stored(tmp_path, 500, chunks=None)
+    frame = tidy(opened, blocks={"time": "auto"}, memory=RESERVE + 3 * 10**6) >> TOP
+    layout = frame._layout()
+    assert layout.rows < 500 and 500 in edges(layout.every)
+    assert "its storage chunks split to fit" in repr(frame)
+    assert np.array_equal(frame >> pull("top"), tidy(dataset) >> TOP >> pull("top"))
+
+
+def test_variables_stored_in_different_chunks_get_blocks_whole_for_each(tmp_path):
+    xr = pytest.importorskip("xarray")
+    pytest.importorskip("zarr")
+    dataset = xr.Dataset({"a": (("time", "cell"), np.ones((1_000, 400), np.float32)), "g": ("time", np.arange(1_000))})
+    path = tmp_path / "mixed.zarr"
+    dataset.to_zarr(path, consolidated=False, encoding={"a": {"chunks": (30, 400)}, "g": {"chunks": (20,)}})
+    frame = tidy(xr.open_zarr(path, consolidated=False, chunks=None), blocks={"time": "auto"},
+                 memory=RESERVE + 3 * 10**6) >> TOP
+    assert edges(frame._layout().every) <= set(range(0, 1_000, 60)) | {1_000}  # whole chunks of both: 60
+
+
+def test_a_size_given_or_data_in_memory_is_not_rounded(tmp_path):
+    dataset, opened = stored(tmp_path, 70)
+    assert (tidy(opened, blocks={"time": 100}) >> TOP)._layout().every[0] == (0, 100)
+    in_memory = tidy(dataset, blocks={"time": "auto"}, memory=RESERVE + 3 * 10**6) >> TOP
+    assert in_memory._layout().parts is None and "whole chunks" not in repr(in_memory)

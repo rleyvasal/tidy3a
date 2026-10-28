@@ -116,6 +116,11 @@ class Source:
     def empty(self) -> TidyArray:
         raise NotImplementedError
 
+    def stored(self, names: frozenset | None) -> tuple[list[tuple[int, int]], bool] | None:
+        """The storage's chunk boundaries along the axis for the variables *names*, and whether a block within a chunk
+        computes the whole chunk (Dask's); None for storage with none (plan milestone 14, step 3)."""
+        return None
+
 
 class FileSource(Source):
     """A file memory-mapped again for each block; the block is a copy, and the map closes with it."""
@@ -192,6 +197,22 @@ class DatasetSource(Source):
             kept = [min(along, key=lambda name: data[name].size)] if along else []
         return data[kept] if kept else data
 
+    def stored(self, names: frozenset | None) -> tuple[list[tuple[int, int]], bool] | None:
+        """The Dask chunks of the variables *names* along the axis; else the chunks a file stores them in (xarray's
+        ``preferred_chunks``, for NetCDF4 and Zarr), every variable's whole at once where their sizes differ."""
+        data = self._only(names)
+        chunks = _chunks_along(data, self.axis)
+        if chunks is not None:
+            return chunks, True
+        variables = data.variables if hasattr(data, "data_vars") else {None: data.variable}
+        sizes = {int(variable.encoding.get("preferred_chunks", {}).get(self.axis) or 0)
+                 for variable in variables.values() if self.axis in variable.dims} - {0}
+        if not sizes:
+            return None
+        size = math.lcm(*sizes)
+        size = size if size <= self.size else max(sizes)
+        return [(start, min(start + size, self.size)) for start in range(0, self.size, size)], False
+
     def empty(self) -> TidyArray:
         """No positions on the axis: each lazy value along it an empty NumPy array of its type, since slicing lazy
         data to no positions and computing it still computes a chunk; nothing along the axis is computed."""
@@ -237,6 +258,7 @@ class Blocks:
     labelled: bool = False  # else each block is labelled with its positions, so a verb sees them as in memory
     chosen: tuple[int, ...] | None = None  # a sample's blocks (``preview``), counted from 0; else every block
     memory: int | None = None  # the budget in bytes an "auto" size is chosen for (plan milestone 14)
+    parts: tuple[tuple[int, int], ...] | None = None  # the storage's chunks an "auto" size's blocks are made of
 
     @property
     def axis(self) -> str:
@@ -254,6 +276,8 @@ class Blocks:
         if self.rows == "chunks":
             return self.source.chunks or [(0, self.size)]
         rows = int(self.rows)
+        if self.parts is not None:
+            return _whole(self.parts, rows) or [(0, 0)]
         return [(start, min(start + rows, self.size)) for start in range(0, self.size, rows)] or [(0, 0)]
 
     @property
@@ -281,7 +305,19 @@ class Blocks:
                              f"thread{'s' if self.threads > 1 else ''}, beyond the "
                              f"{describe(RESERVE + self.threads * estimate.fixed)} set aside; give memory= more"
                              f"{fewer}, or a number of positions with blocks=")
-        return dataclasses.replace(self, rows=max(1, min(rows, self.size)))
+        rows = max(1, min(rows, self.size))
+        needs = [_needs(frame) for frame in frames]
+        stored = self.source.stored(None if any(need is None for need in needs) else frozenset().union(*needs))
+        if stored is None:
+            return dataclasses.replace(self, rows=rows)
+        parts, whole = stored
+        largest = max(stop - start for start, stop in parts)
+        if whole and largest > rows:
+            raise BlockError(f'blocks="auto" fits {rows:,} positions of {self.axis} in memory={describe(self.memory)}, '
+                             f"and the data's Dask chunks hold up to {largest:,}, each computed whole for any of its "
+                             f'positions; rechunk it smaller, data.chunk({{"{self.axis}": {rows}}}), or give memory= '
+                             "more")
+        return dataclasses.replace(self, rows=rows, parts=tuple(parts))
 
     def load(self, start: int, stop: int, names: frozenset | None = None) -> TidyArray:
         block = self.source.block(start, stop, names)
@@ -297,8 +333,32 @@ class Blocks:
         if self.memory is not None:
             from tidy3a.sizing import describe
 
+            if self.parts is not None:
+                whole = max(stop - start for start, stop in self.parts) <= int(self.rows)
+                return (f"{count} of up to {int(self.rows):,} positions on {self.axis}, "
+                        f"{'whole chunks of its storage' if whole else 'its storage chunks split to fit'}, "
+                        f"sized for memory={describe(self.memory)}")
             return f"{count} of {int(self.rows):,} positions on {self.axis}, sized for memory={describe(self.memory)}"
         return f"{count} of {int(self.rows):,} positions on {self.axis}"
+
+
+def _whole(parts: Sequence[tuple[int, int]], rows: int) -> list[tuple[int, int]]:
+    """Blocks of whole consecutive *parts*, each as many as fit in *rows* positions; a part larger than that in blocks
+    of *rows*, which a file's chunk can be read in."""
+    spans: list[tuple[int, int]] = []
+    start = stop = None
+    for low, high in parts:
+        if start is not None and high - start > rows:
+            spans.append((start, stop))
+            start = None
+        if high - low > rows:
+            spans += [(at, min(at + rows, high)) for at in range(low, high, rows)]
+            continue
+        start = low if start is None else start
+        stop = high
+    if start is not None:
+        spans.append((start, stop))
+    return spans
 
 
 def check_rows(rows: Any, threads: Any, source: Source, memory: Any = None) -> int | None:
