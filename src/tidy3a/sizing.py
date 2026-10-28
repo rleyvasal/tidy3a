@@ -21,6 +21,8 @@ a pipeline without ``summarise`` or ``write`` keeps in memory.
 
 from __future__ import annotations
 
+import os
+import re
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -29,7 +31,7 @@ from typing import Any
 import numpy as np
 
 from tidy3a.chunked import ChunkedFrame, DatasetSource, _Leaf, _needs, _Node, _trie
-from tidy3a.errors import GroupError, SummariseError
+from tidy3a.errors import GroupError, ReadError, SummariseError
 from tidy3a.expr import Context, Ref, evaluate
 from tidy3a.frame import TidyArray
 from tidy3a.reductions import REGISTRY
@@ -39,6 +41,60 @@ OBJECT = 64  # bytes a text or other Python object is taken to hold, beyond the 
 KEY = 56  # bytes per row a group key's codes take: its values factorized (a sorted copy, the order, the inverse, the
 #   codes) and, in a later pass, its codes in the table's
 COMBINED = 40  # bytes per row the keys' combinations take: one number per row, factorized, and the counts
+
+
+UNITS = {"": 1, "b": 1, "kb": 10**3, "mb": 10**6, "gb": 10**9, "tb": 10**12,
+         "kib": 2**10, "mib": 2**20, "gib": 2**30, "tib": 2**40}
+
+
+def budget(memory: Any) -> int:
+    """``memory=`` as bytes: a number of bytes, or text such as ``"2GB"`` or ``"512 MiB"`` (GB is 10**9 bytes, GiB
+    2**30); None for a quarter of the machine's physical memory (milestone 14, decision 3)."""
+    if memory is None:
+        physical = physical_memory()
+        if physical is None:
+            raise ReadError('blocks="auto" sizes blocks for a quarter of physical memory, which this system does not '
+                            'report; give the budget with memory=, e.g. memory="2GB"')
+        return physical // 4
+    if isinstance(memory, str):
+        found = re.fullmatch(r"\s*(\d+(?:\.\d*)?|\.\d+)\s*([a-zA-Z]*)\s*", memory)
+        unit = found and UNITS.get(found.group(2).lower())
+        if not unit:
+            raise ReadError(f'memory= is a number of bytes, or text such as "2GB" or "512MiB", not {memory!r}')
+        memory = float(found.group(1)) * unit
+    if isinstance(memory, bool) or not isinstance(memory, (int, float, np.integer, np.floating)) or not memory > 0:
+        raise ReadError(f'memory= is a number of bytes, or text such as "2GB" or "512MiB", not {memory!r}')
+    return int(memory)
+
+
+def physical_memory() -> int | None:
+    """The machine's physical memory in bytes, where the system reports it."""
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (AttributeError, ValueError, OSError):  # not a POSIX system
+        pass
+    try:
+        import ctypes
+
+        class Status(ctypes.Structure):
+            _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong), ("physical", ctypes.c_ulonglong),
+                        *((name, ctypes.c_ulonglong) for name in ("free", "file", "file_free", "virtual",
+                                                                   "virtual_free", "extended"))]
+
+        status = Status(ctypes.sizeof(Status))
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):  # type: ignore[attr-defined]
+            return int(status.physical)
+    except (AttributeError, OSError):
+        pass
+    return None
+
+
+def describe(size: int) -> str:
+    """Bytes as people read them: "6.4 GB", "512 MB"."""
+    for unit, scale in (("TB", 10**12), ("GB", 10**9), ("MB", 10**6), ("kB", 10**3)):
+        if size >= scale:
+            return f"{size / scale:.3g} {unit}"
+    return f"{size} bytes"
 
 
 @dataclass(frozen=True)

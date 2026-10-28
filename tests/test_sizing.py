@@ -16,9 +16,9 @@ import numpy as np
 import pytest
 
 from tidy3a import (any, cells, chunked, fields, filter, formula, group_by, infer, max, mean, median, min, mutate, n,
-                    pull, quantile, read_array, scan, select, std, sum, summarise, tidy, var)
+                    pull, quantile, read_array, scan, select, std, sum, summarise, tidy, var, write)
 from tidy3a.reductions import REGISTRY, Ask, Reduction, Working
-from tidy3a.sizing import RESERVE, Cost, cost
+from tidy3a.sizing import RESERVE, Cost, cost, describe
 
 names = ["x", "y", "z", "intensity", "ring"]
 x, y, z, intensity, ring, distance = fields(*names, "distance")
@@ -266,3 +266,107 @@ def test_a_budget_gives_the_most_positions_that_fit():
             rows = estimate.rows(budget, threads)
             assert (rows == 0 or estimate.bound(rows, threads) <= budget) and budget < estimate.bound(rows + 1, threads)
     assert estimate.rows(RESERVE, 1) == 0  # nothing left once the reserve and the fixed part are set aside
+
+
+# ── blocks="auto" and memory= ───────────────────────────────────────────────
+
+
+def cloud_array(rows="auto", **options):
+    values = np.random.default_rng(4).normal(0, 30, (30_000, 5)).astype(np.float32)
+    return read_array(values, dims={"point": infer, "feature": 5}, labels={"feature": names}, field_axis="feature",
+                      blocks=rows, **options)
+
+
+SUMS = 40 * 2**20  # a float32 sum's fixed part (``Total.working``): a few MB beyond it leave room for some blocks
+SMALL = RESERVE + 3 * 10**6  # room for a few thousand of the cloud's positions
+SUMMED = SMALL + SUMS
+
+
+def test_auto_takes_the_most_positions_the_estimate_fits_in_the_budget():
+    frame = cloud_array(memory=SUMMED) >> CLOUD["rings"]
+    rows = cost([frame]).rows(SUMMED, 1)
+    assert 1 <= rows < 30_000
+    assert frame._layout().rows == rows
+    words = f"of {rows:,} positions on point, sized for memory={describe(SUMMED)}"
+    assert words in repr(frame) and words in str(frame.explain())
+
+
+def test_a_size_chosen_gives_what_the_same_size_given_does():
+    pipeline = group_by(ring) >> summarise(m=mean(x * np.float64(1)), s=std(z))  # float64: bits that follow the size
+    chosen = cloud_array(memory=SMALL) >> pipeline
+    rows = chosen._layout().rows
+    assert rows < 30_000
+    given = cloud_array(rows) >> pipeline
+    for name in ("m", "s"):
+        assert np.asarray(chosen >> pull(name)).tobytes() == np.asarray(given >> pull(name)).tobytes()
+
+
+def test_the_size_follows_the_verbs_that_run_and_the_threads():
+    xr = pytest.importorskip("xarray")
+    rng = np.random.default_rng(5)
+    dataset = xr.Dataset({name: (("time", "cell"), rng.normal(size=(2_000, 500)).astype(np.float32))
+                          for name in ("a", "b", "c", "d")} | {"g": ("time", np.arange(2_000) % 7)})
+    a, g = fields("a", "g")
+    frame = tidy(dataset, blocks={"time": "auto"}, memory=RESERVE + 10**7)
+    one = frame >> group_by(g) >> summarise(total=max(a))  # one field read
+    every = frame >> filter(g > 2)  # every field kept, in memory
+    assert 2_000 > one._layout().rows > every._layout().rows
+    assert frame._blocks.sized([one, every]).rows <= every._layout().rows  # a scan's blocks fit both
+    threads = [(tidy(dataset, blocks={"time": "auto"}, memory=RESERVE + 2 * 10**7, threads=count) >> group_by(g)
+                >> summarise(total=max(a)))._layout().rows for count in (1, 2, 4)]
+    assert threads[0] > threads[1] > threads[2]
+
+
+def test_auto_reads_nothing_to_choose_its_size(monkeypatch):
+    frame = cloud_array(memory=SUMMED)
+    monkeypatch.setattr(frame._blocks.source, "block", lambda *args, **kwargs: pytest.fail("a block was read"))
+    summary = frame >> CLOUD["voxels"]
+    assert f"sized for memory={describe(SUMMED)}" in repr(summary) and 0 < summary._layout().rows < 30_000
+
+
+def test_memory_is_bytes_or_text_and_a_quarter_of_physical_memory_by_default(monkeypatch):
+    from tidy3a import sizing
+
+    assert sizing.budget("2GB") == 2 * 10**9 and sizing.budget("512 MiB") == 512 * 2**20
+    assert sizing.budget(10**9) == sizing.budget("1gb") == sizing.budget(".001 TB") == 10**9
+    monkeypatch.setattr(sizing, "physical_memory", lambda: 16 * 2**30)
+    assert sizing.budget(None) == 4 * 2**30
+    assert "sized for memory=4.29 GB" in repr(cloud_array())
+    for wrong in ("2 GBs", "lots", "", "-1GB", 0, -5, True, [1]):
+        with pytest.raises(Exception, match="memory= is a number of bytes"):
+            sizing.budget(wrong)
+    monkeypatch.setattr(sizing, "physical_memory", lambda: None)
+    with pytest.raises(Exception, match="give the budget with memory="):
+        cloud_array()
+
+
+def test_memory_goes_with_auto_only():
+    with pytest.raises(Exception, match='memory= is the budget blocks="auto" sizes blocks for'):
+        cloud_array(1_000, memory="1GB")
+    with pytest.raises(Exception, match='memory= is the budget blocks="auto" sizes blocks for'):
+        read_array(np.zeros((10, 2)), dims=["a", "b"], memory="1GB")
+    xr = pytest.importorskip("xarray")
+    dataset = xr.Dataset({"v": ("time", np.arange(10.0))})
+    with pytest.raises(Exception, match="memory= is the budget"):
+        tidy(dataset, memory="1GB")
+    with pytest.raises(Exception, match="memory= is the budget"):
+        tidy(dataset, blocks={"time": 5}, memory="1GB")
+    assert "1 of 10 positions on time, sized for memory=1 GB" in repr(tidy(dataset, blocks={"time": "auto"},
+                                                                            memory="1GB"))
+    with pytest.raises(Exception, match='"chunks", or "auto"'):
+        tidy(dataset, blocks="auto")
+
+
+def test_a_budget_no_block_fits_is_refused_with_the_sizes():
+    with pytest.raises(Exception, match=r'blocks="auto" fits no block of point in memory=200 MB: one position takes '
+                                        r"about .* bytes as these verbs run on 1 thread, beyond the 268 MB set aside"):
+        cloud_array(memory="200MB")
+    frame = cloud_array(memory=RESERVE + 5 * 10**7, threads=2)  # rows alone fit; two float32 means' working memory
+    with pytest.raises(Exception, match="2 threads, .* give memory= more, fewer threads"):
+        frame >> group_by(ring) >> summarise(m=mean(intensity))
+
+
+def test_rows_written_with_auto_are_read_back_with_auto(tmp_path):
+    written = cloud_array(memory=SMALL) >> filter(x > 0) >> write(tmp_path / "x.npy")
+    assert written._blocks.rows == "auto" and written._blocks.memory == SMALL
+    assert f"sized for memory={describe(SMALL)}" in repr(written)

@@ -232,10 +232,11 @@ class Blocks:
     """The blocks of a source: its spans, how many run at once, and whether the blocked axis has labels of its own."""
 
     source: Source
-    rows: int | str  # positions per block, or "chunks" for the source's own boundaries
+    rows: int | str  # positions per block, "chunks" for the source's own boundaries, or "auto" before it is chosen
     threads: int
     labelled: bool = False  # else each block is labelled with its positions, so a verb sees them as in memory
     chosen: tuple[int, ...] | None = None  # a sample's blocks (``preview``), counted from 0; else every block
+    memory: int | None = None  # the budget in bytes an "auto" size is chosen for (plan milestone 14)
 
     @property
     def axis(self) -> str:
@@ -248,6 +249,8 @@ class Blocks:
     @property
     def every(self) -> list[tuple[int, int]]:
         """Every block's span, which a block's number counts in."""
+        if self.rows == "auto":
+            raise RuntimeError('blocks="auto" has no spans until a size is chosen for the frames that run (sized)')
         if self.rows == "chunks":
             return self.source.chunks or [(0, self.size)]
         rows = int(self.rows)
@@ -258,6 +261,27 @@ class Blocks:
         """The spans a run reads: every block's, or a sample's."""
         every = self.every
         return every if self.chosen is None else [every[number] for number in self.chosen]
+
+    def sized(self, frames: Sequence[ChunkedFrame]) -> Blocks:
+        """These blocks for *frames*, which run together: with ``blocks="auto"``, the most positions whose blocks, as
+        the frames' verbs run on them, fit the budget by ``tidy3a.sizing``'s estimate (plan milestone 14); a size
+        given, as it is. Nothing is read, and the same frames, budget, and threads give the same size."""
+        if self.rows != "auto":
+            return self
+        from tidy3a.sizing import RESERVE, cost, describe
+
+        assert self.memory is not None
+        estimate = cost(frames)
+        rows = estimate.rows(self.memory, self.threads)
+        if rows < 1:
+            each = self.threads * estimate.work + (self.threads + 2) * estimate.held
+            fewer = ", fewer threads" if self.threads > 1 else ""
+            raise BlockError(f'blocks="auto" fits no block of {self.axis} in memory={describe(self.memory)}: one '
+                             f"position takes about {describe(each)} as these verbs run on {self.threads} "
+                             f"thread{'s' if self.threads > 1 else ''}, beyond the "
+                             f"{describe(RESERVE + self.threads * estimate.fixed)} set aside; give memory= more"
+                             f"{fewer}, or a number of positions with blocks=")
+        return dataclasses.replace(self, rows=max(1, min(rows, self.size)))
 
     def load(self, start: int, stop: int, names: frozenset | None = None) -> TidyArray:
         block = self.source.block(start, stop, names)
@@ -270,36 +294,52 @@ class Blocks:
         count = f"{len(self.every):,}{counted}"
         if self.rows == "chunks":
             return f"{count} on {self.axis}, the data's own chunks"
+        if self.memory is not None:
+            from tidy3a.sizing import describe
+
+            return f"{count} of {int(self.rows):,} positions on {self.axis}, sized for memory={describe(self.memory)}"
         return f"{count} of {int(self.rows):,} positions on {self.axis}"
 
 
-def check_rows(rows: Any, threads: Any, source: Source) -> None:
-    """``blocks=`` is a positive number of positions, or "chunks" for a source that has them."""
-    if rows == "chunks":
+def check_rows(rows: Any, threads: Any, source: Source, memory: Any = None) -> int | None:
+    """``blocks=`` is a positive number of positions, "chunks" for a source that has them, or "auto" for a size chosen
+    for ``memory=`` (the budget in bytes, given back); ``memory=`` goes with "auto" only."""
+    if memory is not None and rows != "auto":
+        raise ReadError(f'memory= is the budget blocks="auto" sizes blocks for; with blocks={rows!r} the size is '
+                        "given, so leave memory= out")
+    if rows == "auto":
+        pass
+    elif rows == "chunks":
         if source.chunks is None:
             raise ReadError('blocks="chunks" takes a Dask-backed dataset\'s chunks along the axis; '
                             f"this data is not chunked along {source.axis}, so give a number of positions")
     elif isinstance(rows, bool) or not isinstance(rows, (int, np.integer)) or rows < 1:
-        raise ReadError(f'blocks= must be a positive number of positions, or "chunks", not {rows!r}')
+        raise ReadError(f'blocks= must be a positive number of positions, "chunks", or "auto", not {rows!r}')
     if isinstance(threads, bool) or not isinstance(threads, (int, np.integer)) or threads < 1:
         raise ReadError(f"threads= must be a positive number, not {threads!r}")
+    if rows != "auto":
+        return None
+    from tidy3a.sizing import budget
+
+    return budget(memory)
 
 
 class ChunkedFrame(TidyArray):
     """Data read with ``blocks=``: an empty block with its schema, and the verbs to run over every block."""
 
-    __slots__ = ("_blocks", "_steps", "_plan", "_result", "_reads")
+    __slots__ = ("_blocks", "_steps", "_plan", "_result", "_reads", "_sized")
 
     @classmethod
-    def open(cls, source: Source, rows: int | str, threads: int) -> ChunkedFrame:
+    def open(cls, source: Source, rows: int | str, threads: int, memory: Any = None) -> ChunkedFrame:
         """A frame holding the source's empty block: nothing is read until a result is asked for (plan decision 4)."""
-        check_rows(rows, threads, source)
+        budget = check_rows(rows, threads, source, memory)
         empty = source.empty()
-        blocks = Blocks(source, rows, threads, empty._backend.has_labels(empty._data, source.axis))
+        blocks = Blocks(source, rows, threads, empty._backend.has_labels(empty._data, source.axis), memory=budget)
         frame = cls._wrap(empty, blocks, (), reads=frozenset())
-        count = len(blocks.every)
+        layout = frame._layout()
+        count = len(layout.every)
         frame._record = Record(empty._source or "data", _unknown(snapshot(empty)),
-                               preview=f"nothing read yet: {blocks.words(' block' if count == 1 else ' blocks')}")
+                               preview=f"nothing read yet: {layout.words(' block' if count == 1 else ' blocks')}")
         return frame
 
     @classmethod
@@ -311,7 +351,15 @@ class ChunkedFrame(TidyArray):
                            origins=frame._origins, source=frame._source, notes=frame._notes, groups=frame._groups,
                            resolved=frame._resolved, record=frame._record)
         new._blocks, new._steps, new._plan, new._result, new._reads = blocks, tuple(steps), plan, None, reads
+        new._sized = None
         return new
+
+    def _layout(self) -> Blocks:
+        """The blocks this frame's own run reads: a size given, or one chosen for its verbs (``Blocks.sized``) once and
+        kept, which ``repr``, ``preview()``, and the run itself use."""
+        if self._sized is None:
+            self._sized = self._blocks.sized([self])
+        return self._sized
 
     def _apply_verb(self, verb: Any) -> Any:
         operation = getattr(verb, "_operation", None)
@@ -330,9 +378,14 @@ class ChunkedFrame(TidyArray):
         plan = _check(self, verb, result, steps)
         reads = None if self._reads is None or EVERYTHING in read else self._reads | frozenset(read)
         frame = self._wrap(result, self._blocks, steps, plan, reads)
+        layout = frame._layout()  # a size chosen now, so a verb that leaves no block within the budget is refused here
         record = frame._record
         last = record.steps[-1]
         frame._record = dataclasses.replace(record, steps=(*record.steps[:-1], Step(last.verb, _unknown(last.after))))
+        if self._blocks.rows == "auto":  # the size chosen for these verbs, which explain() shows
+            count = len(layout.every)
+            frame._record = dataclasses.replace(
+                frame._record, preview=f"nothing read yet: {layout.words(' block' if count == 1 else ' blocks')}")
         return frame
 
     @translating
@@ -343,7 +396,8 @@ class ChunkedFrame(TidyArray):
         the start of the data; ``blocks=`` names others, counted from 1 as an
         error names them. It reads those blocks, and only those.
         """
-        every = len(self._blocks.every)
+        layout = self._layout()
+        every = len(layout.every)
         if blocks is None:
             chosen = sorted({0, every // 2, every - 1})
         else:
@@ -353,7 +407,7 @@ class ChunkedFrame(TidyArray):
             if wrong or not numbers:
                 raise BlockError(f"preview(blocks=...) takes block numbers from 1 to {every:,}, not {wrong or blocks!r}")
             chosen = sorted({int(number) - 1 for number in numbers})
-        sample = dataclasses.replace(self._blocks, chosen=tuple(chosen))
+        sample = dataclasses.replace(layout, chosen=tuple(chosen))
         spans = sample.spans
         shown = ", ".join(str(number + 1) for number in chosen)
         words = (f"a sample: block{'' if len(chosen) == 1 else 's'} {shown} of {every:,} "
@@ -408,7 +462,7 @@ class ChunkedFrame(TidyArray):
         if shown.groups:
             lines.append(f"groups: {', '.join(shown.groups)}")
         lines += [note for note in shown.notes]
-        lines.append(f"blocks: {self._blocks.words()}; ? is a size the data decides; preview() runs a sample, and "
+        lines.append(f"blocks: {self._layout().words()}; ? is a size the data decides; preview() runs a sample, and "
                      "collect() or pull() every block")
         return "\n".join(lines)
 
@@ -913,7 +967,7 @@ def _scan(frames: Sequence[ChunkedFrame], writers: Sequence[tuple[ChunkedFrame, 
 
 def _scan_once(frames: Sequence[ChunkedFrame], writers: Sequence[tuple[ChunkedFrame, Any]]) -> None:
     every = [*frames, *(frame for frame, _ in writers)]
-    blocks = every[0]._blocks
+    blocks = every[0]._layout() if len(every) == 1 else every[0]._blocks.sized(every)
     leaves = [_Leaf(frame, _Table(frame._plan) if frame._summarised else None, []) for frame in frames]
     leaves += [_Leaf(frame, None, [], writer) for frame, writer in writers]
     root = _trie(leaves)

@@ -211,8 +211,9 @@ def read_array(
     order: str | None = None,
     offset: int | None = None,
     lazy: bool = False,
-    blocks: int | None = None,
+    blocks: int | str | None = None,
     threads: int = 1,
+    memory: int | str | None = None,
     backend: str | None = None,
 ) -> TidyArray:
     """Read a homogeneous numeric array and name its axes.
@@ -248,6 +249,13 @@ def read_array(
     blocks' rows in memory. What a block cannot answer is refused when the
     verb is called.
 
+    ``blocks="auto"`` chooses the number of positions instead: the most
+    whose blocks, as the verbs run on ``threads`` of them at a time, fit
+    ``memory=`` (bytes, or text such as ``"2GB"``; a quarter of physical
+    memory by default), by an estimate from the data's types that reads
+    nothing (plan milestone 14). It is chosen when a result is asked for,
+    for the verbs that run, and shown by ``repr`` before that.
+
     ``backend=`` is ``"xarray"`` or ``"numpy"``; without it, the default
     from ``set_backend()`` is used, or with none chosen, NumPy.
     Memory-mapped data stays on xarray.
@@ -258,6 +266,9 @@ def read_array(
 
     names, sizes = _parse_dims(dims, kind)
     notes: list[str] = []
+    if memory is not None and blocks != "auto":
+        raise ReadError(f'memory= is the budget blocks="auto" sizes blocks for; with blocks={blocks!r} '
+                        "leave it out")
     if blocks is not None:
         _check_blocks(kind, description, blocks, lazy, order, names, field_axis, variables_from)
         lazy = kind != "array"  # a file is memory-mapped, and each block copied out of the map
@@ -306,7 +317,7 @@ def read_array(
             return _frame(block, names, block_coords, field_axis, variables_from, name, backend, source_text, notes)
 
         if kind == "array":
-            return ChunkedFrame.open(ArraySource(values, axis, build), blocks, threads)
+            return ChunkedFrame.open(ArraySource(values, axis, build), blocks, threads, memory)
         if kind == "raw":
             def reopen() -> np.ndarray:
                 return _read_raw(path, value_type, names, sizes, byte_order or "little", "C", offset or 0, True)[0]
@@ -317,7 +328,8 @@ def read_array(
         size = int(shape[0])
         stored = values.dtype if values.dtype.isnative else values.dtype.newbyteorder("=")  # as FileSource.block gives
         del values  # the map closes; each block reopens the file
-        return ChunkedFrame.open(FileSource(reopen, size, axis, build, (stored, tuple(shape[1:]))), blocks, threads)
+        return ChunkedFrame.open(FileSource(reopen, size, axis, build, (stored, tuple(shape[1:]))), blocks, threads,
+                                 memory)
     return _frame(values, names, coords, field_axis, variables_from, name, backend, source_text, notes)
 
 

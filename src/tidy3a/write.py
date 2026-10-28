@@ -179,9 +179,10 @@ class Writer:
     def reopen(self) -> TidyArray:
         """The written file as a frame: in blocks of the same size for data read in blocks, else lazily."""
         frame, blocks = self.frame, self.blocks
-        rows = None if blocks is None else (blocks.rows if isinstance(blocks.rows, int) else
+        rows = None if blocks is None else (blocks.rows if isinstance(blocks.rows, int) or blocks.rows == "auto" else
                                             max(stop - start for start, stop in blocks.every))
         threads = 1 if blocks is None else blocks.threads
+        memory = None if blocks is None or rows != "auto" else blocks.memory  # sized again, for what follows
         if self.suffix == ".npy":
             from tidy3a.io import read_array
 
@@ -191,7 +192,8 @@ class Writer:
             field_axis = frame._field_axis if frame._field_axis in self.order else None
             options = dict(dims=list(self.order), labels=labels or None, field_axis=field_axis, name=str(self.name))
             if rows is not None:  # blocks are read into memory, so the frame's own backend holds them
-                return read_array(self.path, blocks=rows, threads=threads, backend=backend.name, **options)
+                return read_array(self.path, blocks=rows, threads=threads, memory=memory, backend=backend.name,
+                                  **options)
             return read_array(self.path, lazy=True, **options)  # memory-mapped, which the xarray backend holds
         import xarray as xr
 
@@ -199,7 +201,8 @@ class Writer:
 
         opened = xr.open_zarr(self.path, consolidated=False)
         if rows is not None:
-            return tidy(opened, blocks={str(self.axis): rows}, field_axis=frame._field_axis, threads=threads)
+            return tidy(opened, blocks={str(self.axis): rows}, field_axis=frame._field_axis, threads=threads,
+                        memory=memory)
         return tidy(opened, field_axis=frame._field_axis)
 
 
