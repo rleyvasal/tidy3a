@@ -6,7 +6,10 @@
 # xarray) can hide a failure that CI would see.
 #
 #   scripts/check.sh              all jobs, one after another
-#   scripts/check.sh 3.12         one Python version only
+#   scripts/check.sh 3.12         one Python version only; 3.14t for the free-threaded build, which installs the
+#                                 test extra (dev without Polars, which has no free-threaded wheels) and runs the
+#                                 tests with the GIL off, after checking that importing tidy3a and what it uses leaves
+#                                 it off
 #   scripts/check.sh --parallel   all jobs side by side, for a machine with cores to spare: the environments are
 #                                 set up one after another (each install builds tidy3a in this folder), each job's
 #                                 tests start once its environment is ready, the distribution job once every
@@ -25,7 +28,7 @@ cd "$(dirname "$0")/.."
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-versions=("${@:-3.11 3.12 3.13 3.14}")
+versions=("${@:-3.11 3.12 3.13 3.14 3.14t}")
 versions=(${versions[@]})
 failed=()
 names=()  # the jobs started side by side, and their output
@@ -52,13 +55,20 @@ run() {
 setup() {
   local env="$1"; shift
   local python="$1"; shift
+  [[ "$python" == *t ]] || python="$python+gil"  # uv may otherwise take an installed free-threaded build for 3.14
   uv venv -q --python "$python" "$env" &&
     uv pip install -q --python "$env/bin/python" "$@"
 }
 
 tests() {
   [[ -x "$1/bin/python" ]] || { echo "its environment could not be set up"; return 1; }
-  "$1/bin/python" -m pytest -q -p no:cacheprovider
+  if "$1/bin/python" -c 'import sys, sysconfig; sys.exit(not sysconfig.get_config_var("Py_GIL_DISABLED"))'; then
+    "$1/bin/python" -c 'import sys, numba, tidy3a, xarray, zarr; from tidy3a.fused import driver
+assert not sys._is_gil_enabled(), "a module imported turned the GIL on"' &&
+      "$1/bin/python" -X gil=0 -m pytest -q -p no:cacheprovider
+  else
+    "$1/bin/python" -m pytest -q -p no:cacheprovider
+  fi
 }
 
 pytest_job() {
@@ -78,7 +88,11 @@ job() {
 }
 
 for python in "${versions[@]}"; do
-  job "pytest (Python $python)" "$python" -e ".[dev]"
+  if [[ "$python" == *t ]]; then
+    job "pytest (Python ${python%t}, free-threaded)" "$python" -e ".[test]"
+  else
+    job "pytest (Python $python)" "$python" -e ".[dev]"
+  fi
 done
 
 if [[ $# -eq 0 ]]; then

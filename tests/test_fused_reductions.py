@@ -105,8 +105,16 @@ def test_each_slot_gives_its_reductions_pieces(op, na_rm, cells):
             assert np.allclose(got, want, rtol=1e-12, atol=1e-9, equal_nan=True), (op, dtype, kind)
 
 
+# Whether NumPy orders -0.0 below +0.0 in minimum and maximum, as IEEE 754-2019 does, whatever comes first: it does
+# on ARM; on x86 a tie of zeros gives the operand its loops happen to meet second, so the sign follows the order
+# (and the vectorized loops) in which values are compared, which a kernel adding values in order cannot follow.
+NUMPY_ORDERS_ZEROS = bool(np.signbit(np.minimum(0.0, -0.0)) and np.signbit(np.minimum(-0.0, 0.0))
+                          and not np.signbit(np.maximum(-0.0, 0.0)) and not np.signbit(np.maximum(0.0, -0.0)))
+
+
 def test_extremes_order_the_zeros_and_nan_as_numpy_does():
-    """-0.0 below +0.0 whatever comes first; a NaN wins without na_rm and is passed over with it."""
+    """-0.0 below +0.0 whatever comes first; a NaN wins without na_rm and is passed over with it. The zeros' signs
+    are NumPy's where NumPy orders them; elsewhere the kernel's own order, the values and NaN NumPy's."""
     data = np.array([0.0, -0.0, 0.0, np.nan, 1.0, -0.0, 0.0, np.nan, np.nan], np.float64)
     codes = np.array([0, 0, 0, 1, 1, 2, 2, 3, 3])
     frame = tidy(xr.Dataset({"v": ("p", data)}))
@@ -121,5 +129,8 @@ def test_extremes_order_the_zeros_and_nan_as_numpy_does():
             kernel(len(data), 1, codes.astype(np.intp), data, *arrays.values(), np.zeros(4, np.int64))
             got = slot.pieces(arrays, np.ones(4, np.int64))[1]
             want = REGISTRY[op].partial_rows(node, data, codes, 4, 1)[1]
-            assert got.tobytes() == want.tobytes() or (np.array_equal(got, want, equal_nan=True)
-                                                       and (np.signbit(got) == np.signbit(want)).all()), (op, na_rm)
+            assert np.array_equal(got, want, equal_nan=True), (op, na_rm)
+            if NUMPY_ORDERS_ZEROS:
+                assert got.tobytes() == want.tobytes() or (np.signbit(got) == np.signbit(want)).all(), (op, na_rm)
+            else:  # groups 0 and 2 tie a -0.0 with +0.0: min gives -0.0, max +0.0
+                assert np.signbit(got[[0, 2]]).tolist() == [op == "min"] * 2, (op, na_rm)

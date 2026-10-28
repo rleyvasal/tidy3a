@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.11", "3.12", "3.13", "3.14", "3.14t"]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -26,9 +26,21 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install tidy3a
+        if: ${{ !endsWith(matrix.python-version, 't') }}
         run: python -m pip install -e ".[dev]"
+      # Polars publishes no free-threaded wheels; the tables' tests that need it skip.
+      - name: Install tidy3a without Polars
+        if: ${{ endsWith(matrix.python-version, 't') }}
+        run: python -m pip install -e ".[test]"
       - name: Run tests
+        if: ${{ !endsWith(matrix.python-version, 't') }}
         run: python -m pytest -q --tb=short
+      # The free-threaded build: nothing tidy3a imports turns the GIL back on, and the tests pass with it off.
+      - name: Run tests with the GIL off
+        if: ${{ endsWith(matrix.python-version, 't') }}
+        run: |
+          python -c "import sys, numba, tidy3a, xarray, zarr; from tidy3a.fused import driver; assert not sys._is_gil_enabled(), 'a module imported turned the GIL on'"
+          python -X gil=0 -m pytest -q --tb=short
 
   # The dependency floors in pyproject.toml, checked rather than assumed.
   minimum-versions:

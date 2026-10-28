@@ -1,7 +1,8 @@
 """The fused planner (plan milestone 16, step 1): whether a summary of data read in blocks compiles, and why not.
 
 Read off the verbs on the block of no positions, so nothing is read; on only when Numba is installed and
-``TIDY3A_COMPILED`` is not 0; and importing tidy3a loads no Numba.
+``TIDY3A_COMPILED`` is not 0; and importing tidy3a loads no Numba. Planning itself needs no Numba, so the tests plan as
+where it is installed, wherever they run, but those about its absence.
 """
 
 import subprocess
@@ -13,7 +14,18 @@ import pytest
 from tidy3a import (all, any, bins, cells, exp, fields, filter, floor, formula, group_by, if_else, infer, max,
                     mean, median, min, mutate, n, quantile, read_array, register_reduction, rounded, select, sqrt, std,
                     sum, summarise, tidy, var)
+import tidy3a.fused
 from tidy3a.fused import Fusion, plan_for
+
+
+
+@pytest.fixture(autouse=True)
+def compiling(request, monkeypatch):
+    """Compiling on, as where Numba is installed, for every test but those about when it is off."""
+    if "without_numba" not in request.node.name and "load_no_numba" not in request.node.name:
+        monkeypatch.delenv("TIDY3A_COMPILED", raising=False)
+        monkeypatch.setattr(tidy3a.fused, "unavailable", lambda: None)
+
 
 names = ["x", "y", "z", "intensity", "ring"]
 x, y, z, intensity, ring, distance, a, b = fields(*names, "distance", "a", "b")
