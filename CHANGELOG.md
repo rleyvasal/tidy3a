@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.0 — 2026-10-28
 
 - `blocks="auto"` with `memory=`, on `read_array` and on `tidy`
   (`blocks={"time": "auto"}`): the number of positions per block is the
