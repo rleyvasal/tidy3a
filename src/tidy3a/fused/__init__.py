@@ -30,8 +30,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from tidy3a.errors import FilterError, MutateError, SummariseError, TidyError
-from tidy3a.expr import Context, evaluate
-from tidy3a.fused.expressions import Compiler, Unsupported, kind_words, value_type
+from tidy3a.expr import Context
+from tidy3a.fused.expressions import Compiler, Unsupported
 
 REDUCTIONS = frozenset({"n", "sum", "mean", "min", "max", "std", "var", "any", "all", "median", "quantile"})
 
@@ -138,17 +138,16 @@ def _is_field(rows: Any, name: str) -> bool:
 
 
 def _key(part: Any, rows: Any, compiler: Compiler) -> list[str]:
-    from labelarray.transforms import Bins, GridCells, Round
+    """Why a key does not compile, as ``fused.keys`` finds it; none when it does."""
+    from tidy3a.fused.keys import key_for
 
     context = Context(rows, verb="group_by", error=TidyError, grouped=False)
-    reasons = [f"group_by({part.label}): {why}" for why in _expression(part.expr, context, compiler)]
-    if reasons:
-        return reasons
-    kind = value_type(evaluate(part.expr, context)).kind
-    if part.transform is None or isinstance(part.transform, (GridCells, Bins, Round)):
-        return [] if part.transform is None or kind in "iuf" else [
-            f"group_by({part.label}): its {kind_words(kind)} run on NumPy"]
-    return [f"group_by({part.label}): {type(part.transform).__name__} keys run on NumPy"]
+    try:
+        key_for(part, context, compiler)
+    except Unsupported as why:
+        reason = str(why)
+        return [reason if reason.startswith("group_by(") else f"group_by({part.label}): {reason}"]
+    return []
 
 
 def _expression(node: Any, context: Context, compiler: Compiler) -> list[str]:
