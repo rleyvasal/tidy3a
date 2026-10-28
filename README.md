@@ -302,6 +302,16 @@ much as its data) and the rows a pipeline without `summarise` or `write`
 keeps in memory. A budget that fits no position is refused when the data
 is opened or the verb called, with the sizes.
 
+With `threads=` above one, blocks run side by side, and their summaries
+merge in a fixed tree on the worker threads, so every number of threads
+gives the same bits. How much more threads give depends on the machine:
+NumPy's steps each stream whole arrays through memory, so on a desktop
+whose memory one thread nearly fills, two to four threads give most of
+it. Where each position holds a grid of values with one group, as a time
+step grouped by month does, the reductions take each position's values
+together, which makes such summaries several times faster on any number
+of threads.
+
 A summarised pipeline is `select`, `filter`, and `mutate` of row-wise
 expressions, `group_by` of value keys (fields, `cells`, `bins`, `rounded`,
 several at once, with or without `dropna`), then `summarise` of `n`,

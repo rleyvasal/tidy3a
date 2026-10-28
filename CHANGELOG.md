@@ -25,6 +25,21 @@
   A later pass (the median's digits, the float32 sums' exact pass) works on
   slices of 65,536 values of a block, their answers joined as blocks' are,
   so it takes the same memory whatever the block's size.
+- Data read in blocks runs faster on more threads, and gives the same
+  results on any number of them. Each block's summary is merged into the
+  others in a fixed tree, by block number, on the worker threads, not one
+  block at a time on the main thread; float64 sums and means, integer
+  means, and spreads therefore differ in their last bits from 0.8.0's, and
+  repeat on any number of threads. Where each position holds several
+  values with one group (a grid a time step, grouped by month), every
+  reduction takes the position's values first, without repeating its group
+  for each value: a daytime summary of 2,000 grids of 180 x 360 went from
+  0.89 s to 0.12 s on one thread and 0.05 s on four. A block's groups merge
+  into the summary in one pass over both (labelarray's `merge_sorted`): a
+  summary of 540,000 voxels of 40M points went from 6.2 s on one thread to
+  2.9 s on four. On a machine whose memory one thread nearly fills, more
+  threads help NumPy's steps little; the plan has the measurements
+  (milestone 15). Requires labelarray 0.1.6.
 
 ## 0.8.0 — 2026-10-27
 
