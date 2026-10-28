@@ -11,8 +11,9 @@
   integers, float32, and float64; keys of integer, boolean, and whole float
   fields and their `cells`, `bins`, and `rounded`; the built-in reductions.
   The rest runs on NumPy as before, and so does a block whose values the
-  kernel cannot match NumPy on, or whose groups are too many for dense
-  tables (16 million combinations, or a block's share of `memory=`). The
+  kernel cannot match NumPy on; a block whose groups are too many for dense
+  tables (16 million combinations, or a block's share of `memory=`) sorts
+  the combinations it holds instead, and stays compiled. The
   results are NumPy's bits, but for the sign of a tie of -0.0 and +0.0 in
   `min` and `max` on x86, where NumPy's follows the order it meets them.
   `repr` says what is planned and `explain()` every step that does not

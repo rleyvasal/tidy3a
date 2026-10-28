@@ -12,8 +12,10 @@
 4. the occupied groups as the table ``_partial`` gives the block: the keys' groups, the combinations, the counts
    of positions, and each reduction's pieces, which merge into the tree as before.
 
-A block whose values do not agree, or whose dense tables would pass ``DENSE_GROUPS`` groups or ``dense_limit``'s
-bytes, runs on NumPy instead (``run`` says why); its table is the same either way.
+A block whose dense tables would pass ``DENSE_GROUPS`` groups or ``dense_limit``'s bytes sorts the combinations its
+positions hold instead, and its tables are as large as those, at most its positions. A block whose values do not
+agree, or whose keys' groups make more combinations than int64 codes number, runs on NumPy instead (``run`` says
+why); its table is the same either way.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from tidy3a.fused.reductions import Slot, compile_summary, counted_values, summa
 
 DENSE_GROUPS = 16_000_000  # the owner's limit on a block's dense combinations of the keys' groups
 DENSE_BYTES = 2**27  # and on the bytes of its dense tables, at most
+CODES = 2**62  # combinations numbered beyond this, which int64 codes could not hold, run on NumPy
 DENSE_SHARE = 8  # of a block's share of a budget, the part its dense tables may take
 
 
@@ -90,10 +93,8 @@ class Fused:
             groups = self._sorted(positions, keep, ks, missing, ranges)
         found, sizes, ranked, dense = groups
         combinations = math.prod(sizes) if sizes else 1
-        if combinations > DENSE_GROUPS:  # the reasons say no block's own count, so the result counts blocks by them
-            return None, f"its keys' groups make more than {DENSE_GROUPS:,} combinations"
-        if combinations * self.group_bytes > self.limit:
-            return None, f"its keys' groups' dense tables would take more than {_bytes(self.limit)}"
+        if combinations >= CODES:  # the reason says no block's own count, so the result counts blocks by it
+            return None, "its keys' groups make more combinations than 64-bit codes number"
         if dense is None:
             dense = np.empty(positions, np.intp)
             valid = self.dense(positions, keep, ks, missing, *ranked, np.array(sizes, np.int64), dense)
@@ -105,17 +106,26 @@ class Fused:
         if not valid:
             table.merge(found, None, None, None, dropped)
             return table, None
-        arrays = [slot.arrays(combinations) for slot in self.slots]
-        counts = np.zeros(combinations, np.int64)
+        held = None  # the combinations the block holds, in order, where its tables are only as large as those
+        tables = combinations
+        if combinations > DENSE_GROUPS or combinations * self.group_bytes > self.limit:
+            present = dense >= 0
+            held, inverse = np.unique(dense[present], return_inverse=True)
+            dense = np.full(positions, -1, np.intp)
+            dense[present] = inverse.reshape(-1)
+            tables = len(held)
+        arrays = [slot.arrays(tables) for slot in self.slots]
+        counts = np.zeros(tables, np.int64)
         self.accumulate(positions, cells, dense, *inputs, *(array for slot in arrays for array in slot.values()),
                         counts)
         occupied = np.flatnonzero(counts)
+        numbered = occupied if held is None else held[occupied]
         hidden = [name for name, node in plan.reductions.items() if node.op != "n"]  # the slots' order
         pieces = {name: slot.pieces({key: array[occupied] for key, array in held.items()},
                                     counted_values(counts[occupied], slot, cells))
                   for name, slot, held in zip(hidden, self.slots, arrays)}
         combos = [(labels, missing_label, where) for (labels, missing_label, _), where
-                  in zip(found, np.unravel_index(occupied, sizes))] if sizes else []
+                  in zip(found, np.unravel_index(numbered, sizes))] if sizes else []
         table.merge(found, combos, counts[occupied] * plan.per_position, pieces, dropped)
         return table, None
 
@@ -177,8 +187,7 @@ class Fused:
             full[keep] = codes
             local.append(full)
             sizes.append(len(labels) + (missing_group is not None))
-        combinations = math.prod(sizes)
-        if combinations > DENSE_GROUPS:
+        if math.prod(sizes) >= CODES:
             return found, sizes, None, np.empty(0, np.intp)  # refused by the caller before it is read
         dense = np.ravel_multi_index([np.where(valid, codes, 0) for codes in local], sizes)  # a dropped one's is none
         return found, sizes, None, np.where(valid, dense, -1).astype(np.intp)

@@ -109,21 +109,28 @@ def test_a_block_that_does_not_agree_runs_on_numpy(monkeypatch):
     same_bits(frame, numpy_run(monkeypatch, lambda: read_array(values, blocks=3_000, **OPTIONS) >> verbs))
 
 
-def test_too_many_groups_for_dense_tables_run_on_numpy(monkeypatch):
+@pytest.mark.parametrize("name", ["rings kept", "grid"])
+def test_groups_too_many_for_dense_tables_are_sorted(name, monkeypatch):
+    """Past the dense tables' limits, a block's tables are as large as the combinations it holds, found by sorting
+    them: still compiled, the same bits; only combinations beyond 64-bit codes run on NumPy."""
     from tidy3a.fused import driver
 
-    monkeypatch.setattr(driver, "DENSE_GROUPS", 30)  # 40 rings, and a missing one
     values = cloud_values()
-    frame = read_array(values, blocks=3_000, **OPTIONS) >> SUMMARIES["rings kept"]
+    want = numpy_run(monkeypatch, lambda: read_array(values, blocks=3_000, **OPTIONS) >> SUMMARIES[name])
+    for limits in ({"DENSE_GROUPS": 30}, {"DENSE_BYTES": 1_000}):  # 41 rings of 88 bytes each; the grid's more
+        with monkeypatch.context() as patch:
+            for setting, value in limits.items():
+                patch.setattr(driver, setting, value)
+            frame = read_array(values, blocks=3_000, threads=3, **OPTIONS) >> SUMMARIES[name]
+            frame.collect()
+            assert frame._result._notes[-1] == "ran: 7 blocks in a compiled kernel", limits
+            same_bits(frame, want)
+    monkeypatch.setattr(driver, "CODES", 30)
+    frame = read_array(values, blocks=3_000, **OPTIONS) >> SUMMARIES[name]
     frame.collect()
-    assert frame._result._notes[-1] == "ran: 7 blocks on NumPy, as its keys' groups make more than 30 combinations"
-    same_bits(frame, read_array(values, **OPTIONS) >> SUMMARIES["rings kept"])
-    monkeypatch.setattr(driver, "DENSE_GROUPS", 16_000_000)
-    monkeypatch.setattr(driver, "DENSE_BYTES", 1_000)  # 41 groups of 88 bytes each
-    frame = read_array(values, blocks=3_000, **OPTIONS) >> SUMMARIES["rings kept"]
-    frame.collect()
-    assert frame._result._notes[-1] == ("ran: 7 blocks on NumPy, as its keys' groups' dense tables would take more "
-                                        "than 1 kB")
+    assert frame._result._notes[-1] == ("ran: 7 blocks on NumPy, as its keys' groups make more combinations than "
+                                        "64-bit codes number")
+    same_bits(frame, want)
 
 
 def test_a_kernel_numba_refuses_runs_on_numpy(monkeypatch):

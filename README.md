@@ -331,8 +331,10 @@ a block", or "NumPy, as mutate(e = exp(x)): exp() runs on NumPy") and
 result notes how its blocks ran ("ran: 40 blocks in a compiled kernel").
 A block runs on NumPy instead, with the same result, where one of its
 values is one the kernel cannot match NumPy on (a float key that is not
-whole, a negative zero, an infinity) or its keys' groups make more than 16
-million combinations, or more than a block's share of `memory=` allows. The
+whole, a negative zero, an infinity). Where its keys' groups make more
+combinations than dense tables hold (16 million, or what a block's share
+of `memory=` allows), the block sorts the combinations its positions hold
+and keeps tables only for those, still compiled. The
 results are NumPy's bits, but for one case: on x86, NumPy's `min` and `max`
 of a -0.0 and a +0.0 give whichever they meet second, where the kernels,
 as NumPy on ARM, give -0.0 and +0.0. Kernels are compiled the first time
