@@ -196,10 +196,10 @@ def summary_source(name: str, inputs: list[str], slots: list[Slot]) -> str:
     arrays = [array for slot in slots for array in slot.arrays(1)]
     arguments = ", ".join(["positions", "cells", "codes", *inputs, *arrays, "counts"])
     lines = [f"def {name}({arguments}):", "    for i in range(positions):", "        g = codes[i]",
-             "        counts[g] += 1"]
+             "        if g < 0:", "            continue", "        counts[g] += 1"]  # -1: filtered out, or dropped
     lines += _loop(slots, "update")
     if any(slot.second("") for slot in slots):
-        lines += ["    for i in range(positions):", "        g = codes[i]"]
+        lines += ["    for i in range(positions):", "        g = codes[i]", "        if g < 0:", "            continue"]
         lines += _loop([slot for slot in slots if slot.second("")], "second")
     return "\n".join(lines) + "\n"
 
@@ -222,11 +222,10 @@ def counted_values(counts: np.ndarray, slot: Slot, cells: int) -> np.ndarray:
 
 
 def compile_summary(source: str, name: str) -> Any:
-    import numba
+    """*source*'s function *name*, compiled by Numba (``fused.kernels``)."""
+    from tidy3a.fused.kernels import compile_source
 
-    namespace: dict[str, Any] = {"np": np}
-    exec(compile(source, f"<tidy3a summary {name}>", "exec"), namespace)
-    return numba.njit(nogil=True, error_model="numpy")(namespace[name])
+    return compile_source(source, name)
 
 
 assert sums.PIECES == 7  # the estimate's pieces, in labelarray's order: total, magnitude, present, values, +inf, -inf

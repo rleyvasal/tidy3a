@@ -191,7 +191,17 @@ def _leaf(frame: ChunkedFrame, rows: TidyArray, axis: str) -> tuple[int, int, in
             later = max(later, 8 * len(keys) + 16)
             fixed = max(fixed, working.fixed + SLICE * (working.later + 8))
         fixed = max(fixed, working.fixed)
+    if _compiled(frame):  # its blocks' dense tables (``fused.driver``), whatever a block's size
+        from tidy3a.fused.driver import dense_limit
+
+        fixed = max(fixed, dense_limit(frame._blocks.memory, frame._blocks.threads))
     return work + values + max(first, later), 0, fixed  # a block's pieces are per group
+
+
+def _compiled(frame: ChunkedFrame) -> bool:
+    from tidy3a.fused import plan_for
+
+    return plan_for(frame).compiled
 
 
 def _new(before: TidyArray, after: TidyArray, axis: str) -> int:

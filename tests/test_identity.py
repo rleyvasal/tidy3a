@@ -250,7 +250,8 @@ def counting(counts):
     return Verb("counting()", apply, operation="mutate", arguments=[])
 
 
-def test_a_scan_shares_the_steps_of_pipelines_written_apart():
+def test_a_scan_shares_the_steps_of_pipelines_written_apart(monkeypatch):
+    monkeypatch.setenv("TIDY3A_COMPILED", "0")  # sharing is the NumPy walk's; a compiled frame walks no verbs
     rng = np.random.default_rng(0)
     values = (rng.normal(size=(20_000, 5)) * 30).astype("float32")
     values[:, 4] = rng.integers(0, 40, len(values))
@@ -272,9 +273,10 @@ def test_a_scan_shares_the_steps_of_pipelines_written_apart():
                                                      >> summarise(points=n()) >> pull("points")).tolist()
 
 
-def test_steps_that_differ_are_not_shared_and_neither_is_what_follows():
+def test_steps_that_differ_are_not_shared_and_neither_is_what_follows(monkeypatch):
     """x * 1 and x * 1.0 give the same float32 values here, but are different steps (an integer and a float), so
     the scan shares neither them nor the identical steps after them."""
+    monkeypatch.setenv("TIDY3A_COMPILED", "0")  # sharing is the NumPy walk's; a compiled frame walks no verbs
     values = np.ones((10, 2), dtype="float32")
     options = dict(dims={"point": infer, "feature": 2}, labels={"feature": ["x", "y"]}, field_axis="feature")
     counts = []

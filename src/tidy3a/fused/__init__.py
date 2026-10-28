@@ -31,7 +31,7 @@ from typing import Any
 
 from tidy3a.errors import FilterError, MutateError, SummariseError, TidyError
 from tidy3a.expr import Context
-from tidy3a.fused.expressions import Compiler, Unsupported
+from tidy3a.fused.expressions import Compiler, Inherited, Unsupported
 
 REDUCTIONS = frozenset({"n", "sum", "mean", "min", "max", "std", "var", "any", "all", "median", "quantile"})
 
@@ -116,8 +116,13 @@ def _verb(verb: Any, rows: Any, compiler: Compiler) -> tuple[list[str], Any]:
         return [], rows >> verb
     if verb._operation == "filter":
         context = Context(rows, verb="filter", error=FilterError)
-        return [f"{verb.text}: {why}" for predicate in verb._arguments
-                for why in _expression(predicate, context, compiler)], rows >> verb
+        reasons = []
+        for predicate in verb._arguments:
+            found = _expression(predicate, context, compiler)
+            if not found and compiler.compile(predicate, context).cells:
+                found = ["a test of each value within a position runs on NumPy"]
+            reasons += [f"{verb.text}: {why}" for why in found]
+        return reasons, rows >> verb
     from tidy3a.verbs import mutate
 
     reasons = []
@@ -127,7 +132,13 @@ def _verb(verb: Any, rows: Any, compiler: Compiler) -> tuple[list[str], Any]:
         if not isinstance(step.target, str) or (rows._field_axis is not None and step.target not in held
                                                 and _is_field(rows, step.target)):
             reasons.append(f"{verb.text}: {step.text()} writes into an array's fields, which runs on NumPy")
-        reasons += [f"{verb.text}: {why}" for why in _expression(step.value, context, compiler)]
+        found = _expression(step.value, context, compiler, inherited := [])
+        reasons += [f"{verb.text}: {why}" for why in found]
+        if isinstance(step.target, str):
+            if found or inherited:
+                compiler.refuse(step.target)
+            else:
+                compiler.define(step.target, step.value, context)
         rows = rows >> mutate(step)
     return reasons, rows
 
@@ -150,10 +161,15 @@ def _key(part: Any, rows: Any, compiler: Compiler) -> list[str]:
     return []
 
 
-def _expression(node: Any, context: Context, compiler: Compiler) -> list[str]:
-    """Why *node* does not compile, as the compiler finds it; none when it compiles."""
+def _expression(node: Any, context: Context, compiler: Compiler, inherited: list[str] | None = None) -> list[str]:
+    """Why *node* does not compile, as the compiler finds it; none when it compiles, or when what it reads was made
+    on NumPy, whose step has given the reason, which goes into *inherited*."""
     try:
         compiler.compile(node, context)
+    except Inherited as why:
+        if inherited is not None:
+            inherited.append(str(why))
+        return []
     except Unsupported as why:
         return [str(why)]
     return []

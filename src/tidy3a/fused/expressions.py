@@ -35,6 +35,11 @@ class Unsupported(Exception):
     """A step the compiler does not take, and why; the planner falls back to NumPy for it."""
 
 
+class Inherited(Unsupported):
+    """A step reading a variable an earlier ``mutate`` made in a way that runs on NumPy, whose reason was given
+    there."""
+
+
 @dataclass(frozen=True)
 class Source:
     """One step as kernel source: ``text`` gives its value at position ``i`` (and value ``j``), in ``dtype``; a
@@ -48,10 +53,27 @@ class Source:
 
 @dataclass
 class Compiler:
-    """Expressions of one block's verbs as source, the arrays they read named ``a0``, ``a1``, ... in ``inputs``."""
+    """Expressions of one block's verbs as source, the arrays they read named ``a0``, ``a1``, ... in ``inputs``.
+
+    A variable an earlier ``mutate`` of the pipeline made is not read from an array: its defining expression is
+    compiled in its place (``define``), in the frame it was defined in, and cast to the type it was stored as, which
+    is what NumPy computes in storing it and reading it back. The values of a position (a grid's) must lie the same
+    way in every variable read, since a kernel does not broadcast one grid onto another.
+    """
 
     axis: Hashable
     inputs: dict[str, tuple[Ref, bool]] = field(default_factory=dict)  # local name: (reference, per value)
+    definitions: dict[Hashable, tuple[Any, Context, dict] | None] = field(default_factory=dict)  # None: refused
+    cells: tuple | None = None  # the other axes of every variable read with values per position, and their sizes
+
+    def define(self, name: Hashable, expression: Any, context: Context) -> None:
+        """``mutate(name = expression)``, with *context* the frame before it: later steps compile *expression*, with
+        the definitions as they stood before it, so ``x = x * 2`` reads the earlier ``x``."""
+        self.definitions = {**self.definitions, name: (expression, context, self.definitions)}
+
+    def refuse(self, name: Hashable) -> None:
+        """``mutate(name = ...)`` runs on NumPy: a later step reading *name* is refused as ``Inherited``."""
+        self.definitions = {**self.definitions, name: None}
 
     def compile(self, node: Any, context: Context) -> Source:
         lower = getattr(node, "lower", None)
@@ -81,10 +103,27 @@ class Compiler:
         dtype = value_type(value)
         if dtype.kind not in "biuf" or dtype == np.float16:
             raise Unsupported(f"{node.text()} is {kind_words(dtype)}, which runs on NumPy")
+        if node.kind != "label" and node.name in self.definitions:  # made by an earlier mutate: its expression
+            if self.definitions[node.name] is None:
+                raise Inherited(f"{node.text()} is made on NumPy")
+            expression, defined, earlier = self.definitions[node.name]
+            now, self.definitions = self.definitions, earlier
+            try:
+                source = self.compile(expression, defined)
+            finally:
+                self.definitions = now
+            return Source(_as(cast(source, dtype), dtype), dtype, source.cells)
         dims = tuple(getattr(value, "dims", ()))
         cells = any(dim != self.axis for dim in dims)
         if self.axis not in dims:
             raise Unsupported(f"{node.text()} does not vary along {self.axis}, which runs on NumPy")
+        if cells:
+            if dims[0] != self.axis:
+                raise Unsupported(f"{node.text()} does not have {self.axis} first, which runs on NumPy")
+            layout = tuple(zip(dims[1:], getattr(value, "shape", ())[1:]))
+            if self.cells is not None and layout != self.cells:
+                raise Unsupported(f"{node.text()} lies over other axes than the values before it, which runs on NumPy")
+            self.cells = layout
         for local, (ref, _) in self.inputs.items():
             if ref.name == node.name and ref.kind == node.kind:
                 break

@@ -520,9 +520,17 @@ class ChunkedFrame(TidyArray):
         return self._run().__tidy__(**options)
 
     def explain(self) -> Any:
-        """Each step's effect on the schema (``?`` for sizes the data decides), or on every block once a result has
-        been computed."""
-        return self._result.explain() if self._result is not None else TidyArray.explain(self)
+        """Each step's effect on the schema (``?`` for sizes the data decides), and how a summary's blocks are planned
+        to run (``tidy3a.fused``), each step that runs on NumPy and why; or, once a result has been computed, each
+        step's effect on every block, and how the blocks ran."""
+        if self._result is not None:
+            return self._result.explain()
+        plan = TidyArray.explain(self)
+        if self._summarised:
+            from tidy3a.fused import plan_for
+
+            plan.tail = tuple(plan_for(self).lines())
+        return plan
 
     @translating
     def __repr__(self) -> str:
@@ -538,6 +546,10 @@ class ChunkedFrame(TidyArray):
         if shown.groups:
             lines.append(f"groups: {', '.join(shown.groups)}")
         lines += [note for note in shown.notes]
+        if self._summarised:
+            from tidy3a.fused import plan_for
+
+            lines.append(f"planned run: {plan_for(self).words()}")
         lines.append(f"blocks: {self._layout().words()}; ? is a size the data decides; preview() runs a sample, and "
                      "collect() or pull() every block")
         return "\n".join(lines)
@@ -1072,6 +1084,32 @@ def _merged(left: Future, right: Future) -> _Table:
     return table
 
 
+def _fused(frame: ChunkedFrame) -> tuple[Any, str | None]:
+    """*frame*'s summary compiled (``tidy3a.fused.driver``), or None for NumPy, as planned or because Numba could not
+    compile the kernel, which is the reason given."""
+    from tidy3a.fused import unavailable
+
+    if unavailable() is not None:
+        return None, None
+    from tidy3a.fused.driver import build
+
+    try:
+        return build(frame), None
+    except Exception as error:  # Numba's own errors: the blocks run on NumPy, and the result says why
+        if not type(error).__module__.startswith("numba"):
+            raise
+        return None, f"Numba could not compile its kernel ({type(error).__name__}: {str(error).splitlines()[0]})"
+
+
+def _ran(runs: dict[str | None, int]) -> str:
+    """How a compiled summary's blocks ran: "ran: 105 blocks in a compiled kernel", and any on NumPy, and why."""
+    compiled = runs.get(None, 0)
+    words = [f"{compiled:,} block{'' if compiled == 1 else 's'} in a compiled kernel"] if compiled else []
+    words += [f"{count:,} {'block' if count == 1 else 'blocks'} on NumPy, as {why}" if not words
+              else f"{count:,} on NumPy, as {why}" for why, count in runs.items() if why is not None]
+    return "ran: " + "; ".join(words)
+
+
 def _walk(node: _Node, frame: TidyArray, visit: Callable[[_Leaf, TidyArray], None]) -> None:
     """Depth first: *visit* each leaf at *node* with the frame so far, then each next verb's node with the frame after
     it, so a prefix's frame lives while its branches run, and each verb runs once per block."""
@@ -1137,12 +1175,16 @@ def _scan_once(frames: Sequence[ChunkedFrame], writers: Sequence[tuple[ChunkedFr
     blocks = every[0]._layout() if len(every) == 1 else every[0]._blocks.sized(every)
     leaves = [_Leaf(frame, _Table(frame._plan) if frame._summarised else None, []) for frame in frames]
     leaves += [_Leaf(frame, None, [], writer) for frame, writer in writers]
-    root = _trie(leaves)
+    compiled = {id(leaf): _fused(leaf.frame) for leaf in leaves if leaf.table is not None}
+    fused = {key: kernels for key, (kernels, _) in compiled.items() if kernels is not None}
+    refused = {key: why for key, (_, why) in compiled.items() if why is not None}  # planned, but Numba refused
+    root = _trie([leaf for leaf in leaves if id(leaf) not in fused])  # the rest run as their kernels say
     needs = [_needs(frame) for frame in every]
     names = None if any(need is None for need in needs) else frozenset().union(*needs)
 
-    def block(span: tuple[int, int]) -> list[tuple[_Leaf, Any]]:
+    def block(span: tuple[int, int]) -> tuple[list[tuple[_Leaf, Any]], list[tuple[_Leaf, str | None]]]:
         found: list[tuple[_Leaf, Any]] = []
+        ran: list[tuple[_Leaf, str | None]] = []  # how each compiled frame's block ran: None, or why on NumPy
 
         def visit(leaf: _Leaf, frame: TidyArray) -> None:
             if leaf.table is None:
@@ -1153,12 +1195,31 @@ def _scan_once(frames: Sequence[ChunkedFrame], writers: Sequence[tuple[ChunkedFr
                 found.append((leaf, table))
 
         with _naming(blocks, span):
-            _walk(root, blocks.load(*span, names), visit)
-        return found
+            loaded = blocks.load(*span, names)
+            for leaf in leaves:
+                kernels = fused.get(id(leaf))
+                if kernels is None:
+                    continue
+                table, why = kernels.run(loaded)
+                if table is None:  # this block on NumPy: the frame's row-wise verbs, then its summary
+                    rows = loaded
+                    for verb in leaf.frame._steps:
+                        if verb._operation in ROW_WISE:
+                            rows = rows >> verb
+                    table = _Table(leaf.table.plan)
+                    table.merge(*_partial(leaf.table.plan, rows, blocks.axis))
+                found.append((leaf, table))
+                ran.append((leaf, why))
+            _walk(root, loaded, visit)
+        return found, ran
 
     with ThreadPoolExecutor(blocks.threads) as pool:
         trees = {id(leaf): _Tree(pool) for leaf in leaves if leaf.table is not None}
-        for found in _in_order(pool, block, blocks.spans):  # rows taken as the blocks arrive, in order
+        runs: dict[int, dict[str | None, int]] = {key: {} for key in fused}
+        runs.update({key: {why: len(blocks.spans)} for key, why in refused.items()})
+        for found, ran in _in_order(pool, block, blocks.spans):  # rows taken as the blocks arrive, in order
+            for leaf, why in ran:
+                runs[id(leaf)][why] = runs[id(leaf)].get(why, 0) + 1
             for leaf, part in found:
                 if leaf.writer is not None:
                     leaf.writer.add(part)
@@ -1185,6 +1246,8 @@ def _scan_once(frames: Sequence[ChunkedFrame], writers: Sequence[tuple[ChunkedFr
             frame._result = frame._evolve()
         else:
             frame._result = _result(frame, table.plan, table, table.finish(settled[id(leaf)][0]))
+        if id(leaf) in runs and blocks.chosen is None:  # how the blocks ran, beside the result (milestone 16)
+            frame._result = _recorded(frame._result._evolve(notes=[_ran(runs[id(leaf)])]))
 
 
 def _passes(leaves: Sequence[_Leaf], blocks: Blocks, pool: ThreadPoolExecutor,

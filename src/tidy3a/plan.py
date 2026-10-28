@@ -88,8 +88,9 @@ def recorded(before: Any, verb: Any, result: Any) -> Any:
 class Plan:
     """What ``explain()`` gives: the source and each step with its effect; it prints as text."""
 
-    def __init__(self, record: Record):
+    def __init__(self, record: Record, tail: tuple[str, ...] = ()):
         self.record = record
+        self.tail = tail  # lines after the steps: how a frame read in blocks is planned to run
 
     @property
     def steps(self) -> tuple[Step, ...]:
@@ -111,7 +112,7 @@ class Plan:
             effect = _effect(before, step.after) or ["(no change)"]
             lines += [f"     {line}" for line in effect]
             before = step.after
-        return "\n".join(lines)
+        return "\n".join([*lines, *self.tail])
 
     __repr__ = __str__
 

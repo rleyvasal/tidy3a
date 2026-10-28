@@ -121,17 +121,23 @@ def _lcm(*fractions: Fraction) -> int:
     return lcm(*(fraction.denominator for fraction in fractions))
 
 
-def kernel_source(name: str, keys: list[Key], compiler: Compiler) -> str:
-    """A function ``name(positions, a0, ..., [edges0, ...,] ks0, missing0, ...)`` placing every position of each key,
-    returning 0, or -1 at the first value where agreement with NumPy is not established; each key's range and count
-    of missing values are written into ``ranges[k] = (low, high, missing)``."""
+def kernel_source(name: str, keys: list[Key], compiler: Compiler, tests: list[str] | None = None) -> str:
+    """A function ``name(positions, a0, ..., [edges0, ...,] ks0, missing0, ..., [keep,] ranges)`` placing every
+    position of each key, returning 0, or -1 at the first value where agreement with NumPy is not established; each
+    key's range and count of missing values are written into ``ranges[k] = (low, high, missing)``. With *tests* (a
+    filter's, as source), ``keep[i]`` says whether position ``i`` passed them, and only those are placed."""
     edges = [f"edges{k}" for k, key in enumerate(keys) if key.how == "bins"]
     outputs = [name for k in range(len(keys)) for name in (f"ks{k}", f"missing{k}")]
-    arguments = ", ".join(["positions", *compiler.inputs, *edges, *outputs, "ranges"])
+    kept = ["keep"] if tests is not None else []
+    arguments = ", ".join(["positions", *compiler.inputs, *edges, *outputs, *kept, "ranges"])
     lines = [f"def {name}({arguments}):"]
     for k in range(len(keys)):
         lines += [f"    low{k} = np.int64({2**63 - 1})", f"    high{k} = np.int64({-2**63})", f"    count{k} = 0"]
     lines.append("    for i in range(positions):")
+    if tests is not None:
+        lines.append("        keep[i] = False")
+        lines += [f"        if not ({test}):\n            continue" for test in tests]
+        lines.append("        keep[i] = True")
     for k, key in enumerate(keys):
         # A missing value skips the key's other lines, not the other keys': each key's placement is a loop body of
         # its own, run once (for ... in range(1)), which `continue` leaves.
@@ -155,14 +161,26 @@ def _far(k, start, step):
 
 
 def compile_keys(source: str, name: str) -> Any:
-    """*source*'s function *name* with the helpers it calls, compiled by Numba."""
-    import numba
+    """*source*'s function *name* with the helpers it calls, compiled by Numba (``fused.kernels``)."""
+    from tidy3a.fused.kernels import compile_source
 
-    namespace: dict[str, Any] = {"np": np}
-    exec(compile(HELPERS + source, f"<tidy3a keys {name}>", "exec"), namespace)
-    for helper in ("_at", "_far"):
-        namespace[helper] = numba.njit(nogil=True)(namespace[helper])
-    return numba.njit(nogil=True, error_model="numpy")(namespace[name])
+    return compile_source(HELPERS + source, name, ("_at", "_far"))
+
+
+def labels_of(key: Key, found: np.ndarray, dtype: np.dtype) -> list:
+    """The labels of a key's occupied buckets *found*, in order, as labelarray gives them (every bin for ``bins``)."""
+    if key.how == "bins":
+        return key.part.transform.groups(np.zeros(0, dtype=dtype))[1]
+    if key.how == "value":
+        return found.astype(dtype).tolist()
+    return key.part.transform._labels(found, np.zeros(0, dtype=dtype))
+
+
+def missing_label(key: Key, dtype: np.dtype) -> Any:
+    """The label of a key's missing values' group."""
+    if key.how == "value":
+        return np.array(["nan"], dtype).tolist()[0]
+    return key.part.transform.missing_label(dtype)
 
 
 def groups(key: Key, ks: np.ndarray, missing: np.ndarray, low: int, high: int, count: int,
@@ -172,7 +190,7 @@ def groups(key: Key, ks: np.ndarray, missing: np.ndarray, low: int, high: int, c
     present = ~missing
     codes = np.empty(len(ks), dtype=np.intp)
     if key.how == "bins":
-        labels = key.part.transform.groups(np.zeros(0, dtype=dtype))[1]
+        labels = labels_of(key, ks[:0], dtype)
         codes[present] = ks[present]
     elif high >= low:
         placed = ks[present]
@@ -183,17 +201,50 @@ def groups(key: Key, ks: np.ndarray, missing: np.ndarray, low: int, high: int, c
         else:  # a range much wider than the values: sorting them
             found, inverse = np.unique(placed, return_inverse=True)
             codes[present] = inverse.reshape(-1)
-        if key.how == "value":
-            labels = found.astype(dtype).tolist()
-        else:
-            labels = key.part.transform._labels(found, np.zeros(0, dtype=dtype))
+        labels = labels_of(key, found, dtype)
     else:
         labels = []
     if not count:
         return labels, codes, 0
     codes[missing] = len(labels)
-    if key.how == "value":
-        labels = [*labels, *np.array(["nan"], dtype).tolist()]
-    else:
-        labels = [*labels, key.part.transform.missing_label(dtype)]
-    return labels, codes, count if key.part.dropna else 0
+    return [*labels, missing_label(key, dtype)], codes, count if key.part.dropna else 0
+
+
+DENSE = '''
+def occupied(positions, keep, ks, missing, low, out):
+    for i in range(positions):
+        if keep[i] and not missing[i]:
+            out[ks[i] - low] = True
+
+
+def dense(positions, keep, ks, missing, lows, ranks, offsets, missing_codes, sizes, out):
+    valid = 0
+    for i in range(positions):
+        if not keep[i]:
+            out[i] = -1
+            continue
+        g = 0
+        for k in range(len(sizes)):
+            if missing[k, i]:
+                c = missing_codes[k]
+                if c < 0:
+                    g = -1
+                    break
+            else:
+                c = ranks[offsets[k] + ks[k, i] - lows[k]]
+            g = g * sizes[k] + c
+        out[i] = g
+        if g >= 0:
+            valid += 1
+    return valid
+'''
+"""Kernels the same for every summary: which of a key's buckets the kept positions occupy, and each kept position's
+group among the dense combinations of the keys' groups, numbered as ``np.ravel_multi_index`` numbers them (-1 for a
+position filtered out, or dropped for a missing key), from each key's rank of its buckets."""
+
+
+def dense_kernels() -> tuple[Any, Any]:
+    from tidy3a.fused.kernels import compile_source
+
+    return compile_source(DENSE, "occupied"), compile_source(DENSE, "dense")
+

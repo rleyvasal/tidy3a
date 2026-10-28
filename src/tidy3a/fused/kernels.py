@@ -30,10 +30,20 @@ def loop_source(name: str, compiler: Compiler, outputs: Sequence[Source]) -> str
     return "\n".join(lines) + "\n"
 
 
-def compile_source(source: str, name: str) -> Any:
-    """*source*'s function *name*, compiled by Numba."""
+COMPILED: dict[tuple[str, str], Any] = {}  # this process's kernels by their source: each compiled once
+
+
+def compile_source(source: str, name: str, helpers: tuple[str, ...] = ()) -> Any:
+    """*source*'s function *name*, with the *helpers* it defines and calls, compiled by Numba, once a process for
+    each source."""
+    found = COMPILED.get((name, source))
+    if found is not None:
+        return found
     import numba
 
     namespace: dict[str, Any] = {"np": np}
     exec(compile(source, f"<tidy3a kernel {name}>", "exec"), namespace)
-    return numba.njit(nogil=True, error_model="numpy")(namespace[name])
+    for helper in helpers:
+        namespace[helper] = numba.njit(nogil=True)(namespace[helper])
+    found = COMPILED[(name, source)] = numba.njit(nogil=True, error_model="numpy")(namespace[name])
+    return found

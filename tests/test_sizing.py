@@ -141,7 +141,9 @@ class Inline:
 
 @pytest.fixture
 def block_peaks(monkeypatch):
-    """The peak of each block's work, every pass included, as the blocks run one at a time."""
+    """The peak of each block's work, every pass included, as the blocks run one at a time, on NumPy: the estimate's
+    per-position costs are NumPy's steps', a bound for a compiled kernel's, which writes no arrays a value."""
+    monkeypatch.setenv("TIDY3A_COMPILED", "0")
     peaks = []
     naming = chunked._naming
 

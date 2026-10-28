@@ -610,7 +610,8 @@ RINGS = group_by(ring) >> summarise(points=n(), low=min(z), high=max(z))
 GRID = group_by(cells(x, 20.0), rounded(y, 25), axis="cell") >> summarise(points=n(), top=max(intensity))
 
 
-def test_the_shared_prefix_runs_once_per_block(npy):
+def test_the_shared_prefix_runs_once_per_block(npy, monkeypatch):
+    monkeypatch.setenv("TIDY3A_COMPILED", "0")  # the NumPy walk's sharing: a compiled frame does not walk its verbs
     path, values = npy
     counts = []
     cloud_ = read_array(path, dims={"point": infer, "feature": 5}, labels={"feature": NAMES}, field_axis="feature",
@@ -667,6 +668,8 @@ def test_the_exact_pass_is_shared_and_gives_the_same_bits(npy, monkeypatch, pair
     """Two branches whose float32 sums the error bound cannot settle (the tie group) get their exact sums from one
     more pass; with EXACT_PAIRS at 1, a pass takes one combination, so each branch's tie group gets a pass of its own."""
     from labelarray import sums as labelarray_sums
+
+    monkeypatch.setenv("TIDY3A_COMPILED", "0")  # passes counted by the NumPy walk; a compiled first pass is not walked
 
     if pairs is not None:
         monkeypatch.setattr(labelarray_sums, "EXACT_PAIRS", pairs)
