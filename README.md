@@ -8,7 +8,7 @@ arrays. Pipelines of `select`, `filter`, `mutate`, `group_by`, and
 (and [labelarray](https://github.com/rleyvasal/labelarray), its array layer,
 which needs only NumPy too); xarray is optional.
 
-**Status:** version `0.9.0`, on [PyPI](https://pypi.org/project/tidy3a/).
+**Status:** version `0.10.0`, on [PyPI](https://pypi.org/project/tidy3a/).
 What changed in each release is in [CHANGELOG.md](CHANGELOG.md); the design
 is in [docs/plan.md](docs/plan.md), and the rules fit on one page in
 [docs/decisions.md](docs/decisions.md).
@@ -343,10 +343,11 @@ a summary of their shape runs and kept in `~/.cache/tidy3a/kernels`
 `TIDY3A_COMPILED=0` turns compiling off. On a 12-core machine, the rings
 summary of 40M points in memory (the distance, a filter, and the count and
 mean brightness per ring) took 0.10 s on twelve threads against 0.42 s on
-NumPy, and the daytime summary of 2,000 grids 0.038 s against 0.069 s; the
-540,000-voxel summary gains less (2.41 s against 3.21 s), as most of it is
-merging the blocks' groups and the exact pass of its float32 mean, which
-run on NumPy.
+NumPy, the daytime summary of 2,000 grids 0.038 s against 0.069 s, and
+the 540,000-voxel summary 1.39 s against 3.16 s. A compiled block knows
+which float32 totals no addition rounded, and those settle from the total
+itself, so the voxels' means, many on a tie between two float32 values,
+need no second pass for their exact sums.
 
 A summarised pipeline is `select`, `filter`, and `mutate` of row-wise
 expressions, `group_by` of value keys (fields, `cells`, `bins`, `rounded`,
