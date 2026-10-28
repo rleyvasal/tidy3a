@@ -30,10 +30,10 @@ def test_the_registry_is_what_blocks_can_answer():
 def source(dtype, seed=0):
     xr = pytest.importorskip("xarray")
     rng = np.random.default_rng(seed)
-    count = 2_000
+    count = 600  # with blocks of one position, a block per value; enough for six groups of ties and missing values
     if dtype.startswith("float"):
         values = (rng.normal(size=count) * 100).astype(dtype)
-        values[rng.choice(count, 40, replace=False)] = np.nan
+        values[rng.choice(count, 12, replace=False)] = np.nan
         values[:5] = values.dtype.type(2**24)  # ties a float32 estimate cannot settle alone
     else:
         values = rng.integers(-1_000, 1_000, count).astype(dtype)
@@ -170,7 +170,7 @@ def _value_range(registered):
                               fill=np.array([[np.inf], [-np.inf]]))  # each row's own fill
 
 
-def positive(seed=5, count=3_000):
+def positive(seed=5, count=600):
     xr = pytest.importorskip("xarray")
     rng = np.random.default_rng(seed)
     values = rng.uniform(0.5, 9.0, count)
@@ -194,7 +194,7 @@ def test_a_registered_reduction_runs_in_memory_as_its_function_says(registered, 
     assert geomean(v, na_rm=True).text() == "geomean(v, na_rm=True)"
 
 
-@pytest.mark.parametrize("rows", [1, 97, 3_000])
+@pytest.mark.parametrize("rows", [1, 97, 600])
 def test_registered_reductions_run_on_blocks(registered, rows):
     """A geometric mean through sums of logs (float64, close), and a range whose two rows each have their own fill
     (the same bits); grouped, by bins with an empty bin, and whole."""
@@ -245,7 +245,7 @@ def test_frames_with_a_registered_reduction_share_a_scan(registered):
     geomean = _geometric_mean(registered)
     data = positive()
     v, g = fields("v", "g")
-    frame = tidy(data, blocks={"point": 600})
+    frame = tidy(data, blocks={"point": 120})
     loads = []
     load = frame._blocks.source.block
     frame._blocks.source.block = lambda start, stop, names=None: loads.append(1) or load(start, stop, names)
