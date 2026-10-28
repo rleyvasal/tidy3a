@@ -138,3 +138,51 @@ def test_combining_an_empty_table_changes_nothing():
     empty = chunked._Table(frame._plan)
     empty.combine(table_of(frame._plan, found[0]))
     assert np.array_equal(empty.keys, table.keys) and np.array_equal(empty.counts, table.counts)
+
+
+# ── The tree in a run ───────────────────────────────────────────────────────
+
+
+def same_frames(a, b):
+    a, b = a.to_dict(), b.to_dict()
+    assert a["data_vars"].keys() == b["data_vars"].keys()
+    for name in a["data_vars"]:
+        x, y = np.asarray(a["data_vars"][name]["data"]), np.asarray(b["data_vars"][name]["data"])
+        assert x.dtype == y.dtype and (same_labels(x, y) if x.dtype == object else x.tobytes() == y.tobytes()), name
+    for name in a["coords"]:
+        x, y = np.asarray(a["coords"][name]["data"]), np.asarray(b["coords"][name]["data"])
+        assert same_labels(x, y), name
+
+
+@pytest.mark.parametrize("key", list(KEYS))
+def test_a_run_gives_the_same_bits_on_any_number_of_threads(key):
+    """The tree's shape follows the block numbers alone, so even float64 sums and spreads repeat across threads."""
+    runs = []
+    for threads in (1, 2, 3, 8):
+        frame = tidy(data(), blocks={"point": 97}, threads=threads)
+        runs.append(frame >> KEYS[key] >> SUMMARIES if KEYS[key] is not None else frame >> SUMMARIES)
+    for run in runs[1:]:
+        same_frames(run, runs[0])
+
+
+def test_a_scans_frames_each_get_their_own_tree():
+    from tidy3a import scan
+
+    source = tidy(data(), blocks={"point": 97}, threads=4)
+    frames = [source >> group_by(g) >> SUMMARIES, source >> group_by(cells(c, 5)) >> SUMMARIES]
+    together = scan(*frames)
+    for got, pipeline in zip(together, (group_by(g) >> SUMMARIES, group_by(cells(c, 5)) >> SUMMARIES)):
+        same_frames(got, tidy(data(), blocks={"point": 97}, threads=1) >> pipeline)
+
+
+def test_the_merges_run_on_the_pools_threads(monkeypatch):
+    import threading
+
+    where = []
+    merged = chunked._merged
+    monkeypatch.setattr(chunked, "_merged", lambda left, right: where.append(threading.current_thread())
+                        or merged(left, right))
+    frame = tidy(data(), blocks={"point": 97}, threads=4) >> group_by(g) >> SUMMARIES
+    frame.to_dict()
+    assert len(where) == 31 - 1  # 31 blocks, merged into one
+    assert threading.main_thread() not in where

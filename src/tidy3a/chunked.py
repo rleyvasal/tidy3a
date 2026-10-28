@@ -59,7 +59,7 @@ import dataclasses
 import math
 import warnings
 from collections.abc import Callable, Hashable, Iterator, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -1001,6 +1001,43 @@ def _trie(leaves: Sequence[_Leaf]) -> _Node:
     return root
 
 
+class _Tree:
+    """A frame's block summaries merged in a fixed tree by block number, the merges run on the pool (plan milestone
+    15): as a binary counter, two tables of 2**k blocks each become one of 2**(k+1) once both are there, and the last
+    are merged from the right, so the tree's shape follows the number of blocks alone and its result is the same on
+    any number of threads. A merge waits only on work handed to the pool before it, which has begun by the time it
+    begins, so the pool cannot deadlock however few its threads."""
+
+    def __init__(self, pool: ThreadPoolExecutor) -> None:
+        self.pool = pool
+        self.stack: list[tuple[int, Future]] = []  # (level, the table of 2**level consecutive blocks, to come)
+
+    def add(self, table: _Table) -> None:
+        merged: Future = Future()
+        merged.set_result(table)
+        level = 0
+        while self.stack and self.stack[-1][0] == level:
+            merged = self.pool.submit(_merged, self.stack.pop()[1], merged)
+            level += 1
+        self.stack.append((level, merged))
+
+    def result(self, empty: _Table) -> _Table:
+        """The merged table: *empty* when no block came."""
+        if not self.stack:
+            return empty
+        merged = self.stack.pop()[1]
+        while self.stack:
+            merged = self.pool.submit(_merged, self.stack.pop()[1], merged)
+        return merged.result()
+
+
+def _merged(left: Future, right: Future) -> _Table:
+    """The table of *left*'s blocks followed by *right*'s."""
+    table = left.result()
+    table.combine(right.result())
+    return table
+
+
 def _walk(node: _Node, frame: TidyArray, visit: Callable[[_Leaf, TidyArray], None]) -> None:
     """Depth first: *visit* each leaf at *node* with the frame so far, then each next verb's node with the frame after
     it, so a prefix's frame lives while its branches run, and each verb runs once per block."""
@@ -1076,22 +1113,28 @@ def _scan_once(frames: Sequence[ChunkedFrame], writers: Sequence[tuple[ChunkedFr
         def visit(leaf: _Leaf, frame: TidyArray) -> None:
             if leaf.table is None:
                 found.append((leaf, frame._data))
-            else:
-                found.append((leaf, _partial(leaf.table.plan, frame, blocks.axis)))
+            else:  # the block's summary, a table of its own, made here in the worker
+                table = _Table(leaf.table.plan)
+                table.merge(*_partial(leaf.table.plan, frame, blocks.axis))
+                found.append((leaf, table))
 
         with _naming(blocks, span):
             _walk(root, blocks.load(*span, names), visit)
         return found
 
     with ThreadPoolExecutor(blocks.threads) as pool:
-        for found in _in_order(pool, block, blocks.spans):  # merged as the blocks arrive, in order
+        trees = {id(leaf): _Tree(pool) for leaf in leaves if leaf.table is not None}
+        for found in _in_order(pool, block, blocks.spans):  # rows taken as the blocks arrive, in order
             for leaf, part in found:
                 if leaf.writer is not None:
                     leaf.writer.add(part)
                 elif leaf.table is None:
                     leaf.parts.append(part)
                 else:
-                    leaf.table.merge(*part)
+                    trees[id(leaf)].add(part)
+        for leaf in leaves:
+            if leaf.table is not None:
+                leaf.table = trees[id(leaf)].result(leaf.table)
         settled: dict[int, tuple[dict[str, np.ndarray], dict[str, list[Any]]]] = {}
         for leaf in leaves:
             if leaf.table is not None and leaf.table.keys is not None:
