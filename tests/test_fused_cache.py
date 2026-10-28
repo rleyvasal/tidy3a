@@ -1,6 +1,7 @@
 """Compiled kernels kept on disk (plan milestone 16, step 6): written once, read by later runs, named by what decides
 their machine code, and compiled in memory where they cannot be kept."""
 
+import builtins
 import json
 import os
 import subprocess
@@ -96,3 +97,42 @@ def test_kernels_compile_in_memory_where_they_cannot_be_kept(tmp_path, monkeypat
     out = np.zeros(2)
     twice(2, np.array([1.0, 4.0]), out)
     assert out.tolist() == [2.0, 8.0]
+
+
+def test_the_folder_is_held_to_its_limit_least_recently_used_first(tmp_path, monkeypatch):
+    """A new kernel removes the least recently used ones, module and Numba's files together, past
+    ``TIDY3A_KERNELS_MAX``; loading one records its use."""
+    monkeypatch.setenv("TIDY3A_KERNELS", str(tmp_path))
+    sources = [SOURCE.replace("* 2", f"* {k}") for k in range(2, 6)]
+    for k, source in enumerate(sources):
+        kernel = cache.load(source, "twice")
+        kernel(1, np.ones(1), np.zeros(1))  # compiled, so Numba keeps its files
+        module = next(path for path in tmp_path.glob("k*.py") if f"* {k + 2}" in path.read_text())
+        os.utime(module, (1_000 + k, 1_000 + k))  # used in this order
+    one = builtins.sum(path.stat().st_size for paths in cache._kept(tmp_path).values() for path in paths) // 4
+    assert builtins.all(len(paths) >= 3 for paths in cache._kept(tmp_path).values())  # module, index, code
+    cache.load(sources[0], "twice")  # the oldest, used again: now the most recent
+    monkeypatch.setenv("TIDY3A_KERNELS_MAX", str(3 * one))
+    cache.load(SOURCE.replace("* 2", "* 9"), "twice")  # a new one: the two least recently used go
+    left = sorted(path.read_text().split("values[i] * ")[1].split("\n")[0] for path in tmp_path.glob("k*.py"))
+    assert left == ["2", "5", "9"]
+    assert not [path for path in (tmp_path / "__pycache__").iterdir()
+                if path.name.split(".", 1)[0] not in {module.stem for module in tmp_path.glob("k*.py")}]
+
+
+def test_clear_removes_the_kernels_and_nothing_else(tmp_path, monkeypatch):
+    monkeypatch.setenv("TIDY3A_KERNELS", str(tmp_path))
+    cache.load(SOURCE, "twice")(1, np.ones(1), np.zeros(1))
+    (tmp_path / "notes.txt").write_text("mine")
+    cache.clear()
+    assert [path.name for path in tmp_path.iterdir() if path.name != "__pycache__"] == ["notes.txt"]
+    assert not list((tmp_path / "__pycache__").iterdir())
+
+
+def test_the_limit_reads_bytes_or_text(monkeypatch):
+    monkeypatch.delenv("TIDY3A_KERNELS_MAX", raising=False)
+    assert cache.limit() == 10**9
+    monkeypatch.setenv("TIDY3A_KERNELS_MAX", "500MB")
+    assert cache.limit() == 500 * 10**6
+    monkeypatch.setenv("TIDY3A_KERNELS_MAX", "2048")
+    assert cache.limit() == 2048

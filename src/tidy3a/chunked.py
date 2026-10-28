@@ -1047,12 +1047,19 @@ def _trie(leaves: Sequence[_Leaf]) -> _Node:
     return root
 
 
+TOP = 5  # the merge tree's highest level: 32 blocks a table before it joins the running one
+
+
 class _Tree:
     """A frame's block summaries merged in a fixed tree by block number, the merges run on the pool (plan milestone
     15): as a binary counter, two tables of 2**k blocks each become one of 2**(k+1) once both are there, and the last
     are merged from the right, so the tree's shape follows the number of blocks alone and its result is the same on
     any number of threads. A merge waits only on work handed to the pool before it, which has begun by the time it
-    begins, so the pool cannot deadlock however few its threads."""
+    begins, so the pool cannot deadlock however few its threads.
+
+    Capped at ``TOP`` (milestone 17): a table of 2**TOP blocks merges into the running table of every block before
+    it instead of waiting for a partner, so the tree holds at most ``TOP + 1`` tables, only the running one of
+    nearly every group, where a binary counter over many small blocks held one such table on each upper level."""
 
     def __init__(self, pool: ThreadPoolExecutor) -> None:
         self.pool = pool
@@ -1065,7 +1072,9 @@ class _Tree:
         while self.stack and self.stack[-1][0] == level:
             merged = self.pool.submit(_merged, self.stack.pop()[1], merged)
             level += 1
-        self.stack.append((level, merged))
+        if level >= TOP and self.stack:  # the running table, of every block before these: it takes them in
+            merged = self.pool.submit(_merged, self.stack.pop()[1], merged)
+        self.stack.append((min(level, TOP), merged))
 
     def result(self, empty: _Table) -> _Table:
         """The merged table: *empty* when no block came."""
@@ -1414,7 +1423,11 @@ def _combined(local: Sequence[tuple[np.ndarray, Any, np.ndarray]], table: _Table
 def _partial(plan: _Plan, block: TidyArray, axis: str):
     """One block's groups; each combination's local codes per key, with the key's labels, to map once the table has
     taken the groups in; the combinations' row counts; each reduction's pieces per combination; and the rows dropped."""
-    rows = _block(plan, block, axis)
+    return _partial_rows(plan, _block(plan, block, axis))
+
+
+def _partial_rows(plan: _Plan, rows: _Rows):
+    """``_partial`` of a block's rows, however they were found (here, or by a compiled block, ``fused.driver``)."""
     if rows.kept == 0:
         return rows.found, None, None, None, rows.dropped
     # Codes per local combination, so the pieces are made once per group, not once per row.

@@ -9,6 +9,10 @@ once, never reads half of one; Numba writes its own files the same way.
 
 Where the folder cannot be made or written, or Numba cannot keep a kernel there, the kernel is compiled in memory as
 before, each run.
+
+The folder is held to ``TIDY3A_KERNELS_MAX`` (bytes, or text such as ``"500MB"``; 1 GB by default, milestone 17):
+writing a new kernel removes the least recently used ones, a kernel's module and Numba's files together, and loading
+a kernel touches its module, so its use is recorded. ``clear()`` removes every kernel.
 """
 
 from __future__ import annotations
@@ -25,12 +29,76 @@ from pathlib import Path
 from typing import Any
 
 PREFIX = "tidy3a_kernel_"  # the modules' names, so a traceback names a kernel
+LIMIT = 10**9  # the folder's bytes by default (TIDY3A_KERNELS_MAX)
 
 
 def directory() -> Path:
     """Where kernels are kept: ``TIDY3A_KERNELS``, or ``~/.cache/tidy3a/kernels``."""
     named = os.environ.get("TIDY3A_KERNELS", "").strip()
     return Path(named).expanduser() if named else Path.home() / ".cache" / "tidy3a" / "kernels"
+
+
+def limit() -> int:
+    """The most bytes the folder holds: ``TIDY3A_KERNELS_MAX``, or ``LIMIT``."""
+    named = os.environ.get("TIDY3A_KERNELS_MAX", "").strip()
+    if not named:
+        return LIMIT
+    from tidy3a.sizing import budget
+
+    return budget(named)
+
+
+def _kept(folder: Path) -> dict[str, list[Path]]:
+    """Each kept kernel's files, by its module's stem: the module, and what Numba and Python keep of it in
+    ``__pycache__``."""
+    kernels: dict[str, list[Path]] = {}
+    for module in folder.glob("k*.py"):
+        kernels[module.stem] = [module]
+    numba = folder / "__pycache__"
+    if numba.is_dir():
+        for path in numba.iterdir():
+            stem = path.name.split(".", 1)[0]
+            if stem in kernels and path.suffix in (".nbi", ".nbc", ".pyc"):  # Numba's, and Python's bytecode
+                kernels[stem].append(path)
+    return kernels
+
+
+def prune(folder: Path | None = None, keep: Path | None = None) -> int:
+    """Remove the least recently used kernels until *folder* holds at most ``limit()`` bytes, never *keep*'s; the
+    bytes removed."""
+    folder = folder or directory()
+    kernels = _kept(folder)
+    sizes = {}
+    used = {}
+    for stem, paths in kernels.items():
+        try:
+            sizes[stem] = sum(path.stat().st_size for path in paths)
+            used[stem] = paths[0].stat().st_mtime
+        except OSError:  # removed meanwhile, by another run
+            continue
+    held, cap, removed = sum(sizes.values()), limit(), 0
+    for stem in sorted(sizes, key=used.__getitem__):
+        if held <= cap:
+            break
+        if keep is not None and stem == keep.stem:
+            continue
+        for path in kernels[stem]:
+            path.unlink(missing_ok=True)
+        held -= sizes[stem]
+        removed += sizes[stem]
+    return removed
+
+
+def clear(folder: Path | None = None) -> None:
+    """Remove every kept kernel from *folder* (the kernels' folder by default), and nothing else there."""
+    folder = folder or directory()
+    if not folder.is_dir():
+        return
+    for paths in _kept(folder).values():
+        for path in paths:
+            path.unlink(missing_ok=True)
+    for temporary in folder.glob(".k*.tmp"):
+        temporary.unlink(missing_ok=True)
 
 
 @cache
@@ -76,10 +144,16 @@ def load(source: str, name: str, helpers: tuple[str, ...] = ()) -> Any:
             except BaseException:
                 Path(temporary).unlink(missing_ok=True)
                 raise
+            prune(folder, keep=path)  # a new kernel: the folder held to its limit
+        else:
+            try:
+                os.utime(path)  # used now, for pruning
+            except OSError:  # a folder this run may read but not write
+                pass
         spec = importlib.util.spec_from_file_location(f"{PREFIX}{key}", path)
         assert spec is not None and spec.loader is not None
         module = sys.modules.get(spec.name)
-        if module is None:
+        if module is None or getattr(module, "__file__", None) != str(path):  # loaded from another folder, if any
             module = importlib.util.module_from_spec(spec)
             sys.modules[spec.name] = module  # where Numba finds a kept kernel's helpers, which it names by module
             try:

@@ -234,3 +234,25 @@ def compile_summary(source: str, name: str) -> Any:
 
 
 assert sums.PIECES == 7  # the estimate's pieces, in labelarray's order: total, magnitude, present, values, +inf, -inf
+
+
+
+def zeros_ordered(held: np.ndarray, values: np.ndarray, codes: np.ndarray, lower: bool) -> np.ndarray:
+    """NumPy's extreme per group (*held*), its zero signed by the kernel's order (``Slot.update``): -0.0 below +0.0
+    whatever came first, which NumPy's vector loops on x86 do not keep. Only a group whose extreme is a zero can
+    differ, so only those groups' values (one row per code) are looked at: ``min`` is -0.0 where any zero of the
+    group is, ``max`` +0.0 where any is."""
+    if held.dtype.kind != "f":
+        return held
+    zero = np.flatnonzero(held == 0)
+    if not len(zero):
+        return held
+    rows = np.isin(codes, zero)
+    found = values[rows]
+    signed = np.signbit(found) if lower else ~np.signbit(found)
+    hit = (found == 0) & signed
+    has = np.zeros(len(held), np.bool_)
+    np.logical_or.at(has, np.repeat(codes[rows], found.shape[1]), hit.reshape(-1))
+    out = held.copy()
+    out[zero] = np.where(has[zero], held.dtype.type(-0.0 if lower else 0.0), held.dtype.type(0.0 if lower else -0.0))
+    return out

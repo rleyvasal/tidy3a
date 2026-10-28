@@ -8,6 +8,7 @@ the spreads' moments) is the same within rounding; and the float32 sums an
 estimate settles are the same bits.
 """
 
+import builtins
 import copy
 
 import numpy as np
@@ -186,3 +187,28 @@ def test_the_merges_run_on_the_pools_threads(monkeypatch):
     frame.to_dict()
     assert len(where) == 31 - 1  # 31 blocks, merged into one
     assert threading.main_thread() not in where
+
+
+@pytest.mark.parametrize("top", [1, 2])
+def test_a_capped_tree_holds_few_tables_and_gives_the_same_bits_on_any_number_of_threads(top, monkeypatch):
+    """With the tree capped low (milestone 17), past 2**top blocks each table joins the running one: at most top + 1
+    tables are held, and the shape still follows the block numbers alone."""
+    from tidy3a import chunked
+
+    monkeypatch.setattr(chunked, "TOP", top)
+    held = []
+    add = chunked._Tree.add
+
+    def counting(self, table):
+        add(self, table)
+        held.append(len(self.stack))
+
+    monkeypatch.setattr(chunked._Tree, "add", counting)
+    runs = []
+    for threads in (1, 2, 3, 8):
+        frame = tidy(data(), blocks={"point": 37}, threads=threads)
+        runs.append(frame >> KEYS["two keys"] >> SUMMARIES)
+        runs[-1].collect()
+    assert builtins.max(held) <= top + 1 and len(held) > 4 * 2**top
+    for run in runs[1:]:
+        same_frames(run, runs[0])

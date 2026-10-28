@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+- The merge tree is capped: a table of 32 blocks joins the running table of
+  every block before it instead of waiting for a partner, so the tree holds
+  at most six tables, only one of nearly every group, where it held one on
+  each upper level when the blocks were many and small. On 10M points in
+  381 blocks of the voxel summary it held at most 65 MB, against 115 MB,
+  and ran in 2.26 s, against 2.98 s, on one thread. Results stay the same
+  bits on any number of threads; float64 sums and means, integer means, and
+  spreads may differ in their last bits from 0.10.0's, where there are more
+  than 32 blocks.
+- Where each position holds many values (256 or more, a grid's), a compiled
+  block places the keys and computes the values, and NumPy's reductions take
+  each position first, as on NumPy, below eight threads; from eight, the
+  fused kernel, where every reduction's result is free of the order of its
+  additions (float32 sums and means, integer sums, extremes, flags, the
+  median), so the result is the same bits on any number of threads. The
+  daytime summary of 2,000 grids took 0.083 s on one thread (0.33 s in
+  0.10.0) and 0.039 s on twelve.
+- The kernel cache is held to `TIDY3A_KERNELS_MAX` (1 GB by default, bytes
+  or text such as `"500MB"`): writing a new kernel removes the least recently
+  used ones; `tidy3a.fused.cache.clear()` removes them all.
+
 ## 0.10.0 — 2026-10-28
 
 - Requires labelarray 0.1.7.

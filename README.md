@@ -340,6 +340,8 @@ of a -0.0 and a +0.0 give whichever they meet second, where the kernels,
 as NumPy on ARM, give -0.0 and +0.0. Kernels are compiled the first time
 a summary of their shape runs and kept in `~/.cache/tidy3a/kernels`
 (`TIDY3A_KERNELS` moves them), so later runs, in any process, read them;
+the folder is held to 1 GB (`TIDY3A_KERNELS_MAX`), the least recently used
+kernels going first, and `tidy3a.fused.cache.clear()` empties it.
 `TIDY3A_COMPILED=0` turns compiling off. On a 12-core machine, the rings
 summary of 40M points in memory (the distance, a filter, and the count and
 mean brightness per ring) took 0.10 s on twelve threads against 0.42 s on
@@ -483,7 +485,7 @@ first (`nir * 1.0 - red`) when a result can be negative.
 | Selecting fields | `where`, `starts_with`, `ends_with`, `contains`, `matches`, `everything`, `is_numeric`, … |
 | Plans | `explain()` (each step and its effect), `plan()` (the verbs as a pipeline), `verb >> verb` (a `Pipeline`), `Pipeline.explain(data, head=)` |
 | Results | `pull`, `collect()` (an xarray `Dataset`), `to_xarray()`, `to_dict()` (NumPy arrays, no xarray needed), `as_table()` (a Polars DataFrame) |
-| Settings | `set_backend`; the environment's `TIDY3A_COMPILED=0` (compile nothing) and `TIDY3A_KERNELS` (where kernels are kept) |
+| Settings | `set_backend`; the environment's `TIDY3A_COMPILED=0` (compile nothing) `TIDY3A_KERNELS` (where kernels are kept), and `TIDY3A_KERNELS_MAX` (how much of them) |
 
 An array from the calling code, such as a rotation matrix, can be an xarray
 `DataArray` or a one-variable `read_array(...)` result.

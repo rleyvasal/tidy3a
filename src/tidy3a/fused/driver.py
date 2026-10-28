@@ -30,13 +30,19 @@ import numpy as np
 from tidy3a.errors import FilterError, MutateError, SummariseError, TidyError
 from tidy3a.expr import Context, evaluate
 from tidy3a.fused.expressions import Compiler, Source
+from tidy3a.fused.kernels import compile_source
 from tidy3a.fused.keys import (Key, compile_keys, dense_kernels, groups, kernel_source, key_for, labels_of,
                               missing_label)
-from tidy3a.fused.reductions import Slot, compile_summary, counted_values, summary_source
+from tidy3a.fused.reductions import Slot, compile_summary, counted_values, summary_source, zeros_ordered
 
 DENSE_GROUPS = 16_000_000  # the owner's limit on a block's dense combinations of the keys' groups
 DENSE_BYTES = 2**27  # and on the bytes of its dense tables, at most
 CODES = 2**62  # combinations numbered beyond this, which int64 codes could not hold, run on NumPy
+BY_POSITION = 256  # values a position holds from which NumPy's reductions take each position first (milestone 17)
+KERNEL_THREADS = 8  # threads from which such blocks run the fused kernel instead, where their results allow it:
+# measured on the 12-core machine, NumPy's reductions were the faster to four threads, the kernel from eight
+ORDER_FREE = frozenset({"estimate", "int", "extreme", "flag", "flagged", "rank"})  # kinds whose results do not follow
+# the order the values are added in: float32 sums and means are correctly rounded, the rest exact
 DENSE_SHARE = 8  # of a block's share of a budget, the part its dense tables may take
 
 
@@ -62,9 +68,11 @@ class Fused:
     slots: list[Slot]
     place: Any = None
     accumulate: Any = None
+    values: Any = None  # each kept position's values for NumPy's reductions, where positions hold many
     occupied: Any = None  # ``fused.keys.dense_kernels``
     dense: Any = None
     limit: int = DENSE_BYTES  # the bytes its dense tables may take (``dense_limit``)
+    threads: int = 1  # the blocks run at once, which choose how positions of many values are reduced
     group_bytes: int = field(init=False, default=8)
 
     def __post_init__(self) -> None:
@@ -106,6 +114,9 @@ class Fused:
         if not valid:
             table.merge(found, None, None, None, dropped)
             return table, None
+        if cells >= BY_POSITION and self.values is not None and self._numpy_first():
+            table.merge(*self._by_position(inputs, cells, dense, found, sizes, valid, dropped))
+            return table, None
         held = None  # the combinations the block holds, in order, where its tables are only as large as those
         tables = combinations
         if combinations > DENSE_GROUPS or combinations * self.group_bytes > self.limit:
@@ -128,6 +139,41 @@ class Fused:
                   in zip(found, np.unravel_index(numbered, sizes))] if sizes else []
         table.merge(found, combos, counts[occupied] * plan.per_position, pieces, dropped)
         return table, None
+
+    def _numpy_first(self) -> bool:
+        """Whether NumPy's reductions take each position's values first: below ``KERNEL_THREADS`` threads, where they
+        are faster than the kernel's one value at a time; and on any number where a result follows the order of its
+        additions (float64 sums and means, integer means, spreads), so a run gives the same bits on any number of
+        threads. From ``KERNEL_THREADS`` on, the kernel scales, as NumPy's reductions, held by memory, do not."""
+        return self.threads < KERNEL_THREADS or any(slot.kind not in ORDER_FREE for slot in self.slots)
+
+    def _by_position(self, inputs: list[np.ndarray], cells: int, dense: np.ndarray, found: list, sizes: list[int],
+                     valid: int, dropped: int) -> tuple:
+        """The block's partial, ``chunked._partial``'s, for positions of many values: the kept positions' values
+        computed by the ``values`` kernel, then each position reduced first by NumPy's reductions, as the NumPy path
+        does, whose vector loops no compensated sum in a kernel matches (plan milestone 17)."""
+        from tidy3a.chunked import _partial_rows, _Rows
+
+        rows = np.flatnonzero(dense >= 0)
+        local = [codes.astype(np.intp) for codes in np.unravel_index(dense[rows], sizes)] if sizes else []
+        outputs = [np.empty((valid, cells) if slot.value.cells else valid, slot.dtype) for slot in self.slots]
+        self.values(rows, cells, *inputs, *outputs)
+        plan = self.frame._plan
+        hidden = [name for name, node in plan.reductions.items() if node.op != "n"]  # the slots' order
+        values = {name: (output.reshape(-1), cells if slot.value.cells else 1)
+                  for name, slot, output in zip(hidden, self.slots, outputs)}
+        partial = _partial_rows(plan, _Rows(found, local, valid, dropped, plan.per_position, values))
+        extremes = [(name, slot, output) for name, slot, output in zip(hidden, self.slots, outputs)
+                    if slot.kind == "extreme"]
+        if extremes:  # the kernel's order of the zeros, which NumPy's on x86 does not keep: the same on either path
+            if sizes:
+                codes = np.unique(np.ravel_multi_index(local, sizes), return_inverse=True)[1].reshape(-1)
+            else:
+                codes = np.zeros(valid, np.intp)
+            for name, slot, output in extremes:
+                kind, held = partial[3][name]
+                partial[3][name] = (kind, zeros_ordered(held, output.reshape(valid, -1), codes, slot.node.op == "min"))
+        return partial
 
     def _groups(self, positions: int, keep: np.ndarray, ks: np.ndarray, missing: np.ndarray,
                 ranges: np.ndarray) -> tuple[list, list[int], tuple, None] | None:
@@ -242,12 +288,28 @@ def build(frame: Any) -> Fused | None:
         context = Context(rows, verb="summarise", error=SummariseError, grouped=False)
         slots = [Slot(k, node, compiler.compile(node.arg, context))
                  for k, node in enumerate(node for node in plan.reductions.values() if node.op != "n")]
-    fused = Fused(frame, compiler, tests, keys, slots, limit=dense_limit(blocks.memory, blocks.threads))
+    fused = Fused(frame, compiler, tests, keys, slots, limit=dense_limit(blocks.memory, blocks.threads),
+                  threads=blocks.threads)
     tested = [f"np.bool_({cast_bool(test)})" for test in tests]
     fused.place = compile_keys(kernel_source("place", keys, compiler, tested), "place")
     fused.accumulate = compile_summary(summary_source("accumulate", list(compiler.inputs), slots), "accumulate")
     fused.occupied, fused.dense = dense_kernels()
+    if slots and compiler.cells:
+        fused.values = compile_source(values_source("values", compiler, [slot.value for slot in slots]), "values")
     return fused
+
+
+def values_source(name: str, compiler: Compiler, outputs: list[Source]) -> str:
+    """Source of ``name(rows, values, a0, ..., out0, ...)`` filling row ``r`` of each output with position
+    ``rows[r]``'s value, or values, of its source."""
+    arguments = ", ".join(["rows", "values", *compiler.inputs, *(f"out{k}" for k in range(len(outputs)))])
+    lines = [f"def {name}({arguments}):", "    for r in range(len(rows)):", "        i = rows[r]"]
+    lines += [f"        out{k}[r] = {source.text}" for k, source in enumerate(outputs) if not source.cells]
+    per_value = [(k, source) for k, source in enumerate(outputs) if source.cells]
+    if per_value:
+        lines.append("        for j in range(values):")
+        lines += [f"            out{k}[r, j] = {source.text}" for k, source in per_value]
+    return "\n".join(lines) + "\n"
 
 
 def cast_bool(test: Source) -> str:

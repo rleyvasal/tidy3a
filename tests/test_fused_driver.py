@@ -303,3 +303,68 @@ def test_without_labelarrays_exact_mark_the_exact_pass_settles_the_ties(monkeypa
     frame.collect()
     assert frame._result._notes[-1] == "ran: 6 blocks in a compiled kernel" and len(asked) > 0
     same_bits(frame, tidy(data) >> verbs)
+
+
+@pytest.mark.parametrize("threads", [1, 3])
+def test_positions_of_many_values_are_reduced_first_by_numpy(threads, monkeypatch):
+    """Positions of 400 values each (past ``BY_POSITION``): the compiled block places the keys and computes the
+    values, NumPy's reductions take each position first, as the NumPy path does: its bits, every reduction."""
+    from tidy3a.fused import driver
+
+    rng = np.random.default_rng(3)
+    t = (rng.normal(size=(90, 20, 20)) * 10 + 280).astype("float32")
+    t[rng.random(t.shape) < 0.01] = np.nan
+    data = xr.Dataset({"t": (("time", "lat", "lon"), t), "month": ("time", np.arange(90) % 12 + 1),
+                       "sun": ("time", rng.random(90) > 0.3), "w": (("time", "lat", "lon"), rng.random(t.shape))})
+    temperature, month, sun, w = fields("t", "month", "sun", "w")
+    verbs = (filter(sun) >> mutate(c=temperature - 273.15) >> group_by(month)
+             >> summarise(m=mean(fields("c"), na_rm=True), top=max(temperature), low=min(fields("c"), na_rm=True),
+                          spread=std(w), s=sum(w), mid=median(temperature, na_rm=True), hot=tidy3a.any(temperature > 300),
+                          cells=n()))
+    called = []
+    original = driver.Fused._by_position
+    monkeypatch.setattr(driver.Fused, "_by_position", lambda self, *a: called.append(1) or original(self, *a))
+    frame = tidy(data, blocks={"time": 8}, threads=threads) >> verbs
+    frame.collect()
+    assert frame._result._notes[-1] == "ran: 12 blocks in a compiled kernel" and len(called) == 12
+    same_bits(frame, numpy_run(monkeypatch, lambda: tidy(data, blocks={"time": 8}) >> verbs))
+    got, want = frame.collect(), (tidy(data) >> verbs).collect()  # float64 sums and spreads: close to memory's
+    for name in ("m", "top", "low", "mid", "hot", "cells"):
+        assert np.asarray(got[name].values).tobytes() == np.asarray(want[name].values).tobytes(), name
+
+
+def test_positions_of_many_values_take_the_kernel_from_four_threads_where_order_does_not_matter(monkeypatch):
+    """An order-free summary (float32 means, extremes, counts, flags, the median) of 400-value positions runs
+    NumPy's reductions below eight threads and the fused kernel from eight on: the same bits on any number, a tie of
+    -0.0 and +0.0 included, whose extreme both paths take by the kernel's order. A float64 sum keeps NumPy's
+    reductions on every number of threads, as its bits follow the order of its additions."""
+    from tidy3a.fused import driver
+
+    rng = np.random.default_rng(4)
+    t = (rng.normal(size=(96, 20, 20)) * 10 + 280).astype("float32")
+    z = -np.abs(rng.normal(size=t.shape)).astype("float32")
+    z[np.arange(96) % 12 == 5] = 0.0  # month 6: zeros only, of both signs
+    z[(np.arange(96) % 12 == 5)[:, None, None] & (rng.random(t.shape) < 0.5)] = -0.0
+    data = xr.Dataset({"t": (("time", "lat", "lon"), t), "z": (("time", "lat", "lon"), z),
+                       "w": (("time", "lat", "lon"), t.astype("float64")), "month": ("time", np.arange(96) % 12 + 1)})
+    temperature, month, zz, w = fields("t", "month", "z", "w")
+    free = group_by(month) >> summarise(m=mean(temperature), top=max(zz), low=min(zz), k=n(),
+                                        hot=tidy3a.any(temperature > 300), mid=median(temperature))
+    called = []
+    original = driver.Fused._by_position
+    monkeypatch.setattr(driver.Fused, "_by_position", lambda self, *a: called.append(1) or original(self, *a))
+    runs = {}
+    for threads in (1, 3, 8, 12):
+        called.clear()
+        runs[threads] = tidy(data, blocks={"time": 8}, threads=threads) >> free
+        runs[threads].collect()
+        assert len(called) == (12 if threads < 8 else 0), threads
+    for threads in (3, 8, 12):
+        same_bits(runs[threads], runs[1])
+    assert np.signbit(runs[1].collect()["top"].values[5]) == False  # max of the zeros: +0.0
+    assert np.signbit(runs[1].collect()["low"].values[5]) == True  # min: -0.0
+    ordered = group_by(month) >> summarise(m=mean(temperature), s=sum(w))  # a float64 sum: the order matters
+    called.clear()
+    frame = tidy(data, blocks={"time": 8}, threads=8) >> ordered
+    frame.collect()
+    assert len(called) == 12
