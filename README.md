@@ -468,7 +468,9 @@ from tidy3a import *
 ```
 
 The extension enables bare field names inside verbs, so the examples above
-can omit `fields(...)`. Multi-line pipes need parentheses. Sharing a notebook
+can omit `fields(...)`. A variable named like a builtin or a tidy3a helper
+(`id`, `type`, `max`, `n`) is the data's wherever only data fits: `id > 1`,
+`max * 2`, `mean(type)`. Multi-line pipes need parentheses. Sharing a notebook
 with tidy3 requires its ownership-aware transformer; the prerequisite is
 recorded in [the plan](docs/plan.md#56-notebook-layer).
 

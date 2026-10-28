@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- In notebooks, a variable named like a builtin or a tidy3a helper (`id`,
+  `type`, `max`, `n`) works as a bare name wherever only data fits: a whole
+  argument, either side of an operator, and the arguments of tidy3a's
+  helpers (`filter(id > 1)`, `mutate(z = max * 2)`, `mean(type)`); a
+  function's own name still calls it (`max(x)`), and `where(is_numeric)`
+  keeps its predicate. A local variable of one function, such as `select =
+  …` in a helper, no longer stops the cell's verbs from being rewritten, and
+  `all_of`/`any_of` take a list the notebook made (`all_of(wanted)`), as
+  tidy3's notebooks do.
 - A lazy, Dask-backed, or file-backed dataset read in blocks runs its
   blocks on the NumPy backend by default, as each block is computed into
   memory first: the daytime summary of a NetCDF4 or Zarr file of 2,000

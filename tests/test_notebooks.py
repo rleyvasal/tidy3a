@@ -117,6 +117,39 @@ def test_names_inside_functions(shell):
     assert ns["kept"].tolist() == [3, 4]
 
 
+def test_a_helpers_local_variables_stay_its_own(shell):
+    """A local named like a verb or a column in one function changes nothing elsewhere (tidy3 17828e2)."""
+    run(shell, "from tidy3a import *\n" + SETUP)
+    ns = run(shell, "def helper():\n    select = 1\n    intensity = 2\n    return select + intensity\n"
+                    "xy = cloud >> select(x, y)\nkept = cloud >> filter(intensity > 15) >> pull(point)")
+    assert ns["xy"].collect()["values"].feature.values.tolist() == ["x", "y"]
+    assert ns["kept"].tolist() == [2, 3, 4]
+    ns = run(shell, "def mine(select):\n    return select(w)\nw = 3\nout = mine(lambda v: v + 1)")
+    assert ns["out"] == 4
+    ns = run(shell, "def rebind():\n    global select\n    select = lambda *names: names\nrebind()\nout = select(w)")
+    assert ns["out"] == (3,)
+
+
+def test_variables_named_like_builtins_or_helpers_where_only_data_fits(shell):
+    """id, type, max, n: the data's wherever a function could not go (tidy3 73fbefb)."""
+    run(shell, "import numpy as np, xarray as xr\nfrom tidy3a import *\n"
+               "data = tidy(xr.Dataset({name: ('p', np.arange(4.0)) for name in ['id', 'type', 'max', 'n']}))")
+    ns = run(shell, "a = data >> filter(id > 1, type < 3) >> pull(max)\n"
+                    "b = data >> mutate(z = max * 2 + n, w = -type, v = id) >> pull(z)\n"
+                    "c = data >> summarise(m = mean(max), top = max(n)) >> pull(top)")
+    assert ns["a"].tolist() == [2.0] and ns["b"].tolist() == [0.0, 3.0, 6.0, 9.0] and float(ns["c"]) == 3.0
+    assert "is not a variable" in str(failure(shell, "data >> mutate(z = round * 2)"))
+
+
+def test_all_of_and_any_of_take_the_notebooks_lists(shell):
+    """A list made earlier, even in the same cell, is a Python value (tidy3 b1bab9e)."""
+    run(shell, "from tidy3a import *\n" + SETUP)
+    ns = run(shell, "wanted = ['x', 'z']\nxz = cloud >> select(all_of(wanted))\n"
+                    "rest = cloud >> select(-any_of(wanted + ['w']))")
+    assert ns["xz"].collect()["values"].feature.values.tolist() == ["x", "z"]
+    assert ns["rest"].collect()["values"].feature.values.tolist() == ["y", "intensity", "ring"]
+
+
 def test_a_notebook_defined_verb_is_left_alone(shell):
     ns = run(shell, "w = 3\ndef select(*names):\n    return names\nout = select(w)")
     assert ns["out"] == (3,)
@@ -133,7 +166,7 @@ def test_source_rewrites():
     assert rewrite_vector_assignments('mutate(s = "[a] = b")') == 'mutate(s = "[a] = b")'
     assert rewrite_vector_assignments("filter([x] == y)") == "filter([x] == y)"
     text = apply_masking("cloud >> filter(x > limit)", {"filter": __import__("tidy3a").filter})
-    assert "__tidy3a_name__('x', lambda: x)" in text and "__tidy3a_name__('limit'" in text
+    assert "__tidy3a_name__('x', lambda: x, True)" in text and "__tidy3a_name__('limit'" in text
     assert apply_masking("filter(x > 1)", {}) == "filter(x > 1)"  # not tidy3a's filter
 
 

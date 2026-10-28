@@ -10,7 +10,10 @@ A bare name inside a tidy3a verb becomes a deferred reference, settled when
 the verb runs: data if only the data has it, the Python value if only the
 notebook has it, and an error if both do (tidy3 lets data win; tidy3a asks).
 Functions, modules, and references made with ``fields()`` keep their
-Python meaning.
+Python meaning, except where only data or a value fits (``id > 1``,
+``max * 2``, ``mean(type)``): there a variable named like a builtin or a
+tidy3a helper is the data's. A function's local variables stay its own,
+and ``all_of``/``any_of`` take lists of names from the notebook.
 
 Only calls to tidy3a's own verbs are rewritten, decided from the live
 namespace and the cell's own imports, so tidy3 and tidy3a can share a
@@ -22,7 +25,9 @@ from __future__ import annotations
 
 import ast
 import importlib
+import inspect
 import re
+from collections.abc import Callable
 from types import ModuleType
 from typing import Any
 
@@ -39,8 +44,13 @@ _REWRITTEN = frozenset({"select", "filter", "mutate", "summarise", "summarize", 
 # ── Runtime helper ──────────────────────────────────────────────────────────
 
 
-def make_name(name: str, getter: Any) -> Any:
-    """Called by rewritten cells: the reference a bare *name* stands for."""
+def make_name(name: str, getter: Any, operand: bool = False) -> Any:
+    """Called by rewritten cells: the reference a bare *name* stands for.
+
+    An *operand* is a place only data or a value fits (``id > 1``, ``max * 2``, ``mutate(z = type)``), so there a
+    function, class, or module the notebook has under that name, often a builtin or a tidy3a helper, gives way to
+    the data's variable of that name.
+    """
     try:
         value = getter()
     except NameError:
@@ -48,6 +58,8 @@ def make_name(name: str, getter: Any) -> Any:
     if isinstance(value, Expr):
         return value  # fields(), col(), formula(): already tidy3a expressions
     if isinstance(value, (ModuleType, type)) or callable(value):
+        if operand and (isinstance(value, (ModuleType, type)) or inspect.isroutine(value)):
+            return NameRef(name, MISSING)
         return value  # functions such as is_numeric keep their Python meaning
     return NameRef(name, value)
 
@@ -89,23 +101,70 @@ def _cell_imports(tree: ast.Module) -> dict[str, str]:
     return sources
 
 
-def _defined(tree: ast.Module) -> set[str]:
-    names: set[str] = set()
-    for node in ast.walk(tree):
+def _scope(nodes: list[ast.AST]) -> tuple[set[str], set[str]]:
+    """The names a scope binds, and those it declares ``global`` or ``nonlocal``: its own, not those of the
+    functions, classes, lambdas, and comprehensions inside it, which have scopes of their own."""
+    bound: set[str] = set()
+    declared: set[str] = set()
+    stack = list(nodes)
+    while stack:
+        node = stack.pop()
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            names.add(node.name)
-        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
-            names.add(node.id)
+            bound.add(node.name)
+            continue
+        if isinstance(node, (ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            continue
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            bound.add(node.id)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            bound.update((alias.asname or alias.name).split(".")[0] for alias in node.names if alias.name != "*")
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            declared.update(node.names)
+        stack.extend(ast.iter_child_nodes(node))
+    return bound, declared
+
+
+def _defined(tree: ast.Module) -> set[str]:
+    """The notebook names this cell binds: at its top level, and where a function declares one ``global``. A
+    function's local variables are its own (tidy3 17828e2)."""
+    names = _scope(tree.body)[0]
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Global):
+            names.update(node.names)
     return names
+
+
+def _locals(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda) -> set[str]:
+    """A function's local variables: its parameters and what its body binds, less what it declares global."""
+    arguments = node.args
+    names = {a.arg for a in [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs]}
+    names.update(a.arg for a in (arguments.vararg, arguments.kwarg) if a is not None)
+    bound, declared = _scope(node.body if isinstance(node.body, list) else [node.body])
+    return (names | bound) - declared
 
 
 # ── The AST pass ────────────────────────────────────────────────────────────
 
 
 class _Names(ast.NodeTransformer):
-    """Rewrite bare names inside one verb argument."""
+    """Rewrite bare names inside one verb argument.
 
-    def visit_Name(self, node: ast.Name) -> ast.AST:
+    *tidy3a* says whether a call's function is tidy3a's. Its helpers' arguments (``mean(max)``, ``cells(id, 1)``)
+    are operands, as are the whole argument and the sides of operators; ``where``'s predicate keeps its meaning,
+    and ``all_of``/``any_of`` take lists of names as Python values (tidy3 b1bab9e).
+    """
+
+    def __init__(self, tidy3a: Callable[[ast.AST], bool]):
+        self.tidy3a = tidy3a
+
+    def operand(self, node: ast.AST) -> ast.AST:
+        if isinstance(node, ast.Name):
+            return self._name(node, operand=True)
+        return self.visit(node)
+
+    def _name(self, node: ast.Name, operand: bool) -> ast.AST:
         if not isinstance(node.ctx, ast.Load):
             return node
         getter = ast.Lambda(
@@ -114,15 +173,41 @@ class _Names(ast.NodeTransformer):
         )
         call = ast.Call(
             func=ast.Name(id=NAME, ctx=ast.Load()),
-            args=[ast.Constant(value=node.id), getter],
+            args=[ast.Constant(value=node.id), getter, *([ast.Constant(value=True)] if operand else [])],
             keywords=[],
         )
         return ast.copy_location(call, node)
 
+    def visit_Name(self, node: ast.Name) -> ast.AST:
+        return self._name(node, operand=False)
+
+    def visit_BinOp(self, node: ast.BinOp) -> ast.AST:
+        node.left, node.right = self.operand(node.left), self.operand(node.right)
+        return node
+
+    def visit_Compare(self, node: ast.Compare) -> ast.AST:
+        node.left = self.operand(node.left)
+        node.comparators = [self.operand(value) for value in node.comparators]
+        return node
+
+    def visit_BoolOp(self, node: ast.BoolOp) -> ast.AST:
+        node.values = [self.operand(value) for value in node.values]
+        return node
+
+    def visit_UnaryOp(self, node: ast.UnaryOp) -> ast.AST:
+        node.operand = self.operand(node.operand)
+        return node
+
     def visit_Call(self, node: ast.Call) -> ast.AST:
         # The function itself keeps its name; its arguments may hold data names.
-        node.args = [self.visit(arg) for arg in node.args]
-        node.keywords = [ast.keyword(arg=k.arg, value=self.visit(k.value)) for k in node.keywords]
+        func = node.func
+        helper = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
+        ours = self.tidy3a(func)
+        if ours and helper in ("all_of", "any_of"):
+            return node
+        visit = self.operand if ours and helper != "where" else self.visit
+        node.args = [visit(arg) for arg in node.args]
+        node.keywords = [ast.keyword(arg=k.arg, value=visit(k.value)) for k in node.keywords]
         return node
 
     def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
@@ -148,38 +233,52 @@ class Tidy3aMaskTransformer(ast.NodeTransformer):
         self.namespace = namespace
         self.imports: dict[str, str] = {}
         self.defined: set[str] = set()
+        self.scopes: list[set[str]] = []  # the local variables of the functions being visited, innermost last
 
     def visit_Module(self, node: ast.Module) -> ast.AST:
         self.imports = _cell_imports(node)
         self.defined = _defined(node) - set(self.imports)
+        self.scopes = []
         return self.generic_visit(node)
 
-    def _owns(self, func: ast.AST) -> bool:
+    def visit_FunctionDef(self, node: ast.AST) -> ast.AST:
+        self.scopes.append(_locals(node))
+        try:
+            return self.generic_visit(node)
+        finally:
+            self.scopes.pop()
+
+    visit_AsyncFunctionDef = visit_Lambda = visit_FunctionDef
+
+    def _tidy3a(self, func: ast.AST) -> bool:
+        """Whether *func* names one of tidy3a's functions here: not a local variable, nor one the cell binds."""
         namespace = self.namespace or {}
-        if isinstance(func, ast.Name):
-            name = func.id
-            if name not in _REWRITTEN:
-                return False
-            if name in self.imports:
-                return self.imports[name] == "tidy3a"
-            if name in self.defined:
-                return False
-            return name in namespace and _owned(namespace[name])
         if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
-            if func.attr not in _REWRITTEN:
-                return False
-            module = func.value.id
-            if module in self.imports:
-                return self.imports[module] == "tidy3a"
-            return module in namespace and _owned(namespace[module])
-        return False
+            name = func.value.id
+        elif isinstance(func, ast.Name):
+            name = func.id
+            if name == ASSIGN:
+                return True
+        else:
+            return False
+        if any(name in scope for scope in self.scopes):
+            return False
+        if name in self.imports:
+            return self.imports[name] == "tidy3a"
+        if name in self.defined:
+            return False
+        return name in namespace and _owned(namespace[name])
+
+    def _owns(self, func: ast.AST) -> bool:
+        verb = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
+        return verb in _REWRITTEN and self._tidy3a(func)
 
     def visit_Call(self, node: ast.Call) -> ast.AST:
         if not self._owns(node.func):
             return self.generic_visit(node)
-        names = _Names()
-        node.args = [names.visit(arg) for arg in node.args]
-        node.keywords = [ast.keyword(arg=k.arg, value=names.visit(k.value)) for k in node.keywords]
+        names = _Names(self._tidy3a)
+        node.args = [names.operand(arg) for arg in node.args]
+        node.keywords = [ast.keyword(arg=k.arg, value=names.operand(k.value)) for k in node.keywords]
         return node
 
 
