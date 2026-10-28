@@ -254,7 +254,11 @@ def read_array(
     ``memory=`` (bytes, or text such as ``"2GB"``; a quarter of physical
     memory by default), by an estimate from the data's types that reads
     nothing (plan milestone 14). It is chosen when a result is asked for,
-    for the verbs that run, and shown by ``repr`` before that.
+    for the verbs that run, and shown by ``repr`` before that. A dataset's
+    blocks are whole chunks of its storage. What the data decides is not
+    counted: the groups a summary finds (one with about as many groups as
+    positions holds about as much as its data) and the rows a pipeline
+    without ``summarise`` or ``write()`` keeps in memory.
 
     ``backend=`` is ``"xarray"`` or ``"numpy"``; without it, the default
     from ``set_backend()`` is used, or with none chosen, NumPy.

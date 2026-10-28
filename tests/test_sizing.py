@@ -455,3 +455,61 @@ def test_a_size_given_or_data_in_memory_is_not_rounded(tmp_path):
     assert (tidy(opened, blocks={"time": 100}) >> TOP)._layout().every[0] == (0, 100)
     in_memory = tidy(dataset, blocks={"time": "auto"}, memory=RESERVE + 3 * 10**6) >> TOP
     assert in_memory._layout().parts is None and "whole chunks" not in repr(in_memory)
+
+
+# ── A scan's blocks ─────────────────────────────────────────────────────────
+
+
+def loads_of(frame, monkeypatch):
+    """The spans a frame's source is read in, in order."""
+    spans = []
+    source = frame._blocks.source
+    block = source.block
+    monkeypatch.setattr(source, "block", lambda start, stop, names=None: spans.append((start, stop))
+                        or block(start, stop, names))
+    return spans
+
+
+def test_a_scan_reads_blocks_sized_for_all_its_frames_in_every_pass(monkeypatch):
+    data = cloud_array(memory=SUMMED)
+    voxels = data >> CLOUD["voxels"]
+    middle = data >> group_by(ring) >> summarise(middle=median(z), high=quantile(x, 0.9))  # three more passes
+    kept = data >> CLOUD["rows"]
+    layout = data._blocks.sized([voxels, middle, kept])
+    assert layout.rows <= builtins.min(frame._layout().rows for frame in (voxels, middle, kept))
+    spans = loads_of(data, monkeypatch)
+    results = scan(voxels, middle, kept)
+    assert len(spans) % len(layout.every) == 0 and len(spans) >= 3 * len(layout.every)
+    passes = [spans[start:start + len(layout.every)] for start in range(0, len(spans), len(layout.every))]
+    assert all(each == layout.every for each in passes)
+    alone = [cloud_array(memory=SUMMED) >> pipeline for pipeline in
+             (CLOUD["voxels"], group_by(ring) >> summarise(middle=median(z), high=quantile(x, 0.9)), CLOUD["rows"])]
+    for got, want in zip(results, alone):  # float32 means, medians, counts, and rows: the same bits as alone
+        got, want = got.to_dict(), want.to_dict()
+        assert got.keys() == want.keys()
+        for name in got["data_vars"]:
+            a, b = np.asarray(got["data_vars"][name]["data"]), np.asarray(want["data_vars"][name]["data"])
+            assert (np.array_equal(a, b) if a.dtype == object else a.tobytes() == b.tobytes()), name
+
+
+def test_a_scans_float64_means_are_those_of_its_size_given_by_hand():
+    data = cloud_array(memory=SMALL)
+    spread = data >> group_by(ring) >> summarise(m=mean(x * np.float64(1)), s=std(z))
+    kept = data >> CLOUD["rows"]
+    rows = data._blocks.sized([spread, kept]).rows
+    got, _ = scan(spread, kept)
+    given = cloud_array(rows) >> group_by(ring) >> summarise(m=mean(x * np.float64(1)), s=std(z))
+    for name in ("m", "s"):
+        assert np.asarray(got >> pull(name)).tobytes() == np.asarray(given >> pull(name)).tobytes()
+
+
+def test_frames_a_scan_writes_count_toward_its_blocks(tmp_path, monkeypatch):
+    data = cloud_array(memory=SUMMED)
+    summary, written = data >> CLOUD["rings"], data >> DISTANCE >> filter(distance <= 50) >> select(distance)
+    layout = data._blocks.sized([summary, written])
+    assert layout.rows < summary._layout().rows
+    spans = loads_of(data, monkeypatch)
+    _, copy = scan(summary, writes=[(written, tmp_path / "near.npy")])
+    assert spans[:len(layout.every)] == layout.every
+    assert np.array_equal(copy.collect()["distance"].values, cloud_array(1_000) >> DISTANCE
+                          >> filter(distance <= 50) >> pull("distance"))

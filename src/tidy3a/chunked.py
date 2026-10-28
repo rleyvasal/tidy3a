@@ -882,6 +882,13 @@ def scan(*frames: Any, writes: Sequence[tuple[Any, Any]] = ()) -> tuple[TidyArra
     holds its result, as it does after ``collect()``; a frame already
     computed is given as it is.
 
+    With ``blocks="auto"``, the blocks are sized for every frame of the scan
+    together, its written ones included, and every pass reads those blocks:
+    they may be smaller than a frame's own, so its float64 sums and means,
+    integer means, and spreads, which are repeatable for a given size, may
+    differ from its own run's in their last bits; every other result is the
+    same bits.
+
     ``writes=[(frame, path), ...]`` writes those frames' rows block by block
     in the same pass (``tidy3a.write``), and adds each written file, as a
     frame read in blocks, after the results.
