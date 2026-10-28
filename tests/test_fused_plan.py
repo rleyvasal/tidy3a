@@ -56,7 +56,7 @@ COMPILED = {
 NUMPY = {
     "exp": (lambda: cloud() >> mutate(a=exp(x)) >> group_by(ring) >> summarise(m=mean(a)), "exp() runs on NumPy"),
     "a cube": (lambda: cloud() >> mutate(a=x ** 3) >> group_by(ring) >> summarise(m=mean(a)),
-               "a power other than 2, 0.5, -1, or 1"),
+               "a power of 3 runs on NumPy"),
     "floor division": (lambda: cloud() >> mutate(a=x // 2) >> group_by(ring) >> summarise(m=mean(a)),
                        "// runs on NumPy"),
     "a remainder": (lambda: cloud() >> filter(x % 2 == 0) >> group_by(ring) >> summarise(k=n()),
