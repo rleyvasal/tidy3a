@@ -279,6 +279,29 @@ comes back without the positions a filter kept, which a Zarr store keeps.
 `scan(summary, writes=[(rows, "near.zarr")])` writes beside other results
 in the same pass.
 
+`blocks="auto"` chooses the number of positions for you: the most whose
+blocks fit `memory=` (bytes, or text such as `"2GB"`; a quarter of the
+machine's memory by default) as the verbs run on `threads` of them at a
+time, so `read_array(path, ..., blocks="auto", memory="2GB", threads=4)`
+or `tidy(dataset, blocks={"time": "auto"})` need no guess. The size comes
+from an estimate read off the data's types and what each verb makes of
+them on the block of no positions, so nothing is read and the same data,
+verbs, budget, and threads give the same size every time. It is chosen for
+the verbs that run, when a result is asked for, and `repr` and `explain()`
+show it before that ("8 blocks of 39,432 positions on point, sized for
+memory=1 GB"): a summary of one field of a wide dataset gets larger blocks
+than rows of every field. A dataset's blocks are whole chunks of its
+storage (its Dask chunks, or the chunks a NetCDF4 or Zarr file stores), and
+a scan's blocks are sized for all its frames together, so its float64
+sums and means, integer means, and spreads may differ in their last bits
+from a frame's own run, as between any two sizes. The estimate is a bound:
+a filter is taken to keep every row, and the passes of a median or a
+float32 sum to run. It leaves out what the data decides: the groups a
+summary finds (one with about as many groups as positions holds about as
+much as its data) and the rows a pipeline without `summarise` or `write`
+keeps in memory. A budget that fits no position is refused when the data
+is opened or the verb called, with the sizes.
+
 A summarised pipeline is `select`, `filter`, and `mutate` of row-wise
 expressions, `group_by` of value keys (fields, `cells`, `bins`, `rounded`,
 several at once, with or without `dropna`), then `summarise` of `n`,
@@ -404,7 +427,7 @@ first (`nir * 1.0 - red`) when a result can be negative.
 
 | | |
 |---|---|
-| Reading | `read_array` (raw files, `.npy`, NumPy arrays, `lazy=True` to memory-map, `blocks=` to run the verbs block by block), `read_binary` (fixed-width mixed records), `fixed_text`, `infer`, `tidy()` (xarray objects, or Polars and tidy3 tables with `axis=`) |
+| Reading | `read_array` (raw files, `.npy`, NumPy arrays, `lazy=True` to memory-map, `blocks=` to run the verbs block by block, `blocks="auto"` with `memory=` to size the blocks for a budget), `read_binary` (fixed-width mixed records), `fixed_text`, `infer`, `tidy()` (xarray objects, or Polars and tidy3 tables with `axis=`) |
 | Verbs | `select`, `filter`, `slice`, `slice_head`, `slice_tail`, `mutate`, `group_by`, `ungroup`, `summarise`, `left_join`, `inner_join`, `full_join`, `bind_cols`, `pull` |
 | Grouping keys | a field or an axis name, `bins`, `rounded`, `cells` |
 | Reductions | `mean`, `sum`, `min`, `max`, `median`, `quantile`, `std`, `var`, `any`, `all`, `n`, with `over=` and `na_rm=`; `register_reduction` adds one of your own (experimental) |

@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+- `blocks="auto"` with `memory=`, on `read_array` and on `tidy`
+  (`blocks={"time": "auto"}`): the number of positions per block is the
+  most whose blocks fit the budget as the verbs run on `threads` of them at
+  a time. `memory=` is bytes or text (`"2GB"`, `"512MiB"`), a quarter of
+  physical memory by default. The size is estimated from the data's types
+  and each verb's result on the block of no positions, so nothing is read
+  and the same data, verbs, budget, and threads give the same size; it is
+  chosen for the verbs that run, when a result is asked for, and `repr`,
+  `explain()`, and `preview()` show it. A dataset's blocks are whole chunks
+  of its storage (Dask chunks, or a NetCDF4 or Zarr file's); a Dask chunk
+  larger than a block is refused, with the rechunking that fits. A scan's
+  blocks are sized for all its frames, so its float64 sums and means,
+  integer means, and spreads may differ in their last bits from a frame's
+  own run. The estimate is a bound (a filter keeps every row, later passes
+  run) and leaves out what the data decides: a summary's groups, and the
+  rows a pipeline without `summarise` or `write` keeps. A budget that fits
+  no position is refused when the data is opened or the verb called.
+- Inside: `tidy3a.sizing` estimates what a block holds per position, and
+  each reduction in `tidy3a.reductions` declares its steps' working memory
+  (`Reduction.working`), measured and held to by tests (plan milestone 14).
+
 ## 0.8.0 — 2026-10-27
 
 - `quantile(x, q)`, in memory and on blocks: NumPy's quantile with its
