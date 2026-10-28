@@ -889,6 +889,8 @@ def test_blocks_started_ahead_of_the_one_consumed_next_are_bounded():
 def test_exact_sums_are_finished_as_each_pass_ends(npy, monkeypatch):
     from labelarray import sums as labelarray_sums
 
+    monkeypatch.setenv("TIDY3A_COMPILED", "0")  # the exact passes' requests, counted: compiled, the ties need none
+
     finished = []
     real = labelarray_sums.exact_results
 
@@ -1021,7 +1023,8 @@ def test_min_and_max_of_times_text_and_empty_bins_on_blocks(rows):
 # ── Decision 4, step 3: preview() runs a sample ─────────────────────────────
 
 
-def test_preview_runs_the_first_middle_and_last_blocks_and_leaves_the_frame_alone(npy):
+def test_preview_runs_the_first_middle_and_last_blocks_and_leaves_the_frame_alone(npy, monkeypatch):
+    monkeypatch.setenv("TIDY3A_COMPILED", "0")  # the tie's exact pass, counted below: compiled, it is rounded exact
     path, values = npy
     frame = read_array(path, dims={"point": infer, "feature": 5}, labels={"feature": NAMES}, field_axis="feature",
                        blocks=3_000)

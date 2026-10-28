@@ -62,9 +62,16 @@ def same_bits(a, b):
 
 
 def numpy_run(monkeypatch, make):
+    """*make*'s frames run with compiling off: run here, as a frame read in blocks runs only when asked."""
     with monkeypatch.context() as patch:
         patch.setenv("TIDY3A_COMPILED", "0")
-        return make()
+        made = make()
+        for frame in made if isinstance(made, tuple) else (made,):
+            if hasattr(frame, "collect"):
+                frame.collect()
+                result = getattr(frame, "_result", None) or frame
+                assert not any(note.startswith("ran:") for note in result._notes), "compiled"
+        return made
 
 
 @pytest.mark.parametrize("threads", [1, 3])
@@ -230,3 +237,69 @@ def test_a_key_far_wider_than_its_values_sorts_them(dropna, monkeypatch):
     frame.collect()
     assert frame._result._notes[-1] == "ran: 6 blocks in a compiled kernel"
     same_bits(frame, numpy_run(monkeypatch, lambda: tidy(data, blocks={"p": 1_000}) >> verbs))
+
+
+def ties(size=6_000, seed=7):
+    """Groups of two adjacent float32 values, whose means lie on float32 ties the error bound cannot decide."""
+    rng = np.random.default_rng(seed)
+    first = (rng.normal(size=size // 2) * 100).astype("float32")
+    v = np.stack([first, np.nextafter(first, np.float32(np.inf))], axis=1).ravel()
+    pair = np.repeat(np.arange(size // 2), 2)
+    order = rng.permutation(size)  # the pairs spread over the blocks
+    return xr.Dataset({"v": ("p", v[order]), "pair": ("p", pair[order])})
+
+
+def passes(monkeypatch):
+    """The later passes' asks a run makes, counted."""
+    from tidy3a import chunked
+
+    asked = []
+    original = chunked._passes
+
+    def counting(leaves, blocks, pool, settled, *rest, **options):
+        asked.extend(ask for leaf in leaves if id(leaf) in settled for asks in settled[id(leaf)][1].values()
+                     for ask in asks)
+        return original(leaves, blocks, pool, settled, *rest, **options)
+
+    monkeypatch.setattr(chunked, "_passes", counting)
+    return asked
+
+
+@pytest.mark.skipif(not hasattr(__import__("labelarray").sums, "EXACT"), reason="labelarray marks exact totals from 0.1.7")
+def test_exact_totals_need_no_exact_pass(monkeypatch):
+    """The kernel marks a total no addition rounded as exact, merges keep the mark where adding the blocks' totals
+    was exact, and labelarray rounds those from the total: the ties need no exact pass, with NumPy's bits."""
+    data = ties()
+    pair, v = fields("pair", "v")
+    verbs = group_by(pair) >> summarise(m=mean(v), s=sum(v), k=n())
+    asked = passes(monkeypatch)
+    compiled = tidy(data, blocks={"p": 1_000}, threads=3) >> verbs
+    compiled.collect()
+    assert compiled._result._notes[-1] == "ran: 6 blocks in a compiled kernel" and asked == []
+    want = numpy_run(monkeypatch, lambda: tidy(data, blocks={"p": 1_000}) >> verbs)
+    assert len(asked) > 0  # NumPy's estimate leaves the ties to the exact pass
+    same_bits(compiled, want)
+    same_bits(compiled, tidy(data) >> verbs)
+
+
+def test_without_labelarrays_exact_mark_the_exact_pass_settles_the_ties(monkeypatch):
+    """With a labelarray that has no exact mark (0.1.6), the kernel's totals carry the bound as before."""
+    import types
+
+    from labelarray import sums
+
+    import tidy3a.reductions
+    from tidy3a.fused import reductions
+
+    older = types.SimpleNamespace(**{name: getattr(sums, name) for name in dir(sums)
+                                     if not name.startswith("__") and name not in ("EXACT", "merge")})
+    monkeypatch.setattr(tidy3a.reductions, "sums", older)  # tidy3a sees no mark; labelarray itself is unchanged
+    monkeypatch.setattr(reductions, "EXACT", None)
+    data = ties()
+    pair, v = fields("pair", "v")
+    verbs = group_by(pair) >> summarise(m=mean(v), s=sum(v), k=n())
+    asked = passes(monkeypatch)
+    frame = tidy(data, blocks={"p": 1_000}, threads=3) >> verbs
+    frame.collect()
+    assert frame._result._notes[-1] == "ran: 6 blocks in a compiled kernel" and len(asked) > 0
+    same_bits(frame, tidy(data) >> verbs)

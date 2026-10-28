@@ -35,6 +35,7 @@ from labelarray import sums
 from tidy3a.fused.expressions import Source, Unsupported
 
 COMPENSATED = 2**25  # values a group may hold for its compensated sum to be within 7 plain additions' bound
+EXACT = getattr(sums, "EXACT", None)  # labelarray's mark of an exact total (0.1.7), where it has one
 
 
 @dataclass
@@ -73,7 +74,7 @@ class Slot:
             names = ["total", "carry", "magnitude", "mcarry"]
             arrays = {f"{name}{k}": np.zeros(groups) for name in names}
             arrays |= {f"{name}{k}": np.zeros(groups, np.int64) for name in ("present", "plus", "minus")}
-            return arrays
+            return arrays | {f"rounded{k}": np.zeros(groups, np.bool_)}  # whether an addition into the total rounded
         if kind == "float":
             return {f"total{k}": np.zeros(groups), f"present{k}": np.zeros(groups, np.int64)}
         if kind == "int":
@@ -156,6 +157,8 @@ class Slot:
             total = arrays[f"total{k}"] + arrays[f"carry{k}"]
             magnitude = arrays[f"magnitude{k}"] + arrays[f"mcarry{k}"]
             terms = np.where(counted <= COMPENSATED, 7, counted)
+            if EXACT is not None:  # no addition rounded: the total is the exact sum, which labelarray rounds itself
+                terms = np.where(arrays[f"rounded{k}"], terms, EXACT)
             pieces = np.stack([total, magnitude, arrays[f"present{k}"], counted, arrays[f"plus{k}"],
                                arrays[f"minus{k}"], terms]).astype(np.float64)
             return "estimate", pieces
@@ -181,8 +184,10 @@ class Slot:
 def _estimate(k: int) -> list[str]:
     """Neumaier's compensated addition of ``x{k}`` to the group's total and of its magnitude, and the counts."""
     return [f"t{k} = total{k}[g]", f"s{k} = t{k} + x{k}",
-            f"if abs(t{k}) >= abs(x{k}):", f"    carry{k}[g] += (t{k} - s{k}) + x{k}",
-            "else:", f"    carry{k}[g] += (x{k} - s{k}) + t{k}", f"total{k}[g] = s{k}",
+            f"if abs(t{k}) >= abs(x{k}):", f"    e{k} = (t{k} - s{k}) + x{k}",
+            "else:", f"    e{k} = (x{k} - s{k}) + t{k}",
+            f"carry{k}[g] += e{k}", f"if e{k} != 0:", f"    rounded{k}[g] = True",  # a NaN's error is NaN: rounded
+            f"total{k}[g] = s{k}",
             f"size{k} = abs(x{k})", f"m{k} = magnitude{k}[g]", f"n{k} = m{k} + size{k}",  # not a{k}: the inputs'
             f"if m{k} >= size{k}:", f"    mcarry{k}[g] += (m{k} - n{k}) + size{k}",
             "else:", f"    mcarry{k}[g] += (size{k} - n{k}) + m{k}", f"magnitude{k}[g] = n{k}",

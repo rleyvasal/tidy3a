@@ -530,6 +530,7 @@ def test_frames_a_scan_writes_count_toward_its_blocks(tmp_path, monkeypatch):
 def test_later_passes_in_slices_give_the_in_memory_bits(monkeypatch, each):
     """A later pass works on slices of a block (``chunked.SLICE``), their answers joined as blocks' are."""
     xr = pytest.importorskip("xarray")
+    monkeypatch.setenv("TIDY3A_COMPILED", "0")  # the float32 tie's exact pass: compiled, its total is rounded exact
     monkeypatch.setattr(chunked, "SLICE", 7)
     sliced = []
     total = type(REGISTRY["sum"])

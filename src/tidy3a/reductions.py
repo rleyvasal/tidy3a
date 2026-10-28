@@ -350,7 +350,16 @@ class Total(Reduction):
                                     counted.astype(np.int64)])
         raise BlockError(f"{node.text()}: {self.name} of {value.dtype} values is not handled on blocks; {WHOLE_AXIS}")
 
+    def fill(self, node, kind, dtype):
+        if kind == "estimate" and hasattr(sums, "EXACT"):  # a group no block has held yet: its total, 0, is exact
+            fill = np.zeros((sums.PIECES, 1))
+            fill[sums.TERMS] = sums.EXACT
+            return fill
+        return 0
+
     def merge(self, node, kind, held, piece):
+        if kind == "estimate" and hasattr(sums, "merge"):  # keeps a compiled block's exact totals marked (0.1.7)
+            return sums.merge(held, piece)
         if kind == "estimate":
             merged = held.copy()
             merged[:sums.TERMS] += piece[:sums.TERMS]

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- With a labelarray that marks exact totals (0.1.7, not yet released), a
+  compiled block marks each group's float32 total that no addition
+  rounded, and the blocks' tables merge with labelarray's `merge`, which
+  keeps the mark where adding the totals was exact; labelarray rounds such
+  sums and means from the total, so the float32 ties an error bound cannot
+  decide need no exact pass. The 540,000-voxel summary's mean then needs
+  none. With labelarray 0.1.6 the exact pass runs as before. The results are
+  the same bits either way.
 - With `fast` installed, a summary of data read in blocks whose every step
   compiles runs each block in compiled passes (Numba, released from the
   GIL) instead of NumPy's steps: the filters and the keys' groups in one,
