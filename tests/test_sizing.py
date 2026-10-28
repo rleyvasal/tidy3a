@@ -211,28 +211,35 @@ CLIMATE = {
 }
 
 
-def slope(measure, make, pipeline, small, large):
-    """What a block's peak grows by per position, and its peak with no positions, from blocks of two sizes."""
-    a, b = measure(make(small) >> pipeline), measure(make(large) >> pipeline)
-    per_position = (b - a) / (large - small)
-    return per_position, a - per_position * small
+@pytest.fixture
+def small_slices(monkeypatch):
+    """Later passes in slices of 4,096 values, so blocks of a few thousand values hold several, and the slices' fixed
+    part does not hide what grows with the block."""
+    from tidy3a import sizing
+
+    monkeypatch.setattr(chunked, "SLICE", 4_096)
+    monkeypatch.setattr(sizing, "SLICE", 4_096)
+
+
+def bounded(measure, make, pipeline, small, large):
+    """Each block's peak, at two sizes, within the estimate's bound for its size; and the estimate no more than eight
+    times what the peak grows by per position."""
+    estimate = cost([make(small) >> pipeline])
+    peaks = [measure(make(rows) >> pipeline) for rows in (small, large)]
+    for rows, peak in zip((small, large), peaks):
+        assert peak <= rows * estimate.work + estimate.fixed + 2**20, (rows, peak, estimate)
+    grows = (peaks[1] - peaks[0]) / (large - small)
+    assert estimate.work <= 8 * grows, (grows, estimate)
 
 
 @pytest.mark.parametrize("name", list(CLOUD))
-def test_the_estimate_bounds_a_blocks_peak_read_from_a_file(name, tmp_path, block_peaks):
-    make = cloud_file(tmp_path)
-    measured, base = slope(block_peaks, make, CLOUD[name], 10_000, 20_000)
-    estimate = cost([make(10_000) >> CLOUD[name]])
-    assert measured <= estimate.work <= 8 * measured, (measured, estimate)
-    assert base <= estimate.fixed + 2**20, (base, estimate)
+def test_the_estimate_bounds_a_blocks_peak_read_from_a_file(name, tmp_path, block_peaks, small_slices):
+    bounded(block_peaks, cloud_file(tmp_path), CLOUD[name], 10_000, 20_000)
 
 
 @pytest.mark.parametrize("name", list(CLIMATE))
-def test_the_estimate_bounds_a_blocks_peak_from_a_dataset(name, block_peaks):
-    measured, base = slope(block_peaks, climate, CLIMATE[name], 50, 100)
-    estimate = cost([climate(50) >> CLIMATE[name]])
-    assert measured <= estimate.work <= 8 * measured, (measured, estimate)
-    assert base <= estimate.fixed + 2**20, (base, estimate)
+def test_the_estimate_bounds_a_blocks_peak_from_a_dataset(name, block_peaks, small_slices):
+    bounded(block_peaks, climate, CLIMATE[name], 50, 100)
 
 
 def test_the_estimate_reads_nothing_and_is_the_same_each_time(tmp_path, monkeypatch):
@@ -266,6 +273,7 @@ def test_a_budget_gives_the_most_positions_that_fit():
             rows = estimate.rows(budget, threads)
             assert (rows == 0 or estimate.bound(rows, threads) <= budget) and budget < estimate.bound(rows + 1, threads)
     assert estimate.rows(RESERVE, 1) == 0  # nothing left once the reserve and the fixed part are set aside
+    assert Cost(work=1_000, held=10).per_position(2) == (2 * 1_000 + 4 * 10) * 3 // 2  # what the allocator keeps
 
 
 # ── blocks="auto" and memory= ───────────────────────────────────────────────
@@ -277,7 +285,8 @@ def cloud_array(rows="auto", **options):
                       blocks=rows, **options)
 
 
-SUMS = 40 * 2**20  # a float32 sum's fixed part (``Total.working``): a few MB beyond it leave room for some blocks
+FLOAT32 = REGISTRY["mean"].working(np.dtype("float32"))
+SUMS = FLOAT32.fixed + chunked.SLICE * (FLOAT32.later + 8)  # a float32 sum's fixed part, with its passes' slices
 SMALL = RESERVE + 3 * 10**6  # room for a few thousand of the cloud's positions
 SUMMED = SMALL + SUMS
 
@@ -513,3 +522,31 @@ def test_frames_a_scan_writes_count_toward_its_blocks(tmp_path, monkeypatch):
     assert spans[:len(layout.every)] == layout.every
     assert np.array_equal(copy.collect()["distance"].values, cloud_array(1_000) >> DISTANCE
                           >> filter(distance <= 50) >> pull("distance"))
+
+
+@pytest.mark.parametrize("each", [1, 6])
+def test_later_passes_in_slices_give_the_in_memory_bits(monkeypatch, each):
+    """A later pass works on slices of a block (``chunked.SLICE``), their answers joined as blocks' are."""
+    xr = pytest.importorskip("xarray")
+    monkeypatch.setattr(chunked, "SLICE", 7)
+    sliced = []
+    total = type(REGISTRY["sum"])
+    again = total.again
+    monkeypatch.setattr(total, "again", lambda self, node, ask, value, *rest: sliced.append(len(value))
+                        or again(self, node, ask, value, *rest))
+    rng = np.random.default_rng(7)
+    values = (rng.normal(size=(600, each)) * 100).astype(np.float32)
+    values[rng.random(values.shape) < 0.02] = np.nan
+    groups = rng.integers(0, 5, 600)
+    values[:6] = 0
+    values[:6, 0] = np.array([2**24, 1, 1, 2**30, 1, -(2**30)], np.float32)  # a tie the bound cannot settle
+    groups[:6] = 5
+    data = xr.Dataset({"v": (("point", "cell"), values), "g": ("point", groups)})
+    v, g = fields("v", "g")
+    pipeline = group_by(g) >> summarise(total=sum(v, na_rm=True), middle=median(v, na_rm=True),
+                                        high=quantile(v, 0.7, na_rm=True), mean=mean(v))
+    want = tidy(data) >> pipeline
+    got = tidy(data, blocks={"point": 50}) >> pipeline
+    for name in ("total", "middle", "high", "mean"):
+        assert np.asarray(got >> pull(name)).tobytes() == np.asarray(want >> pull(name)).tobytes(), name
+    assert sliced and builtins.max(sliced) <= builtins.max(7, each)  # the exact pass ran, a slice at a time

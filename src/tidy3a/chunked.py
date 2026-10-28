@@ -113,7 +113,8 @@ class Source:
     def block(self, start: int, stop: int, names: frozenset | None = None) -> TidyArray:
         raise NotImplementedError
 
-    def empty(self) -> TidyArray:
+    def empty(self, names: frozenset | None = None) -> TidyArray:
+        """*names*: the variables a run reads, for a source whose blocks hold only those (``block``'s)."""
         raise NotImplementedError
 
     def stored(self, names: frozenset | None) -> tuple[list[tuple[int, int]], bool] | None:
@@ -130,7 +131,7 @@ class FileSource(Source):
         self.reopen, self.size, self.axis, self.build = reopen, size, axis, build
         self.row = row  # the values' type, in native byte order, and the shape of one position
 
-    def empty(self) -> TidyArray:
+    def empty(self, names: frozenset | None = None) -> TidyArray:
         dtype, shape = self.row
         return self.build(np.empty((0, *shape), dtype), 0, 0)
 
@@ -152,7 +153,7 @@ class ArraySource(Source):
     def block(self, start: int, stop: int, names: frozenset | None = None) -> TidyArray:
         return self.build(self.values[start:stop], start, stop)
 
-    def empty(self) -> TidyArray:
+    def empty(self, names: frozenset | None = None) -> TidyArray:
         return self.build(self.values[0:0], 0, 0)
 
 
@@ -213,12 +214,13 @@ class DatasetSource(Source):
         size = size if size <= self.size else max(sizes)
         return [(start, min(start + size, self.size)) for start in range(0, self.size, size)], False
 
-    def empty(self) -> TidyArray:
+    def empty(self, names: frozenset | None = None) -> TidyArray:
         """No positions on the axis: each lazy value along it an empty NumPy array of its type, since slicing lazy
-        data to no positions and computing it still computes a chunk; nothing along the axis is computed."""
+        data to no positions and computing it still computes a chunk; nothing along the axis is computed. With
+        *names*, only those variables, as ``block`` holds them."""
         from tidy3a.frame import tidy
 
-        sliced = self.data.isel({self.axis: slice(0, 0)})
+        sliced = self._only(names).isel({self.axis: slice(0, 0)})
         dataset = hasattr(sliced, "data_vars")
         held = sliced.variables if dataset else sliced.coords.variables
         empty = {name: variable.copy(deep=False, data=np.empty(variable.shape, variable.dtype))
@@ -298,7 +300,7 @@ class Blocks:
         estimate = cost(frames)
         rows = estimate.rows(self.memory, self.threads)
         if rows < 1:
-            each = self.threads * estimate.work + (self.threads + 2) * estimate.held
+            each = estimate.per_position(self.threads)
             fewer = ", fewer threads" if self.threads > 1 else ""
             raise BlockError(f'blocks="auto" fits no block of {self.axis} in memory={describe(self.memory)}: one '
                              f"position takes about {describe(each)} as these verbs run on {self.threads} "
@@ -1114,8 +1116,7 @@ def _passes(leaves: Sequence[_Leaf], blocks: Blocks, pool: ThreadPoolExecutor,
                 for index, hidden, ask in wanted[id(leaf)]:
                     value, each = rows.values[hidden]
                     node = leaf.table.plan.reductions[hidden]
-                    answers.append((index, REGISTRY[node.op].again(node, ask, value, codes if each == 1 else
-                                                                   np.repeat(codes, each), len(leaf.table.keys))))
+                    answers.append((index, _again(node, ask, value, each, codes, len(leaf.table.keys))))
 
             with _naming(blocks, span):
                 _walk(root, blocks.load(*span, names), visit)
@@ -1134,6 +1135,23 @@ def _passes(leaves: Sequence[_Leaf], blocks: Blocks, pool: ThreadPoolExecutor,
             columns[hidden], more = REGISTRY[node.op].resolve(node, ask, totals.get(index), columns[hidden])
             pending.extend((leaf, hidden, again) for again in more)
         del totals
+
+
+SLICE = 1 << 16  # values a later pass works on at once, whatever the block's size (plan milestone 14)
+
+
+def _again(node: Reduce, ask: Any, value: np.ndarray, each: int, codes: np.ndarray, groups: int) -> Any:
+    """One block's answer to *ask*: ``again`` on slices of at most ``SLICE`` values, rows whole, their answers joined
+    as blocks' are, so a later pass works in the same memory whatever the block's size."""
+    entry = REGISTRY[node.op]
+    rows = max(1, SLICE // each)
+    answer = None
+    for start in range(0, max(len(codes), 1), rows):
+        part = codes[start:start + rows]
+        found = entry.again(node, ask, value[start * each:(start + rows) * each],
+                            part if each == 1 else np.repeat(part, each), groups)
+        answer = found if answer is None else entry.join(node, ask, answer, found)
+    return answer
 
 
 def _table_codes(table: _Table, rows: _Rows) -> np.ndarray:

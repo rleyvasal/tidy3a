@@ -11,8 +11,11 @@ runs, and with it the float64 sums, which are repeatable for a given size,
 and the block numbers that errors and ``preview()`` give.
 
 The estimate is a bound, not a forecast: a filter is taken to keep every
-row, and a reduction's later passes to be asked for; ``tests/test_sizing.py``
-holds it above the peaks ``tracemalloc`` measures. What the data decides is
+row, and a reduction's later passes to be asked for, which work on slices
+of a block (``chunked.SLICE``), so they cost the same whatever its size;
+``tests/test_sizing.py`` holds it above the peaks ``tracemalloc`` measures.
+A budget counts the blocks' arrays at 1.5 times (``ALLOCATOR``), for what
+the allocator keeps of what they free. What the data decides is
 not counted: how many groups a block's rows fall into, which each
 reduction's pieces and the summary table grow with (a summary with about
 as many groups as positions holds about as much as its data), and the rows
@@ -30,13 +33,16 @@ from typing import Any
 
 import numpy as np
 
-from tidy3a.chunked import ChunkedFrame, DatasetSource, _Leaf, _needs, _Node, _trie
+from tidy3a.chunked import SLICE, ChunkedFrame, _Leaf, _needs, _Node, _trie
 from tidy3a.errors import GroupError, ReadError, SummariseError
 from tidy3a.expr import Context, Ref, evaluate
 from tidy3a.frame import TidyArray
 from tidy3a.reductions import REGISTRY
 
 RESERVE = 256 * 2**20  # the interpreter, the libraries, and the summary table, set aside from a budget
+ALLOCATOR = (3, 2)  # what the blocks' arrays take in the process, as a ratio to their own size: the allocator keeps
+#   some of what a block frees, which over hundreds of blocks of changing sizes measured a quarter more than the
+#   estimate on the 29.4 GB sweeps file with one thread (milestone 14, step 6); 1.5 times covers it
 OBJECT = 64  # bytes a text or other Python object is taken to hold, beyond the array's pointer to it
 KEY = 56  # bytes per row a group key's codes take: its values factorized (a sorted copy, the order, the inverse, the
 #   codes) and, in a later pass, its codes in the table's
@@ -109,13 +115,18 @@ class Cost:
     def bound(self, rows: int, threads: int) -> int:
         """The most a run of blocks of *rows* positions on *threads* threads holds, by the estimate: *threads* blocks
         running, and at most *threads* + 2 results waiting (``_in_order`` starts *threads* + 1 ahead of the one being
-        merged)."""
-        return RESERVE + threads * (self.fixed + rows * self.work) + (threads + 2) * rows * self.held
+        merged), with what the allocator keeps of them (``ALLOCATOR``)."""
+        return RESERVE + threads * self.fixed + rows * self.per_position(threads)
+
+    def per_position(self, threads: int) -> int:
+        """What one more position in every block costs a run on *threads* threads, the allocator's share included."""
+        times, over = ALLOCATOR
+        return -(-(threads * self.work + (threads + 2) * self.held) * times // over)
 
     def rows(self, budget: int, threads: int) -> int:
         """The most positions a block may hold for *budget* bytes on *threads* threads; 0 when not even one fits."""
         free = budget - RESERVE - threads * self.fixed
-        per_position = threads * self.work + (threads + 2) * self.held
+        per_position = self.per_position(threads)
         return max(0, free // per_position) if per_position else max(0, free)
 
 
@@ -127,10 +138,10 @@ def cost(frames: Sequence[ChunkedFrame]) -> Cost:
     axis = blocks.axis
     needs = [_needs(frame) for frame in frames]
     names = None if any(need is None for need in needs) else frozenset().union(*needs)
-    empty = blocks.source.empty()
+    empty = blocks.source.empty(names)
     if not blocks.labelled:
         empty = empty._evolve(empty._backend.label_positions(empty._data, axis, 0))
-    loaded = _loaded(blocks.source, empty, names, axis)
+    loaded = _bytes(empty, axis)  # a dataset's block holds only the variables read (milestone 12)
     with warnings.catch_warnings():  # a reduction of no values warns; here that says nothing
         warnings.simplefilter("ignore", RuntimeWarning)
         work, held, fixed = _walk(_trie([_Leaf(frame, None, []) for frame in frames]), empty, axis)
@@ -175,23 +186,11 @@ def _leaf(frame: ChunkedFrame, rows: TidyArray, axis: str) -> tuple[int, int, in
         spread = 8 * each if each > 1 else 0  # the rows' codes repeated for each value
         working = REGISTRY[node.op].working(dtype)
         first = max(first, spread + each * working.first)
-        if working.later:
-            later = max(later, spread + each * working.later + 8 * len(keys) + 16)  # and the rows' codes in the table
+        if working.later:  # a slice at a time (``chunked.SLICE``), the rows' codes in the table per row
+            later = max(later, 8 * len(keys) + 16)
+            fixed = max(fixed, working.fixed + SLICE * (working.later + 8))
         fixed = max(fixed, working.fixed)
     return work + values + max(first, later), 0, fixed  # a block's pieces are per group
-
-
-def _loaded(source: Any, empty: TidyArray, names: frozenset | None, axis: str) -> int:
-    """What a block takes as loaded, per position: the variables a dataset's block computes (milestone 12), or every
-    one, and the axis's labels."""
-    backend, data = empty._backend, empty._data
-    total = _labels(empty, axis)
-    variables = {name: variable for name, variable in backend.variables(data).items() if axis in variable.dims}
-    if names is not None and isinstance(source, DatasetSource):
-        kept = [name for name in variables if name in names]
-        variables = {name: variables[name] for name in kept} if kept else (
-            dict([min(variables.items(), key=lambda item: _per_position(item[1], axis))]) if variables else {})
-    return total + sum(_per_position(variable, axis) for variable in variables.values())
 
 
 def _new(before: TidyArray, after: TidyArray, axis: str) -> int:

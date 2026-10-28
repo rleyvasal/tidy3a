@@ -22,6 +22,9 @@
 - Inside: `tidy3a.sizing` estimates what a block holds per position, and
   each reduction in `tidy3a.reductions` declares its steps' working memory
   (`Reduction.working`), measured and held to by tests (plan milestone 14).
+  A later pass (the median's digits, the float32 sums' exact pass) works on
+  slices of 65,536 values of a block, their answers joined as blocks' are,
+  so it takes the same memory whatever the block's size.
 
 ## 0.8.0 — 2026-10-27
 
