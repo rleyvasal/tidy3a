@@ -66,6 +66,7 @@ from typing import Any
 
 import numpy as np
 from labelarray.errors import LabelArrayError
+from labelarray.grouped import merge_sorted
 from labelarray.transforms import Bins, Duration, GridCells
 
 from tidy3a.errors import BlockError, FilterError, MutateError, ReadError, SummariseError, TidyError, translating
@@ -793,16 +794,14 @@ class _Table:
         if self.keys is None:
             self.keys, self.counts, self.pieces = keys, counts, dict(pieces)
             return
-        union = np.union1d(self.keys, keys)
+        union, where, at = merge_sorted(self.keys, keys)  # one pass over both, both sorted (plan milestone 15)
         if len(union) != len(self.keys):
-            where = np.searchsorted(union, self.keys)
             self.counts = _spread(self.counts, where, len(union), 0)
             for hidden, (kind, held) in self.pieces.items():
                 node = self.plan.reductions[hidden]
                 fill = REGISTRY[node.op].fill(node, kind, held.dtype)
                 self.pieces[hidden] = (kind, _spread(held, where, len(union), fill))
             self.keys = union
-        at = np.searchsorted(union, keys)
         self.counts[at] += counts
         for hidden, (kind, piece) in pieces.items():
             node, held = self.plan.reductions[hidden], self.pieces[hidden][1]
