@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import os
 import shutil
-from collections.abc import Hashable
+from collections.abc import Hashable, Mapping
 from typing import Any
 
 import numpy as np
@@ -73,7 +73,7 @@ class Writer:
     """
 
     def __init__(self, path: str, frame: TidyArray, axis: Hashable | None, overwrite: bool, unlabel: bool = False,
-                 blocks: Any = None):
+                 blocks: Any = None, encodings: Mapping[Hashable, tuple[np.dtype, dict]] | None = None):
         suffix = os.path.splitext(path.rstrip("/"))[1].lower()
         if suffix not in FORMATS:
             raise WriteError(f'write("{path}"): the suffix says the format, one of {", ".join(FORMATS)}')
@@ -81,6 +81,7 @@ class Writer:
             raise WriteError(f'write("{path}"): {path} exists; overwrite=True replaces it')
         self.path, self.suffix, self.axis, self.overwrite, self.unlabel = path, suffix, axis, overwrite, unlabel
         self.frame, self.blocks = frame, blocks
+        self.encodings = dict(encodings or {})  # a source file's, for blocks that hold none (``portable_encodings``)
         head, tail = os.path.split(os.path.abspath(path.rstrip("/")))
         self.temporary = os.path.join(head, f".{tail}.partial-{os.getpid()}")
         backend, data = frame._backend, frame._data
@@ -137,7 +138,7 @@ class Writer:
         return (rows, *self.shape) if self.axis is not None else self.shape
 
     def _add_zarr(self, dataset: Any) -> None:
-        dataset = _portable(dataset)
+        dataset = _portable(dataset, self.encodings)
         if self.axis is not None and dataset.sizes.get(self.axis, 0) == 0:
             if self.first is None and not self.written:
                 self.first = dataset  # written at the end only if no block has rows
@@ -206,14 +207,29 @@ class Writer:
         return tidy(opened, field_axis=frame._field_axis)
 
 
-def _portable(dataset: Any) -> Any:
+def portable_encodings(variables: Mapping[Hashable, Any], changed: set) -> dict[Hashable, tuple[np.dtype, dict]]:
+    """The encodings Zarr shares with NetCDF of a source's *variables*, with each one's decoded type, leaving out
+    those *changed* (a ``mutate``'s targets): a block on the NumPy backend holds no encodings, so its writer takes the
+    source file's (plan milestone 16), as a block on the xarray backend carries them."""
+    found = {}
+    for name, variable in variables.items():
+        kept = {key: value for key, value in variable.encoding.items() if key in _PORTABLE}
+        if kept and name not in changed:
+            found[name] = (variable.dtype, kept)
+    return found
+
+
+def _portable(dataset: Any, encodings: Mapping[Hashable, tuple[np.dtype, dict]] | None = None) -> Any:
     """*dataset* as Zarr stores it: only the encodings Zarr shares with NetCDF, and text as variable-length strings,
     index coordinates included: fixed-width text has no Zarr 3 specification, so other Zarr libraries may not read
-    it, and a later block's longer text would not fit."""
+    it, and a later block's longer text would not fit. A variable with no encoding of its own takes the source's in
+    *encodings*, where it still has the source's type."""
     dataset = dataset.copy(deep=False)
     text = {}
     for name, variable in dataset.variables.items():
         variable.encoding = {key: value for key, value in variable.encoding.items() if key in _PORTABLE}
+        if not variable.encoding and encodings and name in encodings and encodings[name][0] == variable.dtype:
+            variable.encoding = dict(encodings[name][1])
         if variable.dtype.kind in "US":
             text[name] = variable.astype(object)
     coords = {name: variable for name, variable in text.items() if name in dataset.coords}

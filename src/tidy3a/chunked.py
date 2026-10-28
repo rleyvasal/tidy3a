@@ -172,13 +172,22 @@ class DatasetSource(Source):
         if axis == field_axis:
             raise TidyError(f'blocks= reads runs of "{axis}", which field_axis= turns into columns; '
                             "block an observation axis")
-        from tidy3a.backend import backend_for
-
+        self.data, self.axis, self.field_axis = data, axis, field_axis
         # The backend is chosen once, for the whole data, so a block holding some of its variables is on the same one.
-        backend = backend_for(data, backend).name if backend is None else backend
-        self.data, self.axis, self.field_axis, self.backend = data, axis, field_axis, backend
+        self.backend = self._backend() if backend is None else backend
         self.size = int(data.sizes[axis])
         self.chunks = _chunks_along(data, axis)
+
+    def _backend(self) -> str:
+        """The default backend for the blocks, chosen on the block of no positions, in memory: every block is
+        computed into memory, so the data being lazy does not keep it on xarray, nor do storage encodings, which no
+        summary keeps; what else the NumPy backend cannot hold (coordinates beyond an axis's labels, multi-level
+        labels, times with a time zone) still does. Measured (milestone 16), NumPy ran a NetCDF4 or Zarr file's
+        blocks 10 to 16% faster, with the same bits."""
+        from tidy3a.backend import get_backend, xarray_backend
+
+        backend = get_backend(None)
+        return (backend if backend.unsupported(self._emptied(None)) is None else xarray_backend()).name
 
     def block(self, start: int, stop: int, names: frozenset | None = None) -> TidyArray:
         from tidy3a.frame import tidy
@@ -221,6 +230,10 @@ class DatasetSource(Source):
         *names*, only those variables, as ``block`` holds them."""
         from tidy3a.frame import tidy
 
+        return tidy(self._emptied(names), field_axis=self.field_axis, backend=self.backend)
+
+    def _emptied(self, names: frozenset | None) -> Any:
+        """The xarray object of no positions, its lazy values along the axis empty NumPy arrays."""
         sliced = self._only(names).isel({self.axis: slice(0, 0)})
         dataset = hasattr(sliced, "data_vars")
         held = sliced.variables if dataset else sliced.coords.variables
@@ -233,7 +246,7 @@ class DatasetSource(Source):
             sliced = sliced.assign({name: variable for name, variable in empty.items() if name not in coords})
         elif not isinstance(sliced.variable.data, np.ndarray):  # a DataArray's own values
             sliced = sliced.copy(deep=False, data=np.empty(sliced.shape, sliced.dtype))
-        return tidy(sliced.assign_coords(coords), field_axis=self.field_axis, backend=self.backend)
+        return sliced.assign_coords(coords)
 
 
 def _chunks_along(data: Any, axis: str) -> list[tuple[int, int]] | None:
@@ -949,7 +962,29 @@ def _writer(frame: ChunkedFrame, path: Any, overwrite: bool) -> Any:
 
     blocks = frame._blocks
     unlabel = not blocks.labelled and not any(step._operation == "filter" for step in frame._steps)
-    return Writer(os.fspath(path), frame, blocks.axis, overwrite, unlabel, blocks)
+    return Writer(os.fspath(path), frame, blocks.axis, overwrite, unlabel, blocks, _source_encodings(frame))
+
+
+def _source_encodings(frame: ChunkedFrame) -> dict:
+    """A dataset's portable encodings for the variables the frame's verbs leave as they are (``write``'s
+    ``portable_encodings``): a block on the NumPy backend holds none, and the file written should keep them as it does
+    from blocks on xarray. None for a file or an array read in blocks, and none where a ``mutate`` writes into an
+    array's fields, which changes a variable in part."""
+    from tidy3a.write import portable_encodings
+
+    source = frame._blocks.source
+    if not isinstance(source, DatasetSource):
+        return {}
+    targets = [step.target for verb in frame._steps if verb._operation == "mutate" for step in verb._arguments]
+    if any(not isinstance(target, str) for target in targets):
+        return {}
+    data = source.data
+    if hasattr(data, "data_vars"):
+        variables = dict(data.variables)
+    else:
+        variables = {data.name if data.name is not None else "values": data.variable,
+                     **{name: data[name].variable for name in data.coords}}
+    return portable_encodings(variables, set(targets))
 
 
 def _write(frame: ChunkedFrame, verb: Any) -> TidyArray:

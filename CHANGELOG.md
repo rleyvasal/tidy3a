@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- A lazy, Dask-backed, or file-backed dataset read in blocks runs its
+  blocks on the NumPy backend by default, as each block is computed into
+  memory first: the daytime summary of a NetCDF4 or Zarr file of 2,000
+  grids ran 10 to 16% faster, with the same bits. What else the NumPy
+  backend cannot hold (coordinates beyond an axis's labels, multi-level
+  labels, times with a time zone) still keeps the blocks on xarray, and
+  `set_backend` and `backend=` are followed as before. `write()` keeps a
+  file's portable encodings (type, fill value, scale and offset, time units
+  and calendar) for the variables the verbs leave as they are, from blocks
+  on either backend, so a packed variable stays packed.
+
 ## 0.9.0 — 2026-10-28
 
 - `blocks="auto"` with `memory=`, on `read_array` and on `tidy`
