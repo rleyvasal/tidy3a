@@ -7,6 +7,10 @@ a test to some backends, and needs a reason: a deliberate difference listed
 in ``docs/backends.md``, or a test that compares or chooses backends itself.
 """
 
+import os
+import shutil
+import tempfile
+
 import pytest
 
 from tidy3a.backend import get_backend, set_backend
@@ -15,9 +19,17 @@ BACKENDS = ("xarray", "numpy")
 
 
 def pytest_configure(config):
+    if not os.environ.get("TIDY3A_KERNELS"):  # the suite's compiled kernels kept apart from the user's own cache
+        os.environ["TIDY3A_KERNELS"] = config._tidy3a_kernels = tempfile.mkdtemp(prefix="tidy3a-kernels-")
     config.addinivalue_line(
         "markers", "backends(*names, reason): run this test on these backends only, for the reason given"
     )
+
+
+def pytest_unconfigure(config):
+    folder = getattr(config, "_tidy3a_kernels", None)
+    if folder is not None:
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def pytest_generate_tests(metafunc):

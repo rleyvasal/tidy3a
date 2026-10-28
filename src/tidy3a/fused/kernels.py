@@ -35,9 +35,15 @@ COMPILED: dict[tuple[str, str], Any] = {}  # this process's kernels by their sou
 
 def compile_source(source: str, name: str, helpers: tuple[str, ...] = ()) -> Any:
     """*source*'s function *name*, with the *helpers* it defines and calls, compiled by Numba, once a process for
-    each source."""
+    each source, and kept on disk between runs (``fused.cache``) where it can be."""
     found = COMPILED.get((name, source))
     if found is not None:
+        return found
+    from tidy3a.fused.cache import load
+
+    found = load(source, name, helpers)
+    if found is not None:
+        COMPILED[(name, source)] = found
         return found
     import numba
 
