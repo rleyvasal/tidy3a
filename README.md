@@ -491,6 +491,9 @@ dependencies (requires [uv](https://docs.astral.sh/uv/)):
 scripts/check.sh
 ```
 
+`scripts/check.sh --parallel` runs the jobs side by side, for a machine with
+cores to spare (about 2.5 minutes on 24 cores, against 10 one after another).
+
 `scripts/bench.sh` times both backends on the reference workloads in a
 pinned environment (`--fast` adds the compiled kernels). The
 [release procedure](docs/releasing.md) describes the GitHub Release

@@ -5,11 +5,21 @@
 # dependencies, so nothing installed on this machine (tidy3, plot3, a newer
 # xarray) can hide a failure that CI would see.
 #
-#   scripts/check.sh            all jobs
-#   scripts/check.sh 3.12       one Python version only
+#   scripts/check.sh              all jobs, one after another
+#   scripts/check.sh 3.12         one Python version only
+#   scripts/check.sh --parallel   all jobs side by side, for a machine with cores to spare: the environments are
+#                                 set up one after another (each install builds tidy3a in this folder), each job's
+#                                 tests start once its environment is ready, the distribution job once every
+#                                 install is done, and each job's output is shown, in order, when all have finished
 #
 # Needs uv (https://docs.astral.sh/uv/); it downloads missing Pythons.
 set -euo pipefail
+
+parallel=0
+if [[ "${1:-}" == "--parallel" ]]; then
+  parallel=1
+  shift
+fi
 
 cd "$(dirname "$0")/.."
 work="$(mktemp -d)"
@@ -18,9 +28,18 @@ trap 'rm -rf "$work"' EXIT
 versions=("${@:-3.11 3.12 3.13 3.14}")
 versions=(${versions[@]})
 failed=()
+names=()  # the jobs started side by side, and their output
+logs=()
 
 run() {
   local name="$1"; shift
+  if (( parallel )); then
+    local log="$work/job-${#names[@]}.log"
+    names+=("$name")
+    logs+=("$log")
+    ( set +e; "$@" > "$log" 2>&1; echo $? > "$log.status" ) &
+    return 0
+  fi
   printf '\n── %s ──\n' "$name"
   if "$@"; then
     printf '   ok: %s\n' "$name"
@@ -30,21 +49,41 @@ run() {
   fi
 }
 
-pytest_job() {
+setup() {
+  local env="$1"; shift
   local python="$1"; shift
-  local env="$work/py$python-$RANDOM"
   uv venv -q --python "$python" "$env" &&
-    uv pip install -q --python "$env/bin/python" "$@" &&
-    "$env/bin/python" -m pytest -q -p no:cacheprovider
+    uv pip install -q --python "$env/bin/python" "$@"
+}
+
+tests() {
+  [[ -x "$1/bin/python" ]] || { echo "its environment could not be set up"; return 1; }
+  "$1/bin/python" -m pytest -q -p no:cacheprovider
+}
+
+pytest_job() {
+  local env="$work/py$1-$RANDOM"
+  setup "$env" "$@" && tests "$env"
+}
+
+job() {
+  local name="$1"; shift
+  if (( parallel )); then
+    local env="$work/py$1-$RANDOM"
+    setup "$env" "$@" || rm -rf "$env"  # now, so no two installs build tidy3a at once
+    run "$name" tests "$env"
+  else
+    run "$name" pytest_job "$@"
+  fi
 }
 
 for python in "${versions[@]}"; do
-  run "pytest (Python $python)" pytest_job "$python" -e ".[dev]"
+  job "pytest (Python $python)" "$python" -e ".[dev]"
 done
 
 if [[ $# -eq 0 ]]; then
-  run "pytest (minimum NumPy and xarray)" \
-    pytest_job 3.11 "numpy==2.0.*" "pandas==2.2.2" "xarray==2024.6.0" "dask[array]" pytest -e .
+  job "pytest (minimum NumPy and xarray)" \
+    3.11 "numpy==2.0.*" "pandas==2.2.2" "xarray==2024.6.0" "dask[array]" pytest -e .
 
   distribution_job() {
     uv build -q --out-dir "$work/dist" &&
@@ -63,6 +102,20 @@ if [[ $# -eq 0 ]]; then
         "import numpy as np, tidy3a; from labelarray import sums; v = np.ones(200_000, np.float32); assert sums._compiled('grouped_estimate') is not None, 'compiled kernel not loaded'; print(sums.reduce(v, 'mean', (0,), codes=np.zeros(200_000, np.intp), groups=1))")
   }
   run "source distribution, metadata, and installed wheel (plain, with the xarray extra, and with the fast extra)" distribution_job
+fi
+
+if (( parallel )); then
+  wait
+  for i in "${!names[@]}"; do
+    printf '\n── %s ──\n' "${names[i]}"
+    cat "${logs[i]}"
+    if [[ "$(cat "${logs[i]}.status")" == 0 ]]; then
+      printf '   ok: %s\n' "${names[i]}"
+    else
+      printf '   FAILED: %s\n' "${names[i]}"
+      failed+=("${names[i]}")
+    fi
+  done
 fi
 
 printf '\n'
