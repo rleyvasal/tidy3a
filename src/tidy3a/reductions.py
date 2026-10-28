@@ -19,6 +19,10 @@ reduction's own business, so each is one entry in ``REGISTRY``:
   and ``resolve`` (the answer over every block, into the column, with any
   further asks); and ``close``, once every pass is done.
 
+Each entry also says what its steps allocate at most on one block
+(``working``, a ``Working``), which a block's size is chosen from (plan
+milestone 14, ``tidy3a.sizing``).
+
 ``n()`` is the table's own count of positions per group; its entry has no
 pieces. The executor looks reductions up by name and knows none of them.
 """
@@ -47,6 +51,18 @@ class Ask:
     size: int
 
 
+@dataclass(frozen=True)
+class Working:
+    """What a reduction's steps allocate at most on one block, beyond its values (plan milestone 14): bytes per value
+    in the first pass (``partial``) and in a later one (``again``), and bytes per block whatever its size. What grows
+    with the block's groups is the data's to decide, as the summary table is, and is not counted. The built-ins'
+    figures are their peaks measured with ``tracemalloc``, rounded up (``tests/test_sizing.py`` holds them to it)."""
+
+    first: int
+    later: int = 0
+    fixed: int = 0
+
+
 def pass_budget() -> int:
     """How many values the answers to one pass's asks may hold per block, together: ``labelarray.sums.EXACT_PAIRS``,
     the float32 exact pass's batch, read when a scan runs."""
@@ -58,6 +74,10 @@ class Reduction:
 
     name = ""
     counted = False  # n(): the table counts positions itself, and there are no pieces
+
+    def working(self, dtype: np.dtype) -> Working:
+        """A registered reduction's steps are the caller's, so a generous guess: four times a float64 sum's."""
+        return Working(64)
 
     def partial(self, node: Any, value: np.ndarray, codes: np.ndarray, count: int) -> tuple[str, np.ndarray]:
         raise NotImplementedError
@@ -94,12 +114,18 @@ def _starts(codes: np.ndarray, count: int) -> tuple[np.ndarray, np.ndarray]:
 class Count(Reduction):
     name, counted = "n", True
 
+    def working(self, dtype):
+        return Working(0)
+
 
 class Extreme(Reduction):
     """``min`` and ``max``: each block's extreme per group, merged by the same comparison."""
 
     def __init__(self, name: str):
         self.name = name
+
+    def working(self, dtype):
+        return Working(24)
 
     def ufunc(self, node: Any) -> Any:
         if self.name == "min":
@@ -154,6 +180,9 @@ class Flag(Reduction):
     def __init__(self, name: str):
         self.name = name
 
+    def working(self, dtype):
+        return Working(16)
+
     def ufunc(self) -> Any:
         return np.logical_or if self.name == "any" else np.logical_and
 
@@ -187,6 +216,9 @@ class Spread(Reduction):
 
     def __init__(self, name: str):
         self.name = name
+
+    def working(self, dtype):
+        return Working(32)
 
     def partial(self, node, value, codes, count):
         """The values present, their mean, their squared deviations' sum, and the NaN among them."""
@@ -223,6 +255,12 @@ class Total(Reduction):
 
     def __init__(self, name: str):
         self.name = name
+
+    def working(self, dtype):
+        if dtype == np.float32:  # labelarray's bins, at most 2**22 float64 values, and the exact pass's buckets for a
+            # batch of groups: each the same whatever the block's size
+            return Working(32, later=80, fixed=max(40 * 2**20, sums.EXACT_PAIRS * sums.BUCKETS * 8))
+        return Working(16 if dtype.kind == "f" or self.name == "mean" else 32)
 
     def partial(self, node, value, codes, count):
         if value.dtype == np.float32:
@@ -354,6 +392,9 @@ class Median(Reduction):
     a zero result may differ from NumPy's, which does not order them."""
 
     name = "median"
+
+    def working(self, dtype):
+        return Working(16, later=128)
 
     def partial(self, node, value, codes, count):
         if value.dtype.kind not in "fium" or value.dtype.kind == "f" and value.dtype.itemsize < 2:
