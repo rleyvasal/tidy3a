@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.14.0 — 2026-10-29
 
 - The compiled path's slowest summaries, faster (milestone 20). Where every
   reduction's result is free of the order of its additions (counts,

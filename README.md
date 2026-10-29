@@ -8,7 +8,7 @@ arrays. Pipelines of `select`, `filter`, `mutate`, `group_by`, and
 (and [labelarray](https://github.com/rleyvasal/labelarray), its array layer,
 which needs only NumPy too); xarray is optional.
 
-**Status:** version `0.13.0`, on [PyPI](https://pypi.org/project/tidy3a/).
+**Status:** version `0.14.0`, on [PyPI](https://pypi.org/project/tidy3a/).
 What changed in each release is in [CHANGELOG.md](CHANGELOG.md); the design
 is in [docs/plan.md](docs/plan.md), and the rules fit on one page in
 [docs/decisions.md](docs/decisions.md).
