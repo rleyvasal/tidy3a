@@ -509,11 +509,21 @@ class ChunkedFrame(TidyArray):
             verb = Verb(verb.text, verb._apply, operation="arrange_axes", arguments=verb._arguments)
             operation = "arrange_axes"  # another axis: a step each block runs, as every block holds it whole
         if operation in JOINS and not self._summarised:
-            whole = _whole_join(self, verb)
-            paired = None if whole is not None else _by_position(self, verb)
+            other = verb._arguments[0]
+            if isinstance(other, ChunkedFrame) and (other._summarised or other._result is not None):
+                verb = getattr(_verbs(), operation)(other._run(), suffix=verb._arguments[1],  # a summary: in memory
+                                                    tolerance=verb._arguments[2])
+            whole = None
+            if isinstance(verb._arguments[0], ChunkedFrame):  # read in blocks too: each block reads its part of it
+                found = _blocked_join(self, verb)
+                if isinstance(found, str):
+                    whole = found
+                else:
+                    verb, blocks = found, dataclasses.replace(blocks, tail=blocks.tail or found._tail)
+            paired = None if whole is not None or getattr(verb, "_tail", None) is not None else _by_position(self, verb)
             if paired is not None:
                 verb = paired
-            elif whole is None and operation == "full_join" and _along(self, verb):
+            elif whole is None and operation == "full_join" and _along(self, verb) and not hasattr(verb, "_tail"):
                 one = _one_pass(self, verb)
                 if isinstance(one, str):
                     whole = one
@@ -868,15 +878,99 @@ def _rows_of(frame: ChunkedFrame, layout: Blocks, chosen: Sequence[int] | None) 
     return sample._result
 
 
-def _whole_join(frame: ChunkedFrame, verb: Any) -> str | None:
-    """Why a join of *frame*'s blocks runs on the whole axis, or None where each block joins on its own (milestone
-    19): the other data read in blocks too, or a full join along the blocked axis, which adds labels no block holds."""
-    from tidy3a.frame import tidy
+def _verbs() -> Any:
+    from tidy3a import verbs
 
-    other = verb._arguments[0]
-    if isinstance(other, ChunkedFrame):
-        return "the other data is read in blocks too"
-    return None
+    return verbs
+
+
+def _blocked_join(frame: ChunkedFrame, verb: Any) -> Any:
+    """A join with data read in blocks too (milestone 21, step 5), or why it runs on the whole axis. Both read in
+    blocks along the axis the join aligns, and the other's labels on it known before reading (a dataset's index, or
+    positions): each block of *frame* reads from the other only the positions of the labels it holds, in a few spans
+    (``_runs``), puts them through the other's verbs, and joins them as data in memory; a ``full_join`` adds the
+    other's labels no block holds as the run's last block (``_one_pass``). The other's verbs must keep its positions
+    as they are (``select``, ``mutate``, a sort or slice of another axis)."""
+    from tidy3a.verbs import Verb
+
+    other, suffix, tolerance = verb._arguments
+    blocks, backend, axis = frame._blocks, frame._backend, frame._blocks.axis
+    if other._blocks.axis != axis:
+        return f"the other data is read in blocks along {other._blocks.axis}, not {axis}"
+    kept = [step for step in other._steps if step._operation not in ("select", "mutate", "slice_axes", "arrange_axes")]
+    if kept:
+        return f"the other data's {kept[0].text} decides which of its positions are there"
+    if tolerance is not None:
+        return "a join within a tolerance matches labels near, not equal, which its blocks cannot look up"
+    if other._backend is not backend:
+        return "the other data is on another backend"
+    source, empty = other._blocks.source, TidyArray(other._data, backend=other._backend,
+                                                    field_axis=other._field_axis, source=other._source)
+    names = _needs(other)
+    labelled = other._blocks.labelled
+
+    def read(positions: np.ndarray) -> TidyArray:
+        """The other's rows at *positions* (sorted, unique, 0-based), through its verbs."""
+        if not len(positions):
+            return empty
+        parts = []
+        for start, stop in _runs(positions.tolist(), [0]):
+            part = source.block(start, stop, names)
+            wanted = positions[(positions >= start) & (positions < stop)] - start
+            if len(wanted) != stop - start:
+                part = part._evolve(part._backend.keep(part._data, axis, wanted))
+            parts.append(part)
+        rows = parts[0]._evolve(backend.join_along([part._data for part in parts], axis)) if len(parts) > 1 else \
+            parts[0]
+        if not labelled:  # positions, as the blocks are labelled with them
+            rows = rows._evolve(backend.label_positions(rows._data, axis, int(positions[0])))
+        for step in other._steps:
+            rows = step(rows)
+        return rows
+
+    if not labelled:  # pairing by position, as memory does where neither side labels the axis
+        if not blocks.labelled and blocks.size != source.size:
+            from tidy3a.errors import AlignError
+
+            raise AlignError(f"{axis} is unlabelled on both sides with different lengths ({blocks.size:,} and "
+                             f"{source.size:,}); positions cannot be paired")
+        join = getattr(_verbs(), verb._operation)
+
+        def by_position(block: TidyArray) -> TidyArray:
+            if not backend.has_labels(block._data, axis) or backend.sizes(block._data).get(axis, 0) == 0:
+                return join(empty, suffix=suffix)._apply(block)  # the block of no positions, checked as in memory
+            mine = np.asarray(backend.axis_labels(block._data, axis).values, dtype=np.int64)
+            return join(read(np.arange(mine[0] - 1, mine[-1])), suffix=suffix)._apply(block)
+
+        found = Verb(verb.text, by_position, operation=verb._operation, arguments=verb._arguments)
+        found._tail = False
+        return found
+    held = np.asarray(source.labels())
+    if len(np.unique(held)) != len(held):
+        return f"the other data's labels on {axis} repeat"
+    if verb._operation == "full_join" and _along(frame, verb):
+        one = _one_pass(frame, verb, right=empty, held=held, take=read)
+        if isinstance(one, str):
+            return one
+        one._tail = True
+        return one
+    order = np.argsort(held, kind="stable")  # the other's labels sorted, to look a block's up in
+    ordered = held[order]
+    join = getattr(_verbs(), verb._operation)
+
+    def by_label(block: TidyArray) -> TidyArray:
+        if backend.sizes(block._data).get(axis, 0) == 0:  # the block of no positions, checked as in memory
+            return join(empty, suffix=suffix)._apply(block)
+        mine = np.asarray(backend.axis_labels(block._data, axis).values)
+        if not len(ordered):
+            return join(empty, suffix=suffix)._apply(block)
+        at = np.minimum(np.searchsorted(ordered, mine), len(ordered) - 1)
+        found = order[at[ordered[at] == mine]]  # the positions of the block's labels the other holds
+        return join(read(np.unique(found)), suffix=suffix)._apply(block)
+
+    found = Verb(verb.text, by_label, operation=verb._operation, arguments=verb._arguments)
+    found._tail = False
+    return found
 
 
 def _along(frame: ChunkedFrame, verb: Any) -> bool:
@@ -924,12 +1018,15 @@ def _by_position(frame: ChunkedFrame, verb: Any) -> Any:
     return Verb(verb.text, placed, operation=verb._operation, arguments=verb._arguments)
 
 
-def _one_pass(frame: ChunkedFrame, verb: Any) -> Any:
+def _one_pass(frame: ChunkedFrame, verb: Any, right: TidyArray | None = None, held: np.ndarray | None = None,
+              take: Callable[[np.ndarray], TidyArray] | None = None) -> Any:
     """A full join along the blocked axis in one pass (milestone 19, after Spark's broadcast nested-loop join), or why
     not: each block full-joins the part of the other data at its own labels, so the other axes widen as in memory,
     its variables cast to the types the whole join gives them (``_promoted``); and a last block of no positions, the
     run's tail (``Blocks.tail``), joins the other data's labels no block holds. The blocked axis's labels are the
-    source's, known before anything is read; a filter or an inner join before it would make them the data's."""
+    source's, known before anything is read; a filter or an inner join before it would make them the data's. For
+    other data read in blocks too (milestone 21), *right* is its schema, *held* its labels, and *take* its rows at
+    positions."""
     from tidy3a.frame import tidy
     from tidy3a.verbs import Verb, full_join
 
@@ -939,22 +1036,28 @@ def _one_pass(frame: ChunkedFrame, verb: Any) -> Any:
         return "a full join along the blocked axis matches labels exactly"
     if any(step._operation in ("filter", "inner_join") for step in frame._steps):
         return f"a full join along {axis} after a filter or an inner join keeps labels only the data decides"
-    right = other if isinstance(other, TidyArray) else tidy(other, backend=backend.name)
+    if right is None:
+        right = other if isinstance(other, TidyArray) else tidy(other, backend=backend.name)
+        held = np.asarray(right._backend.axis_labels(right._data, axis).values)
+        whole = right
+
+        def take(chosen: np.ndarray) -> TidyArray:
+            return whole._evolve(whole._backend.isel(whole._data, {axis: chosen}))
     if right._backend is not backend:
         return "the other data is on another backend"
     ours, theirs = backend.variable_names(frame._data), right._backend.variable_names(right._data)
     if set(ours) & set(theirs):
         return "the two hold variables of the same names"
     labels = frame._blocks.source.labels()
-    held = np.asarray(right._backend.axis_labels(right._data, axis).values)
     unheld = ~np.isin(held, labels)  # the other data's labels no block holds: the tail's
     missing = labels[~np.isin(labels, held)]  # the data's labels the other data lacks
-    target = _promoted(frame, right, axis, bool(unheld.any()), missing[:1])
+    sample = take(np.unique(np.concatenate([np.flatnonzero(unheld)[:1], np.flatnonzero(~unheld)[:1]])))
+    target = _promoted(frame, sample, axis, bool(unheld.any()), missing[:1])  # a row or two show the types
 
     def placed(block: TidyArray) -> TidyArray:
         mine = backend.axis_labels(block._data, axis).values
         chosen = np.flatnonzero(unheld) if _TAIL.get() else np.flatnonzero(np.isin(held, np.asarray(mine)))
-        part = right._evolve(right._backend.isel(right._data, {axis: chosen}))
+        part = take(chosen)
         joined = full_join(part, suffix=suffix)._apply(block)
         data = joined._data
         for name, dtype in target.items():

@@ -71,7 +71,8 @@ class Fused:
     accumulate: Any = None
     values: Any = None  # each kept position's values for NumPy's reductions, where positions hold many
     operands: dict = field(default_factory=dict)  # island's local name: (its operands' kernel, the inputs it reads, it)
-    joins: list = field(default_factory=list)  # the frame's joins, which NumPy makes on each block first
+    joins: list = field(default_factory=list)  # the frame's joins, which NumPy makes on each block first, each
+    # with the variables the frame held just before it (``joined``)
     occupied: Any = None  # ``fused.keys.dense_kernels``
     dense: Any = None
     limit: int = DENSE_BYTES  # the bytes its dense tables may take (``dense_limit``)
@@ -187,8 +188,7 @@ class Fused:
         state = ask.state
         if kernel is None or lookups is None:
             return None
-        for join in self.joins:
-            block = block >> join
+        block = self.joined(block)
         context = Context(block, verb="summarise", error=SummariseError, grouped=False)
         inputs = self._inputs(block, context)
         positions = int(block._backend.sizes(block._data)[self.compiler.axis])
@@ -297,6 +297,18 @@ class Fused:
                 made[-1:] if len(made) % 2 else [])
         return [pool.submit(_dense_table, made[0], self)]
 
+    def joined(self, block: Any) -> Any:
+        """*block* with the frame's joins made, each on the variables the frame held just before it, as its verbs in
+        order would hold them: a variable a ``select`` before the join dropped, which the block holds only because a
+        later verb reads a name the join brings, is not there to meet it."""
+        for join, names in self.joins:
+            backend = block._backend
+            held = [name for name in backend.variable_names(block._data) if name in names]
+            if len(held) != len(backend.variable_names(block._data)):
+                block = block._evolve(backend.select_variables(block._data, held))
+            block = block >> join
+        return block
+
     def _placed(self, block: Any) -> Any:
         """The block's kernel inputs, positions, values a position, each key's groups and their sizes, each
         position's combination (-1 where none), the rows kept and those dropped; or why it runs on NumPy."""
@@ -322,8 +334,7 @@ class Fused:
     def _place(self, block: Any) -> Any:
         """The block's kernel inputs, positions, and values a position, and each position placed: each key's bucket
         and whether it is missing, whether it passed the filters, and each key's range; or why it runs on NumPy."""
-        for join in self.joins:  # NumPy joins the block first; the kernels read what it brings (milestone 19)
-            block = block >> join
+        block = self.joined(block)  # NumPy joins the block first; the kernels read what it brings (milestone 19)
 
         axis = self.compiler.axis
         context = Context(block, verb="summarise", error=SummariseError, grouped=False)
@@ -735,7 +746,7 @@ def interleaved(slots: list[Slot], groups: int) -> tuple[list[dict[str, np.ndarr
 
 def build(frame: Any) -> Fused | None:
     """*frame*'s summary compiled into its kernels, or None when the planner says it runs on NumPy."""
-    from tidy3a.chunked import ROW_WISE, _needs
+    from tidy3a.chunked import JOINS, ROW_WISE, _needs
     from tidy3a.fused import plan_for
     from tidy3a.verbs import mutate
 
@@ -747,6 +758,7 @@ def build(frame: Any) -> Fused | None:
         rows = rows._evolve(rows._backend.label_positions(rows._data, blocks.axis, 0))
     compiler = Compiler(blocks.axis)
     tests: list[Source] = []
+    joins: list = []  # each join, and the variables the frame holds just before it
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
         for verb in frame._steps:
@@ -760,6 +772,8 @@ def build(frame: Any) -> Fused | None:
                     compiler.define(step.target, step.value, Context(rows, verb="mutate", error=MutateError), step)
                     rows = rows >> mutate(step)
                 continue
+            if verb._operation in JOINS:
+                joins.append((verb, frozenset(rows._backend.variable_names(rows._data))))
             rows = rows >> verb
         plan = frame._plan
         keys = [key_for(part, Context(rows, verb="group_by", error=TidyError, grouped=False), compiler)
@@ -774,9 +788,7 @@ def build(frame: Any) -> Fused | None:
     fused.accumulate = compile_summary(summary_source("accumulate", list(compiler.inputs), slots), "accumulate")
     fused.occupied, fused.dense = dense_kernels()
     fused.operands = operand_kernels(compiler)
-    from tidy3a.chunked import JOINS
-
-    fused.joins = [verb for verb in frame._steps if verb._operation in JOINS]
+    fused.joins = joins
     if slots and compiler.cells:
         fused.values = compile_source(values_source("values", compiler, [slot.value for slot in slots]), "values")
     return fused

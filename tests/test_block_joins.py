@@ -120,13 +120,6 @@ def test_a_full_join_the_blocks_cannot_make_alone_runs_on_the_whole_axis_and_say
     same(frame, tidy(GRID) >> verbs(other))
 
 
-def test_a_join_of_two_frames_read_in_blocks_runs_on_the_whole_axis():
-    other = tidy(INFO, blocks={"time": 30})
-    frame = tidy(GRID, blocks={"time": 25}) >> left_join(other)
-    assert not isinstance(frame, ChunkedFrame)
-    assert any("the other data is read in blocks too" in note for note in frame._notes)
-
-
 def test_a_join_after_group_by_is_refused_as_the_other_grouped_verbs_are():
     with pytest.raises(BlockError, match="after group_by, only summarise"):
         tidy(GRID, blocks={"time": 25}) >> group_by(month) >> left_join(MASK)
