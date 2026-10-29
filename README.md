@@ -303,6 +303,18 @@ much as its data) and the rows a pipeline without `summarise` or `write`
 keeps in memory. A budget that fits no position is refused when the data
 is opened or the verb called, with the sizes.
 
+The budget counts what the verbs allocate, not what the allocator keeps
+after NumPy frees it. On Linux, glibc's `malloc` keeps a pool for each
+thread, and memory freed there may stay with the process: the
+540,000-voxel summary of 40M points with `memory="1GB"` on twelve threads
+peaked at 1.10 GB, though its own allocations stayed well under the
+budget, and at 0.70 GB, as fast, with the pools limited to two. To hold
+runs on many threads to a tight budget there, start Python with
+`MALLOC_ARENA_MAX=2` in its environment (`MALLOC_ARENA_MAX=2 python
+run.py`); tidy3a leaves the allocator alone, since a limit set by a
+running process stays for the rest of it and does nothing once the pools
+exist.
+
 With `threads=` above one, blocks run side by side, and their summaries
 merge in a fixed tree on the worker threads, so every number of threads
 gives the same bits. How much more threads give depends on the machine:
