@@ -160,7 +160,8 @@ def _walk(node: _Node, frame: TidyArray, axis: str) -> tuple[int, int, int]:
         after = frame >> verb
         new = _new(frame, after, axis)
         work, result, extra = _walk(child, after, axis)
-        peak, held, fixed = max(peak, 2 * new, new + work), held + result, max(fixed, extra)
+        across = _across(frame, after, axis)
+        peak, held, fixed = max(peak, 2 * new, new + work), held + result, max(fixed, across + extra)
     return peak, held, fixed
 
 
@@ -211,6 +212,15 @@ def _new(before: TidyArray, after: TidyArray, axis: str) -> int:
     fresh = [variable for name, variable in along if name not in held or variable.data is not held[name].data]
     total = sum(_per_position(variable, axis) for variable in fresh)
     return total + (_labels(after, axis) if fresh and len(fresh) == len(along) else 0)
+
+
+def _across(before: TidyArray, after: TidyArray, axis: str) -> int:
+    """What a verb adds that does not lie along the axis, the same for every block: a join's mask or weights over the
+    other axes (milestone 19), or a mutate's array of them."""
+    held = before._backend.variables(before._data)
+    return sum(int(np.prod(variable.shape, dtype=np.int64)) * _itemsize(np.dtype(variable.dtype))
+               for name, variable in after._backend.variables(after._data).items()
+               if axis not in variable.dims and (name not in held or variable.data is not held[name].data))
 
 
 def _bytes(frame: TidyArray, axis: str) -> int:

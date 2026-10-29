@@ -15,8 +15,9 @@ from concurrent.futures import Future
 import numpy as np
 import pytest
 
-from tidy3a import (any, cells, chunked, exp, fields, filter, formula, group_by, infer, log, max, mean, median, min,
-                    mutate, n, pull, quantile, read_array, scan, select, std, sum, summarise, tidy, var, write)
+from tidy3a import (any, cells, chunked, exp, fields, filter, formula, full_join, group_by, if_else, infer, inner_join,
+                    left_join, log, max, mean, median, min, mutate, n, nan, pull, quantile, read_array, scan, select,
+                    std, sum, summarise, tidy, var, write)
 from tidy3a.reductions import REGISTRY, Ask, Reduction, Working
 from tidy3a.sizing import RESERVE, Cost, cost, describe
 
@@ -597,3 +598,46 @@ def test_the_estimate_bounds_a_compiled_grids_peak_with_islands(name, compiled_p
 
     assert plan_for(climate(50) >> GRID_ISLANDS[name]).islands
     bounded(compiled_peaks, climate, GRID_ISLANDS[name], 50, 100)
+
+
+def joined(rows):
+    """``climate`` read in blocks, with a mask over lat and lon and a value per time step to join (milestone 19)."""
+    xr = pytest.importorskip("xarray")
+    rng = np.random.default_rng(4)
+    frame = climate(rows)
+    mask = xr.Dataset({"land": (("lat", "lon"), rng.random((9, 12)) > 0.5)},
+                      coords={"lat": np.arange(9.0), "lon": np.arange(12.0)})
+    quality = xr.Dataset({"quality": ("time", rng.random(330).astype(np.float32)),
+                          "visits": ("time", rng.integers(0, 9, 330))}, coords={"time": np.arange(-30, 300)})
+    return frame, mask, quality
+
+
+JOINED = {
+    "a mask, masked and averaged": lambda mask, quality: left_join(mask) >> mutate(lt=if_else(fields("land"), t, nan))
+    >> group_by(month) >> summarise(m=mean(fields("lt"), na_rm=True)),
+    "a value per time step, filtered on": lambda mask, quality: inner_join(quality)
+    >> filter(fields("quality") > 0.3) >> group_by(month) >> summarise(m=mean(t)),
+    "a full join along time, filtered on": lambda mask, quality: full_join(quality) >> filter(fields("quality") > 0.3)
+    >> select("temperature", "visits"),
+    "a full join along time, by month": lambda mask, quality: full_join(quality) >> group_by(month, dropna=False)
+    >> summarise(k=n(), v=sum(fields("visits")), m=mean(t, na_rm=True)),
+}
+
+
+@pytest.mark.parametrize("name", list(JOINED))
+def test_the_estimate_bounds_a_blocks_peak_with_joins(name, block_peaks, small_slices):
+    def make(rows):
+        frame, mask, quality = joined(rows)
+        return frame
+
+    _, mask, quality = joined(50)
+    bounded(block_peaks, make, JOINED[name](mask, quality), 50, 100)
+
+
+def test_what_a_join_brings_over_the_other_axes_is_a_fixed_cost_per_block():
+    """A mask or weights over lat and lon is the same size whatever the block's: counted once a block, not a time
+    step (milestone 19)."""
+    frame, mask, quality = joined(50)
+    weights = mask.assign(weight=(("lat", "lon"), np.ones((9, 12)))).drop_vars("land")
+    plain, masked = cost([frame >> CLIMATE["sum"]]), cost([frame >> left_join(weights) >> CLIMATE["sum"]])
+    assert masked.fixed - plain.fixed >= weights["weight"].nbytes and masked.work == plain.work
