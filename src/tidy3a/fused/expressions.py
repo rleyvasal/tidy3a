@@ -69,10 +69,26 @@ class Island:
         return self.node.text()
 
 
-def read(value: Ref | Island, context: Context) -> Any:
+@dataclass(frozen=True, eq=False)
+class AsIntegers:
+    """A field of times or durations read as the int64 counts it is held in, NaT the smallest (milestone 18): what a
+    key places, its labels made times again."""
+
+    ref: Ref
+
+    def text(self) -> str:
+        return self.ref.text()
+
+
+def read(value: Ref | Island | AsIntegers, context: Context) -> Any:
     """What a kernel's input holds on the block of *context*: a variable's values, or an island's, computed by NumPy
     after the ``mutate`` steps it reads. (An island whose operands compile is computed by the driver, which has the
     kernels' other inputs; here, as for one that does not, NumPy evaluates it whole, the same bits.)"""
+    if isinstance(value, AsIntegers):
+        from types import SimpleNamespace
+
+        held = evaluate(value.ref, context)
+        return SimpleNamespace(values=np.asarray(held.values).view(np.int64), dims=tuple(held.dims))
     if not isinstance(value, Island):
         return evaluate(value, context)
     frame = context.frame
@@ -188,6 +204,17 @@ class Compiler:
                 raise Unsupported(f"{node.text()} lies over other axes than the values before it, which runs on NumPy")
             self.cells = layout
         return cells
+
+    def integers(self, node: Ref, context: Context) -> Source:
+        """A field of times or durations as the int64 counts it is held in (``AsIntegers``), for a key to place."""
+        cells = self._layout(node, evaluate(node, context))
+        for local, (read_, _) in self.inputs.items():
+            if isinstance(read_, AsIntegers) and (read_.ref.name, read_.ref.kind) == (node.name, node.kind):
+                break
+        else:
+            local = f"a{len(self.inputs)}"
+            self.inputs[local] = (AsIntegers(node), cells)
+        return Source(f"{local}[i, j]" if cells else f"{local}[i]", np.dtype(np.int64), cells)
 
     def _island(self, node: Any, context: Context) -> Source:
         """*node* computed by NumPy for each block (``Island``), the kernel reading its values: the same island once,

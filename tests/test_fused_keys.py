@@ -119,3 +119,18 @@ def test_unsigned_64_bit_and_per_value_keys_run_on_numpy():
         key_for(ValueKey("x", x), context, Compiler("p"))
     with pytest.raises(Unsupported, match="varies within a position"):
         key_for(cells(fields("t"), 1), context, Compiler("p"))
+
+
+
+def test_edges_finer_than_their_times_run_on_numpy():
+    """Edges that do not convert exactly to the values' unit: NumPy compares in the finer unit, so NumPy groups them.
+    (xarray holds times in nanoseconds, so this is for times held otherwise.)"""
+    from tidy3a.fused.expressions import Source
+    from tidy3a.fused.keys import _time_key
+
+    part = bins(fields("when"), np.array(["2026-01-01T06", "2026-01-09T06"], "datetime64[h]"))
+    value = Source("a0[i]", np.dtype(np.int64))
+    with pytest.raises(Unsupported, match="its edges are finer than its times"):
+        _time_key(part, value, np.dtype("datetime64[D]"))
+    placed = _time_key(part, value, np.dtype("datetime64[m]"))  # hours into minutes: exact
+    assert placed.how == "bins" and placed.constants["edges"].dtype == np.int64

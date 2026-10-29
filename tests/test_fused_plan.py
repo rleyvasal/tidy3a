@@ -67,6 +67,7 @@ COMPILED = {
     "floor division and remainder": lambda: cloud() >> filter(x % 2 == 0) >> mutate(a=x // 2) >> group_by(ring)
                                             >> summarise(m=mean(a)),
     "ceil and sign": lambda: cloud() >> mutate(a=ceil(x) * sign(y)) >> group_by(ring) >> summarise(m=mean(a)),
+    "a time key": lambda: grid() >> group_by(fields("when")) >> summarise(w=mean(fields("t"))),
 }
 ISLANDS = {  # computed by NumPy for each block, the kernel reading them (milestone 18)
     "exp": (lambda: cloud() >> mutate(a=exp(x)) >> group_by(ring) >> summarise(m=mean(a)), "exp(x)"),
@@ -76,8 +77,6 @@ ISLANDS = {  # computed by NumPy for each block, the kernel reading them (milest
 }
 NUMPY = {
     "conj": (lambda: cloud() >> mutate(a=conj(x)) >> group_by(ring) >> summarise(m=mean(a)), "conj() runs on NumPy"),
-    "a time key": (lambda: grid() >> group_by(fields("when")) >> summarise(w=mean(fields("t"))),
-                   "when is times, which runs on NumPy"),
     "a text key": (lambda: grid() >> group_by(fields("name")) >> summarise(w=mean(fields("t"))),
                    "name is text, which runs on NumPy"),
     "complex values": (lambda: grid("complex") >> group_by(fields("m")) >> summarise(w=sum(fields("t"))),

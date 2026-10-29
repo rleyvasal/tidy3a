@@ -1310,3 +1310,21 @@ def test_a_quantile_on_blocks_is_np_quantile_s_with_its_edges(q):
         frame._blocks.source.block = lambda start, stop, names=None: loads.append(1) or load(start, stop, names)
         assert same_bits(frame >> pipeline >> pull("s"), want)
         assert len(loads) == 7 * (1 + 2)  # float32: two passes after the first
+
+
+
+@pytest.mark.parametrize("dropna", [True, False])
+def test_times_keep_their_type_as_labels_in_blocks(dropna):
+    """A time key's labels are times in blocks, as in memory, not their nanoseconds as integers; NaT dropped or last."""
+    xr = pytest.importorskip("xarray")
+    times = (np.datetime64("2026-01-01T00:00:00") + np.arange(0, 400 * 3600, 3600).astype("timedelta64[s]"))
+    times = times.astype("datetime64[ns]")
+    times[[7, 250]] = np.datetime64("NaT")
+    data = xr.Dataset({"when": ("p", times), "v": ("p", np.arange(400.0, dtype=np.float32))})
+    when, v = fields("when", "v")
+    verbs = group_by(when, dropna=dropna) >> summarise(k=n(), m=mean(v))
+    got, want = (tidy(data, blocks={"p": 100}) >> verbs).collect(), (tidy(data) >> verbs).collect()
+    for result in (got, want):
+        assert result["when"].values.dtype == np.dtype("datetime64[ns]")
+    assert got["when"].values.tobytes() == want["when"].values.tobytes()
+    assert got["k"].values.tolist() == want["k"].values.tolist()

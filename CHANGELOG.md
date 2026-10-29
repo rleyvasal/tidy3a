@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: a summary of data read in blocks grouped by times gave its labels
+  as their nanoseconds, as integers, where in memory they are times; they
+  are times now, a missing time's group NaT, on both backends.
+
 ## 0.11.0 — 2026-10-28
 
 - The merge tree is capped: a table of 32 blocks joins the running table of

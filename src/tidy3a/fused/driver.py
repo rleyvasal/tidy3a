@@ -216,7 +216,7 @@ class Fused:
         found, sizes, lows, ranks, codes = [], [], [], [], []
         for k, key in enumerate(self.keys):
             low, high, count = (int(value) for value in ranges[k])
-            dtype = key.value.dtype
+            dtype = key.label_dtype
             if key.how == "bins":
                 labels = labels_of(key, ks[k, :0], dtype)
                 low, rank = 0, np.arange(len(labels), dtype=np.int64)
@@ -251,7 +251,7 @@ class Fused:
         valid = keep.copy()
         for k, key in enumerate(self.keys):
             low, high, count = (int(value) for value in ranges[k])
-            labels, codes, dropped = groups(key, ks[k][keep], missing[k][keep], low, high, count, key.value.dtype)
+            labels, codes, dropped = groups(key, ks[k][keep], missing[k][keep], low, high, count, key.label_dtype)
             missing_group = None
             if dropped:
                 labels = labels[:-1]

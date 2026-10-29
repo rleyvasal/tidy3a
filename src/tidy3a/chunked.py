@@ -721,6 +721,9 @@ class _Part:
 
     def full(self) -> np.ndarray:
         """Every group's label, the missing one last."""
+        if self.labels is not None and self.labels.dtype.kind in "mM":  # times: .tolist() gives nanoseconds as int
+            missing = [] if self.missing is None else [self.missing]
+            return np.concatenate([self.labels, np.array(missing, dtype=self.labels.dtype)])
         labels = [] if self.labels is None else self.labels.tolist()
         return _label_array(labels + ([self.missing] if self.missing is not None else []))
 

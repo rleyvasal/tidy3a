@@ -387,3 +387,32 @@ def test_islands_numpy_computes_give_numpys_bits(threads, monkeypatch):
     frame.collect()
     assert frame._result._notes[-1] == "ran: 7 blocks in a compiled kernel"
     same_bits(frame, numpy_run(monkeypatch, lambda: read_array(values, blocks=3_000, **OPTIONS) >> verbs))
+
+
+
+def times(unit="ns", size=4_000, seed=8):
+    rng = np.random.default_rng(seed)
+    when = (np.datetime64("2026-01-01T00:00:00") + rng.integers(0, 30 * 86_400, size).astype("timedelta64[s]"))
+    when = when.astype(f"datetime64[{unit}]")
+    when[rng.choice(size, 25, replace=False)] = np.datetime64("NaT")
+    took = rng.integers(0, 5, size).astype("timedelta64[m]")
+    took[:3] = np.timedelta64("NaT")
+    return xr.Dataset({"when": ("p", when), "took": ("p", took), "v": ("p", rng.normal(size=size).astype("float32"))})
+
+
+@pytest.mark.parametrize("unit", ["ns", "s"])
+@pytest.mark.parametrize("dropna", [True, False])
+def test_time_keys_compile_as_their_integers(unit, dropna, monkeypatch):
+    """Times and durations as keys, each a group, and bins of times: placed as the integers they are held in, NaT
+    the missing group, the labels times again: NumPy's labels, types, and bits (milestone 18)."""
+    data = times(unit)
+    when, took, v = fields("when", "took", "v")
+    edges = np.array(["2026-01-01", "2026-01-08", "2026-01-15", "2026-02-01"], "datetime64[D]")
+    for verbs in (group_by(when, dropna=dropna) >> summarise(k=n(), m=mean(v)),
+                  group_by(took, dropna=dropna) >> summarise(k=n(), s=sum(v)),
+                  group_by(bins(when, edges), dropna=dropna) >> summarise(k=n(), top=max(v)),
+                  group_by(bins(when, edges), took, axis="pair", dropna=dropna) >> summarise(k=n())):
+        frame = tidy(data, blocks={"p": 700}, threads=2) >> verbs
+        frame.collect()
+        assert frame._result._notes[-1] == "ran: 6 blocks in a compiled kernel"
+        same_bits(frame, numpy_run(monkeypatch, lambda: tidy(data, blocks={"p": 700}) >> verbs))

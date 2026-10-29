@@ -37,6 +37,12 @@ class Key:
     value: Source
     how: str
     constants: dict
+    time: np.dtype | None = None  # the times or durations the value's integers are (milestone 18)
+
+    @property
+    def label_dtype(self) -> np.dtype:
+        """The type the key's labels are made in: its times', or its value's."""
+        return self.time if self.time is not None else self.value.dtype
 
     def body(self, k: int) -> list[str]:
         """Kernel lines placing position ``i`` of key *k*: ``ks{k}[i]``, ``missing{k}[i]``, and the block's range."""
@@ -45,6 +51,9 @@ class Key:
         floating = self.value.dtype.kind == "f"
         if floating:
             lines += [f"if {v} != {v}:", f"    missing{k}[i] = True", f"    count{k} += 1", "    continue"]
+        if self.time is not None:  # NaT, the smallest int64
+            lines += [f"if {v} == {np.iinfo(np.int64).min}:", f"    missing{k}[i] = True", f"    count{k} += 1",
+                      "    continue"]
         if self.how == "value":
             if floating:
                 lines += [f"if not (abs({v}) < {EXACT}.0) or {v} != np.floor({v}) or ({v} == 0 and np.signbit({v})):",
@@ -83,13 +92,16 @@ def key_for(part: ValueKey, context: Context, compiler: Compiler) -> Key:
     """How *part* is placed in a kernel, or ``Unsupported`` and why."""
     from labelarray.transforms import Bins, GridCells, Round
 
-    value = compiler.compile(part.expr, context)
+    time = _time(part.expr, context)
+    value = compiler.integers(part.expr, context) if time is not None else compiler.compile(part.expr, context)
     if value.cells:
         raise Unsupported(f"group_by({part.label}): {part.expr.text()} varies within a position, which runs on NumPy")
     dtype = value.dtype
     if dtype == np.uint64:  # its values may not fit the signed bucket numbers
         raise Unsupported(f"group_by({part.label}): unsigned 64-bit values run on NumPy")
     transform = part.transform
+    if time is not None:
+        return _time_key(part, value, time)
     if transform is None:
         if dtype is None or dtype.kind not in "biuf":
             raise Unsupported(f"group_by({part.label}) runs on NumPy")
@@ -113,6 +125,32 @@ def key_for(part: ValueKey, context: Context, compiler: Compiler) -> Key:
             raise Unsupported(f"group_by({part.label}): bins of times run on NumPy")
         return Key(part, value, "bins", {"edges": edges, "compared": np.result_type(edges.dtype, dtype)})
     raise Unsupported(f"group_by({part.label}): {type(transform).__name__} keys run on NumPy")
+
+
+def _time(expr: Any, context: Context) -> np.dtype | None:
+    """The type of a plain field of times or durations, which a key places as its integers; else None."""
+    from tidy3a.expr import Ref, evaluate
+
+    if not isinstance(expr, Ref) or expr.kind == "label":
+        return None
+    dtype = np.dtype(getattr(evaluate(expr, context), "dtype", np.dtype(object)))
+    return dtype if dtype.kind in "mM" else None
+
+
+def _time_key(part: ValueKey, value: Source, time: np.dtype) -> Key:
+    """A key of times or durations, placed as their integers: each time a group, or ``bins`` whose edges are times of
+    the same kind, converted exactly to the values' unit (NumPy compares them in the finer of the two units)."""
+    from labelarray.transforms import Bins
+
+    transform = part.transform
+    if transform is None:
+        return Key(part, value, "value", {}, time)
+    if isinstance(transform, Bins) and transform.edges.dtype.kind == time.kind:
+        edges = transform.edges.astype(time)
+        if (edges.astype(transform.edges.dtype) == transform.edges).all() and not np.isnat(edges).any():
+            return Key(part, value, "bins", {"edges": edges.view(np.int64), "compared": np.dtype(np.int64)}, time)
+        raise Unsupported(f"group_by({part.label}): its edges are finer than its times, which runs on NumPy")
+    raise Unsupported(f"group_by({part.label}): {part.expr.text()} is times, which runs on NumPy")
 
 
 def _lcm(*fractions: Fraction) -> int:
@@ -171,6 +209,8 @@ def labels_of(key: Key, found: np.ndarray, dtype: np.dtype) -> list:
     """The labels of a key's occupied buckets *found*, in order, as labelarray gives them (every bin for ``bins``)."""
     if key.how == "bins":
         return key.part.transform.groups(np.zeros(0, dtype=dtype))[1]
+    if key.how == "value" and key.time is not None:  # times again, as NumPy scalars: .tolist() gives integers
+        return list(found.astype(np.int64).view(key.time))
     if key.how == "value":
         return found.astype(dtype).tolist()
     return key.part.transform._labels(found, np.zeros(0, dtype=dtype))
@@ -178,6 +218,8 @@ def labels_of(key: Key, found: np.ndarray, dtype: np.dtype) -> list:
 
 def missing_label(key: Key, dtype: np.dtype) -> Any:
     """The label of a key's missing values' group."""
+    if key.how == "value" and key.time is not None:
+        return np.array(["NaT"], key.time)[0]
     if key.how == "value":
         return np.array(["nan"], dtype).tolist()[0]
     return key.part.transform.missing_label(dtype)
