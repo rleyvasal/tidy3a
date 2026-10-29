@@ -24,6 +24,7 @@ integers, and float32 and float64; keys of integer, boolean, and float fields
 from __future__ import annotations
 
 import importlib.util
+import math
 import os
 import warnings
 from dataclasses import dataclass
@@ -43,6 +44,7 @@ class Fusion:
 
     reasons: tuple[str, ...] = ()
     islands: tuple[str, ...] = ()
+    island_bytes: int = 0  # what the islands hold per position of a block running (``sizing``)
 
     @property
     def compiled(self) -> bool:
@@ -98,9 +100,12 @@ def plan_for(frame: Any) -> Fusion:
             return Fusion((f"it could not be planned ({str(error).splitlines()[0]})",))
     from tidy3a.fused.expressions import Island
 
-    islands = () if reasons else tuple(dict.fromkeys(
-        read.text() for read, _ in compiler.inputs.values() if isinstance(read, Island)))
-    return Fusion(tuple(dict.fromkeys(reasons)), islands)
+    found = [(read, cells) for read, cells in compiler.inputs.values() if isinstance(read, Island)]
+    if reasons:
+        return Fusion(tuple(dict.fromkeys(reasons)))
+    values = math.prod(size for _, size in (compiler.cells or ()))
+    return Fusion((), tuple(dict.fromkeys(read.text() for read, _ in found)),
+                  sum(read.bytes(values if cells else 1) for read, cells in found))
 
 
 def _summary(plan: Any, rows: Any, compiler: Compiler) -> list[str]:

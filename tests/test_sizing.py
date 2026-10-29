@@ -15,8 +15,8 @@ from concurrent.futures import Future
 import numpy as np
 import pytest
 
-from tidy3a import (any, cells, chunked, fields, filter, formula, group_by, infer, max, mean, median, min, mutate, n,
-                    pull, quantile, read_array, scan, select, std, sum, summarise, tidy, var, write)
+from tidy3a import (any, cells, chunked, exp, fields, filter, formula, group_by, infer, log, max, mean, median, min,
+                    mutate, n, pull, quantile, read_array, scan, select, std, sum, summarise, tidy, var, write)
 from tidy3a.reductions import REGISTRY, Ask, Reduction, Working
 from tidy3a.sizing import RESERVE, Cost, cost, describe
 
@@ -553,3 +553,47 @@ def test_later_passes_in_slices_give_the_in_memory_bits(monkeypatch, each):
     for name in ("total", "middle", "high", "mean"):
         assert np.asarray(got >> pull(name)).tobytes() == np.asarray(want >> pull(name)).tobytes(), name
     assert sliced and builtins.max(sliced) <= builtins.max(7, each)  # the exact pass ran, a slice at a time
+
+
+@pytest.fixture
+def compiled_peaks(block_peaks, monkeypatch):
+    """``block_peaks`` with compiling on (milestone 18): a compiled frame's islands are arrays a block holds. A run
+    first compiles the kernels, which the measured runs then find compiled."""
+    pytest.importorskip("numba")
+    monkeypatch.delenv("TIDY3A_COMPILED")
+
+    def run(frame):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            frame._wrap(frame, frame._blocks, frame._steps, frame._plan, frame._reads).collect()  # compiled once
+        return block_peaks(frame)
+
+    return run
+
+
+ISLANDS = {
+    "rings with exp and log": DISTANCE >> mutate(w=exp(-distance / 20)) >> filter(distance <= 50) >> group_by(ring)
+                              >> summarise(weighted=sum(fields("w") * intensity), glow=mean(log(abs(intensity) + 1))),
+    "voxels with exp": DISTANCE >> filter(distance <= 50) >> group_by(cells(x, 10), cells(y, 10), axis="voxel")
+                       >> summarise(points=n(), weight=sum(exp(-distance / 30))),
+}
+GRID_ISLANDS = {
+    "vapour": DAY >> summarise(hours=n(), vapour=mean(6.112 * exp(17.67 * celsius / (celsius + 243.5)))),
+}
+
+
+@pytest.mark.parametrize("name", list(ISLANDS))
+def test_the_estimate_bounds_a_compiled_blocks_peak_with_islands(name, tmp_path, compiled_peaks, small_slices):
+    from tidy3a.fused import plan_for
+
+    make = cloud_file(tmp_path)
+    assert plan_for(make(10_000) >> ISLANDS[name]).islands
+    bounded(compiled_peaks, make, ISLANDS[name], 10_000, 20_000)
+
+
+@pytest.mark.parametrize("name", list(GRID_ISLANDS))
+def test_the_estimate_bounds_a_compiled_grids_peak_with_islands(name, compiled_peaks, small_slices):
+    from tidy3a.fused import plan_for
+
+    assert plan_for(climate(50) >> GRID_ISLANDS[name]).islands
+    bounded(compiled_peaks, climate, GRID_ISLANDS[name], 50, 100)

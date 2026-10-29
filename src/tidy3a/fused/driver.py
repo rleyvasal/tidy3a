@@ -152,15 +152,17 @@ class Fused:
             if local in self.operands:
                 kernel, needed, island = self.operands[local]
                 outputs = [np.empty((positions, cells) if operand.cells else positions, operand.dtype)
-                           for operand in island.operands if isinstance(operand, Source)]
-                kernel(positions, cells, *(named[name] for name in needed), *outputs)
+                           for operand in island.operands if _computed(operand)]
+                if outputs:
+                    kernel(positions, cells, *(named[name] for name in needed), *outputs)
                 computed = iter(outputs)
                 arguments = []
                 for operand in island.operands:
                     if not isinstance(operand, Source):
                         arguments.append(operand)
                         continue
-                    array = next(computed)
+                    # an input read as it is, its array taken as it stands; else the kernel's
+                    array = named[operand.text.split("[")[0]] if not _computed(operand) else next(computed)
                     arguments.append(array.reshape(-1, 1) if per_value and not operand.cells else array)
                 with np.errstate(all="ignore"):  # NumPy's warnings on a block say nothing the result does not
                     array = np.ascontiguousarray(island.function(*arguments))
@@ -330,6 +332,13 @@ def build(frame: Any) -> Fused | None:
     return fused
 
 
+def _computed(operand: Any) -> bool:
+    """Whether an island's operand is computed by its kernel: not a Python number, nor an input read as it is."""
+    import re
+
+    return isinstance(operand, Source) and re.fullmatch(r"a\d+\[i(, j)?\]", operand.text) is None
+
+
 def operand_kernels(compiler: Compiler) -> dict:
     """For each island whose operands compile, the kernel computing them, which reads only the inputs before it."""
     import re
@@ -340,7 +349,10 @@ def operand_kernels(compiler: Compiler) -> dict:
     for local, (value, _) in compiler.inputs.items():
         if not isinstance(value, Island) or value.function is None:
             continue
-        sources = [operand for operand in value.operands if isinstance(operand, Source)]
+        sources = [operand for operand in value.operands if _computed(operand)]
+        if not sources:  # every operand an input read as it is: NumPy applies the function to them, no kernel
+            kernels[local] = (None, [], value)
+            continue
         needed = sorted({name for source in sources for name in re.findall(r"\ba\d+\b", source.text)},
                         key=lambda name: int(name[1:]))
         arguments = ", ".join(["positions", "values", *needed, *(f"out{k}" for k in range(len(sources)))])

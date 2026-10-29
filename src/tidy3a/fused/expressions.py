@@ -17,6 +17,8 @@ both is per value.
 
 from __future__ import annotations
 
+import re
+
 from collections.abc import Hashable
 from dataclasses import dataclass, field
 from typing import Any
@@ -63,7 +65,18 @@ class Island:
     steps: tuple
     operands: tuple = ()  # each operand's source, or a Python number as it stands
     function: Any = None
-    kernel: Any = None  # the operands' kernel, compiled by the driver: (function, the inputs it reads)
+    dtype: np.dtype | None = None  # its values' type, as NumPy gives it
+
+    def bytes(self, values: int) -> int:
+        """What it holds per position of *values* values while a block runs (``sizing``): its values and its
+        operands'; NumPy's temporaries too where it evaluates the island whole, taken as two more of its values and
+        one of each step it runs again, which NumPy makes as it would on its own path."""
+        size = self.dtype.itemsize if self.dtype is not None else 8
+        if self.function is not None:  # an operand that is an input read as it is takes no array of its own
+            return values * (size + sum(operand.dtype.itemsize for operand in self.operands
+                                        if isinstance(operand, Source) and operand.dtype is not None
+                                        and not re.fullmatch(r"a\d+\[i(, j)?\]", operand.text)))
+        return values * (3 * size + 8 * len(self.steps))
 
     def text(self) -> str:
         return self.node.text()
@@ -234,7 +247,7 @@ class Compiler:
                 break
         else:
             local = f"a{len(self.inputs)}"
-            self.inputs[local] = (Island(node, steps, operands, function), cells)
+            self.inputs[local] = (Island(node, steps, operands, function, dtype), cells)
         return Source(f"{local}[i, j]" if cells else f"{local}[i]", dtype, cells)
 
     def _operands(self, node: Any, context: Context) -> tuple[tuple, Any]:
