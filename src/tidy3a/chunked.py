@@ -489,6 +489,10 @@ class ChunkedFrame(TidyArray):
 
                     return _arranged(unsorted, arrange(*last._arguments[0]), int(count), operation == "slice_tail",
                                      f"{last.text} >> {verb.text}")
+            if operation == "write":  # rows that need not fit: spilled a run a block, then merged into the file
+                written = _write_sorted(self, verb)
+                if written is not None:
+                    return written
             return verb(self._run())  # anything else on the merged rows, in memory
         if operation in SLICES and not self._summarised:
             if blocks.axis in _slice_axes(verb):  # the blocked axis: the blocks holding what it keeps, in memory
@@ -818,6 +822,23 @@ def _arranged(frame: ChunkedFrame, verb: Any, first: int | None = None, last: bo
     each = Verb(shown or text, lambda block: sorted_frame(block, keys, text, first, last), operation="arrange_block",
                 arguments=(keys, first, last))
     return frame._apply_verb(each)
+
+
+def _write_sorted(frame: ChunkedFrame, verb: Any) -> TidyArray | None:
+    """A sort written (milestone 21, step 4): each block's sorted rows spilled to a run of its own, then the runs
+    merged into the file (``tidy3a.external``); None where a key is text, which has no merge keys, and the merged rows
+    are written from memory."""
+    from tidy3a.external import SortedWriter
+    from tidy3a.verbs import merge_keys, sort_columns
+
+    keys, first, last = frame._steps[-1]._arguments
+    _, columns, _ = sort_columns(frame, keys)  # on the block of no positions: the keys' types
+    if merge_keys(columns) is None:
+        return None
+    path, overwrite = verb._arguments
+    writer = SortedWriter(_writer(frame, path, overwrite), frame, keys, first, last)
+    _scan([], [(frame, writer)])
+    return writer.reopen()
 
 
 def _merged_sort(frame: ChunkedFrame, rows: TidyArray) -> TidyArray:

@@ -456,6 +456,14 @@ def sorted_frame(frame: TidyArray, keys: Sequence[Any], text: str, first: int | 
         raise ArrangeError(f"{text} on grouped data is not supported yet; ungroup() first")
     if not keys:
         return frame
+    axis, columns, notes = sort_columns(frame, keys)
+    order = sorted_positions(columns) if first is None else first_positions(columns, first, last)
+    return frame._evolve(frame._backend.keep(frame._data, axis, order), notes=notes)
+
+
+def sort_columns(frame: TidyArray, keys: Sequence[Any]) -> tuple[Any, list[tuple[np.ndarray, bool]], list[str]]:
+    """The axis ``arrange``'s *keys* sort, each key's values along it and whether it sorts downwards, and the notes
+    their alignment wrote; the keys' refusals raised as ``arrange`` raises them."""
     ctx = Context(frame, verb="arrange", error=ArrangeError)
     data, backend = ctx.data, ctx.backend
     columns, axis = [], None
@@ -480,8 +488,37 @@ def sorted_frame(frame: TidyArray, keys: Sequence[Any], text: str, first: int | 
         axis = dim
         value = align_to(value, data, key_text, ctx.notes, backend=backend)
         columns.append((np.asarray(value.values), downwards))
-    order = sorted_positions(columns) if first is None else first_positions(columns, first, last)
-    return frame._evolve(backend.keep(data, axis, order), notes=list(ctx.notes))
+    return axis, columns, list(ctx.notes)
+
+
+def merge_keys(columns: Sequence[tuple[np.ndarray, bool]]) -> np.ndarray | None:
+    """Each position's keys as unsigned integers, a column a key, ordered as ``arrange`` orders them (the zeros tied,
+    NaN and NaT after every value, ``desc`` downwards), for merging sorted runs by comparing them in turn; None where a
+    key is not numbers, booleans, or times (text)."""
+    out = np.empty((len(columns[0][0]) if columns else 0, len(columns)), np.uint64)
+    top = np.uint64(1 << 63)
+    for k, (values, downwards) in enumerate(columns):
+        kind = values.dtype.kind
+        if kind == "f":
+            wide = values.astype(np.float64) + 0.0  # -0.0 as 0.0, so the zeros tie
+            bits = wide.view(np.uint64)
+            key = np.where(bits & top, ~bits, bits | top)
+            missing = np.isnan(wide)
+        elif kind in "mM":
+            raw = values.view(np.int64)
+            key, missing = raw.view(np.uint64) ^ top, raw == np.iinfo(np.int64).min
+        elif kind in "ib":
+            key, missing = values.astype(np.int64).view(np.uint64) ^ top, None
+        elif kind == "u":
+            key, missing = values.astype(np.uint64), None
+        else:
+            return None
+        if downwards:
+            key = ~key
+        if missing is not None:
+            key = np.where(missing, np.uint64(np.iinfo(np.uint64).max), key)  # last, either way
+        out[:, k] = key
+    return out
 
 
 def first_positions(columns: Sequence[tuple[np.ndarray, bool]], count: int, last: bool = False) -> np.ndarray:
