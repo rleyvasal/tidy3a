@@ -374,6 +374,22 @@ which float32 totals no addition rounded, and those settle from the total
 itself, so the voxels' means, many on a tie between two float32 values,
 need no second pass for their exact sums.
 
+Where every reduction's result is free of the order of its additions
+(counts, integer sums, float32 sums and means, `min`, `max`, `any`,
+`all`, the median and quantiles), each thread's compiled blocks add into
+one table of its own instead of a table a block: dense over each key's
+values seen so far, widened as a block's go beyond them, each group's
+accumulators side by side in memory, and the threads' tables merged once,
+when the blocks are done. The median's and quantiles' later passes run in
+one compiled loop over each block, counting into each thread's table of
+digits. The results are the same bits on any number of threads. On the
+12-core machine, against 0.13.0, the 540,000-voxel summary of 40M points
+took 0.67 s on twelve threads against 1.42 s, and the median by ring
+0.25 s against 0.90 s (on an Apple M4's ten, 0.38 s against 0.95 s and
+0.28 s against 0.98 s). A thread's table is held to its share of
+`memory=`; one larger than that, as the voxels' under a few gigabytes on
+many threads, gives way to a table a block, as before.
+
 A summarised pipeline is `select`, `filter`, and `mutate` of row-wise
 expressions, `group_by` of value keys (fields, `cells`, `bins`, `rounded`,
 several at once, with or without `dropna`), then `summarise` of `n`,

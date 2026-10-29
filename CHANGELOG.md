@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- The compiled path's slowest summaries, faster (milestone 20). Where every
+  reduction's result is free of the order of its additions (counts,
+  integer sums, float32 sums and means, extremes, `any` and `all`, the
+  median and quantiles), each thread's compiled blocks add into one dense
+  table of its own, widened as a block's keys go beyond it, each group's
+  accumulators side by side in memory, and the threads' tables merge once
+  at the end. The median's and quantiles' later passes run in one compiled
+  loop over each block, counting into each thread's table of digits, where
+  they sorted each block's candidates on NumPy. On twelve threads the
+  540,000-voxel summary of 40M points took 0.67 s against 1.42 s, and the
+  median by ring 0.25 s against 0.90 s; on one thread 1.09 s against
+  2.66 s and 1.39 s against 3.02 s. The results are the same bits as
+  0.13.0's; the blocks' size counts the threads' tables, so with
+  `blocks="auto"` these summaries' blocks are somewhat smaller.
+
 ## 0.13.0 — 2026-10-29
 
 - Joins and slices of data read in blocks (milestone 19). `left_join`,
