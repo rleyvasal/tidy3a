@@ -209,3 +209,8 @@ def test_tidy3_and_tidy3a_share_a_notebook(first):
         assert shell.user_ns["kept"] == [2, 3, 4]
     finally:
         close_both(shell)
+
+
+def test_arrange_and_desc_take_bare_names(shell):
+    ns = run(shell, "from tidy3a import *\n" + SETUP + "ordered = cloud >> arrange(ring, desc(intensity)) >> pull(intensity)")
+    assert np.asarray(ns["ordered"]).tolist() == [30.0, 10.0, 40.0, 20.0]

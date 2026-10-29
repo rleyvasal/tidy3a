@@ -42,6 +42,10 @@ class SliceError(TidyError):
     """``slice`` was given positions that do not exist."""
 
 
+class ArrangeError(TidyError):
+    """``arrange`` has no one axis its keys sort."""
+
+
 class MutateError(TidyError):
     """``mutate`` cannot store a result."""
 

@@ -4,6 +4,7 @@ from tidy3a.__version__ import __version__
 from tidy3a.backend import set_backend
 from tidy3a.errors import (
     AlignError,
+    ArrangeError,
     BlockError,
     FilterError,
     GroupError,
@@ -87,8 +88,10 @@ from tidy3a.selectors import (
 )
 from tidy3a.tables import as_table
 from tidy3a.verbs import (
+    arrange,
     assign,
     bind_cols,
+    desc,
     filter,
     full_join,
     group_by,
@@ -108,9 +111,9 @@ from tidy3a.verbs import (
 nan = float("nan")
 
 __all__ = [
-    "AlignError", "BlockError", "FilterError", "GroupError", "MutateError", "ReadError", "RefError",
+    "AlignError", "ArrangeError", "BlockError", "FilterError", "GroupError", "MutateError", "ReadError", "RefError",
     "Pipeline", "Plan", "SelectError", "SliceError", "SummariseError", "TidyArray", "TidyError", "WriteError", "__version__",
-    "all", "all_of", "any", "any_of", "as_table", "assign", "bind_cols", "bins", "cells", "col", "contains",
+    "all", "all_of", "any", "any_of", "arrange", "as_table", "assign", "bind_cols", "bins", "cells", "col", "contains", "desc",
     "ends_with", "env", "everything", "fields", "filter", "fixed_text", "full_join", "group_by", "if_else",
     "infer", "inner_join", "is_numeric", "label", "last_col", "left_join", "matches", "max",
     "mean", "median", "min", "mutate", "n", "nan", "num_range", "pull", "quantile", "read_array", "read_binary",

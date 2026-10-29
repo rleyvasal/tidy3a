@@ -18,6 +18,7 @@ from tidy3a.align import align_to, check_join_axes, check_join_labels
 from tidy3a.backend import is_xarray, memory_mapped, xarray_backend
 from tidy3a.errors import (
     AlignError,
+    ArrangeError,
     FilterError,
     GroupError,
     MutateError,
@@ -103,7 +104,7 @@ def _call_text(name: str, args: Sequence[Any], named: dict[str, Any] | None = No
 
 
 def _text(value: Any) -> str:
-    if isinstance(value, (Expr, Selector, Exclude)):
+    if isinstance(value, (Expr, Selector, Exclude, Desc)):
         return value.text()
     if isinstance(value, ValueKey):
         return value.label
@@ -413,6 +414,87 @@ def _positions(data: Any, axis: str, spec: Any, frame: TidyArray) -> list[int]:
         excluded = {-p - 1 for p in wanted}
         return [i for i in range(size) if i not in excluded]
     raise SliceError("slice positions must be all positive (keep) or all negative (exclude)")
+
+
+# ── arrange ─────────────────────────────────────────────────────────────────
+
+
+class Desc:
+    """``desc(key)``: *key* sorted downwards in ``arrange``."""
+
+    def __init__(self, key: Any) -> None:
+        if isinstance(key, Desc):
+            raise ArrangeError(f"desc({key.text()}) is already downwards; give desc() a key, once")
+        self.key = key
+
+    def text(self) -> str:
+        return f"desc({_text(self.key)})"
+
+
+def desc(key: Any) -> Desc:
+    """In ``arrange``, sort by *key* from the largest down, missing values still last."""
+    return Desc(key)
+
+
+def arrange(*keys: Any) -> Verb:
+    """Sort the positions of the one observation axis the keys vary along: by the first key, ties by the next, and
+    ties left in their order (a stable sort); ``desc(key)`` sorts a key downwards; missing values (NaN, NaT) last,
+    either way. Every variable along the axis is reordered, and the axis's labels with it."""
+    text = _call_text("arrange", keys)
+
+    def apply(frame: TidyArray) -> TidyArray:
+        if frame._groups:
+            raise ArrangeError(f"{text} on grouped data is not supported yet; ungroup() first")
+        if not keys:
+            return frame
+        ctx = Context(frame, verb="arrange", error=ArrangeError)
+        data, backend = ctx.data, ctx.backend
+        columns, axis = [], None
+        for key in keys:
+            downwards = isinstance(key, Desc)
+            expr = as_expr(key.key if downwards else key)
+            value = evaluate(expr, ctx)
+            key_text = expr.text()
+            if not backend.is_array(value) or value.ndim == 0:
+                raise ArrangeError(f"{key_text} is a single value; arrange sorts by a key that varies along one axis, "
+                                   "e.g. arrange(distance)")
+            if value.ndim > 1:
+                raise ArrangeError(f"{key_text} varies along {' and '.join(map(str, value.dims))}; arrange sorts one "
+                                   f"axis by a key along it alone, e.g. a reduction of it over the others")
+            dim = value.dims[0]
+            if dim == ctx.field_axis:
+                raise ArrangeError(f"{key_text} varies along {dim}, the field axis; fields are columns, so use "
+                                   "select() to order them")
+            if axis is not None and dim != axis:
+                raise ArrangeError(f"{key_text} varies along {dim}, the keys before it along {axis}; arrange sorts "
+                                   "one axis")
+            axis = dim
+            value = align_to(value, data, key_text, ctx.notes, backend=backend)
+            columns.append((np.asarray(value.values), downwards))
+        data = backend.keep(data, axis, sorted_positions(columns))
+        return frame._evolve(data, notes=list(ctx.notes))
+
+    return Verb(text, apply, operation="arrange", arguments=keys)
+
+
+def sorted_positions(columns: Sequence[tuple[np.ndarray, bool]]) -> np.ndarray:
+    """The positions in ``arrange``'s order of *columns*, each a key's values and whether it sorts downwards: by the
+    first, ties by the next, ties in their order; missing values (NaN, NaT) last either way; -0.0 and 0.0 tie."""
+    if len(columns) == 1 and not columns[0][1] and columns[0][0].dtype.kind in "fiubmM":
+        return np.argsort(columns[0][0], kind="stable")  # NumPy's own order: missing values last, the zeros tied
+    return np.lexsort([_ranks(values, downwards) for values, downwards in reversed(columns)])
+
+
+def _ranks(values: np.ndarray, downwards: bool) -> np.ndarray:
+    """Each value's rank among the distinct values present, upwards or downwards; a missing value's after them all."""
+    missing = np.isnat(values) if values.dtype.kind in "mM" else (
+        np.isnan(values) if values.dtype.kind in "fc" else np.zeros(len(values), dtype=bool))
+    distinct, ranks = np.unique(values[~missing], return_inverse=True)
+    if downwards:
+        ranks = len(distinct) - 1 - ranks
+    out = np.full(len(values), len(distinct), dtype=np.int64)
+    out[~missing] = ranks.reshape(-1)
+    return out
 
 
 def _no_groups(frame: TidyArray, name: str) -> None:

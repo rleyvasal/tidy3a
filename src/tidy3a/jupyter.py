@@ -38,7 +38,7 @@ ASSIGN = "__tidy3a_assign__"
 
 # Verbs whose arguments may hold bare names. Others take positions, counts,
 # outside arrays, or other data (slice, bind_cols, joins) and are left alone.
-_REWRITTEN = frozenset({"select", "filter", "mutate", "summarise", "summarize", "group_by", "pull"})
+_REWRITTEN = frozenset({"select", "filter", "mutate", "summarise", "summarize", "group_by", "pull", "arrange", "desc"})
 
 
 # ── Runtime helper ──────────────────────────────────────────────────────────
