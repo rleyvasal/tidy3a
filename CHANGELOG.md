@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.11.0 — 2026-10-28
 
 - The merge tree is capped: a table of 32 blocks joins the running table of
   every block before it instead of waiting for a partner, so the tree holds
