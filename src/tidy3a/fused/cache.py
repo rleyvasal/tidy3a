@@ -120,8 +120,8 @@ def fingerprint() -> str:
 
 def module_source(source: str, name: str, helpers: tuple[str, ...]) -> str:
     """*source* as a module whose *name* and *helpers* are compiled by Numba with ``cache=True``."""
-    lines = ["import numba", "import numpy as np", "", source.strip("\n"), ""]
-    lines += [f"{helper} = numba.njit(nogil=True, cache=True)({helper})" for helper in helpers]
+    lines = ["import math", "import numba", "import numpy as np", "", source.strip("\n"), ""]
+    lines += [f'{helper} = numba.njit(nogil=True, error_model="numpy", cache=True)({helper})' for helper in helpers]
     lines.append(f'{name} = numba.njit(nogil=True, error_model="numpy", cache=True)({name})')
     return "\n".join(lines) + "\n"
 

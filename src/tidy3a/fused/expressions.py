@@ -28,11 +28,12 @@ from tidy3a.expr import BinOp, Call, Context, Literal, Ref, UnaryOp, evaluate
 ARITHMETIC = {"+", "-", "*", "/"}
 COMPARISONS = {"==", "!=", "<", "<=", ">", ">="}
 LOGIC = {"&", "|"}
-FUNCTIONS = {"sqrt", "abs", "floor", "if_else"}
+FUNCTIONS = {"sqrt", "abs", "floor", "ceil", "sign", "if_else"}
+DIVISIONS = {"//", "%"}  # compiled with NumPy's rules (``kernels.HELPERS``)
 # Functions of one value at a time that NumPy computes in a way a kernel cannot match on every machine (its own vector
 # routines, chosen by the CPU), so NumPy computes them for each block, as islands the kernel reads (milestone 18).
 ISLANDS = {"exp", "log", "log2", "log10", "sin", "cos", "tan", "arcsin", "arccos", "arctan", "arctan2", "sinh", "cosh",
-           "tanh", "ceil", "sign", "real", "imag", "angle", "is_in"}
+           "tanh", "real", "imag", "angle", "is_in"}
 
 
 class Unsupported(Exception):
@@ -133,9 +134,7 @@ class Compiler:
             if node.name in ISLANDS:
                 return self._island(node, context)
             raise Unsupported(f"{node.name}() runs on NumPy")
-        if isinstance(node, BinOp) and node.symbol in ("//", "%"):
-            return self._island(node, context)
-        if isinstance(node, BinOp) and node.symbol not in ARITHMETIC | COMPARISONS | LOGIC | {"**"}:
+        if isinstance(node, BinOp) and node.symbol not in ARITHMETIC | COMPARISONS | LOGIC | DIVISIONS | {"**"}:
             raise Unsupported(f"{node.text()}: {node.symbol} runs on NumPy")
         if isinstance(node, BinOp) and node.symbol == "**" and not _exact_power(node, context):
             return self._island(node, context)
@@ -268,6 +267,13 @@ class Compiler:
         cells = left.cells or right.cells
         if node.symbol == "**":
             return _power(left, node.right, result, cells)
+        if node.symbol in DIVISIONS:  # NumPy's floored division and remainder, step by step
+            kind = "i" if result.kind in "iub" else f"f{result.itemsize * 8}"
+            if kind not in ("i", "f32", "f64"):
+                raise Unsupported(f"{node.text()} gives {kind_words(result)}, which runs on NumPy")
+            helper = {"//": "div", "%": "mod"}[node.symbol]
+            name = f"_i{helper}" if kind == "i" else f"_f{helper}{kind[1:]}"
+            return Source(_as(f"{name}({cast(left, result)}, {cast(right, result)})", result), result, cells)
         if node.symbol in ARITHMETIC | LOGIC:
             computed = result
         elif node.symbol in COMPARISONS:
@@ -299,10 +305,16 @@ class Compiler:
             return Source(_as(f"np.sqrt({cast(args[0], result)})", result), result, cells)
         if node.name == "abs":
             return Source(_as(f"abs({cast(args[0], result)})", result), result, cells)
-        if node.name == "floor":
+        if node.name in ("floor", "ceil"):
             if result.kind in "iub":  # NumPy gives an integer its own value
                 return Source(_as(cast(args[0], result), result), result, cells)
-            return Source(_as(f"np.floor({cast(args[0], result)})", result), result, cells)
+            return Source(_as(f"np.{node.name}({cast(args[0], result)})", result), result, cells)
+        if node.name == "sign":  # NumPy's: 1, -1, or 0 for either zero; a NaN stays one
+            value = cast(args[0], result)
+            one, zero = _number(1, result), _number(0, result)
+            text = (f"({one} if {value} > {zero} else (-{one} if {value} < {zero} else "
+                    f"({zero} if {value} == {zero} else {value})))")
+            return Source(_as(text, result), result, cells)
         if node.name == "if_else":
             condition, true, false = args
             text = f"({cast(true, result)} if {cast(condition, np.dtype(bool))} else {cast(false, result)})"

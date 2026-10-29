@@ -12,6 +12,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
+import math
+
 import numpy as np
 
 from tidy3a.fused.expressions import Compiler, Source
@@ -30,6 +32,65 @@ def loop_source(name: str, compiler: Compiler, outputs: Sequence[Source]) -> str
     return "\n".join(lines) + "\n"
 
 
+def _divmod(bits: str) -> str:
+    """NumPy's floored division and remainder of floats (``npy_divmod``, its steps one by one), in *bits*' type."""
+    f = f"np.float{bits}"
+    return f'''
+def _fdiv{bits}(a, b):
+    mod = {f}(np.fmod(a, b))
+    if not b:
+        return {f}(a / b)
+    div = {f}({f}(a - mod) / b)
+    if mod:
+        if (b < 0) != (mod < 0):
+            div = {f}(div - {f}(1.0))
+    if div:
+        floordiv = {f}(np.floor(div))
+        if {f}(div - floordiv) > {f}(0.5):
+            floordiv = {f}(floordiv + {f}(1.0))
+        return floordiv
+    return {f}(math.copysign(0.0, {f}(a / b)))
+
+
+def _fmod{bits}(a, b):
+    mod = {f}(np.fmod(a, b))
+    if not b:
+        return mod
+    if mod:
+        if (b < 0) != (mod < 0):
+            mod = {f}(mod + b)
+        return mod
+    return {f}(math.copysign(0.0, b))
+'''
+
+
+# Helpers the compiled expressions call (``fused.expressions``), each added to a kernel's source where it calls it.
+HELPERS = {
+    "_fdiv32": _divmod("32"), "_fmod32": "", "_fdiv64": _divmod("64"), "_fmod64": "",
+    "_idiv": '''
+def _idiv(a, b):
+    if b == 0:
+        return a - a
+    if b == -1:
+        return -a
+    return a // b
+''',
+    "_imod": '''
+def _imod(a, b):
+    if b == 0 or b == -1:
+        return a - a
+    return a % b
+''',
+}  # NumPy's integer rules: 0 for a zero divisor, the smallest value // -1 wrapping, a remainder of the divisor's sign
+
+
+def _helpers(source: str) -> tuple[str, tuple[str, ...]]:
+    """The helpers *source* calls: their source, put before it, and their names."""
+    called = [name for name in HELPERS if f"{name}(" in source]
+    texts = dict.fromkeys(HELPERS[name] or HELPERS[name.replace("mod", "div")] for name in called)
+    return "".join(texts), tuple(called)
+
+
 COMPILED: dict[tuple[str, str], Any] = {}  # this process's kernels by their source: each compiled once
 
 
@@ -39,17 +100,20 @@ def compile_source(source: str, name: str, helpers: tuple[str, ...] = ()) -> Any
     found = COMPILED.get((name, source))
     if found is not None:
         return found
+    prelude, called = _helpers(source)
+    key = (name, source)
+    source, helpers = prelude + source, (*helpers, *called)
     from tidy3a.fused.cache import load
 
     found = load(source, name, helpers)
     if found is not None:
-        COMPILED[(name, source)] = found
+        COMPILED[key] = found
         return found
     import numba
 
-    namespace: dict[str, Any] = {"np": np}
+    namespace: dict[str, Any] = {"np": np, "math": math}
     exec(compile(source, f"<tidy3a kernel {name}>", "exec"), namespace)
     for helper in helpers:
-        namespace[helper] = numba.njit(nogil=True)(namespace[helper])
-    found = COMPILED[(name, source)] = numba.njit(nogil=True, error_model="numpy")(namespace[name])
+        namespace[helper] = numba.njit(nogil=True, error_model="numpy")(namespace[helper])
+    found = COMPILED[key] = numba.njit(nogil=True, error_model="numpy")(namespace[name])
     return found

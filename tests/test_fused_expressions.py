@@ -12,7 +12,7 @@ import warnings
 import numpy as np
 import pytest
 
-from tidy3a import conj, exp, fields, floor, formula, if_else, log, sin, sqrt, tidy
+from tidy3a import ceil, conj, exp, fields, floor, formula, if_else, log, sign, sin, sqrt, tidy
 from tidy3a.errors import MutateError
 from tidy3a.expr import Context, evaluate
 from tidy3a.fused.expressions import Compiler, Island, Unsupported, read
@@ -34,9 +34,11 @@ EXPRESSIONS = {
     "x - 273.15": x - 273.15, "x * 2": x * 2, "1 / x": 1 / x, "2.5 + x": 2.5 + x, "x + True": x + True,
     "x * y - x / 3 + 1": x * y - x / 3 + 1,
     "formula": formula(r"\sqrt{x^2 + y^2 + z^2}"),
+    # NumPy's rules, step by step (milestone 18): floored division and remainder, ceil, sign
+    "x // y": x // y, "x % y": x % y, "x // 3": x // 3, "x % -2.5": x % -2.5, "ceil(x)": ceil(x), "sign(x)": sign(x),
     # islands: NumPy's own values, which the kernel reads (milestone 18)
-    "x ** 3": x ** 3, "exp(x)": exp(x), "log(x) + y": log(x) + y, "sin(x) * y": sin(x) * y, "x // y": x // y,
-    "x % y": x % y, "exp(x + y) - 1": exp(x + y) - 1, "if_else(x > 0, log(x), y)": if_else(x > 0, log(x), y),
+    "x ** 3": x ** 3, "exp(x)": exp(x), "log(x) + y": log(x) + y, "sin(x) * y": sin(x) * y,
+    "exp(x + y) - 1": exp(x + y) - 1, "if_else(x > 0, log(x), y)": if_else(x > 0, log(x), y),
 }
 TYPES = [("float32", "float32"), ("float64", "float64"), ("float32", "float64"), ("float64", "float32"),
          ("int32", "int64"), ("int64", "float32"), ("int32", "float64"), ("uint8", "int8"), ("bool", "bool"),
@@ -119,8 +121,7 @@ def test_a_grids_values_and_its_positions_mix_as_numpy_mixes_them():
 
 
 @pytest.mark.parametrize("expression, island", [
-    (x ** 3, "x ** 3"), (exp(x) + y, "exp(x)"), (x // 2, "x // 2"), (x % y, "x % y"),
-    (exp(x + y) * 2, "exp(x + y)")])
+    (x ** 3, "x ** 3"), (exp(x) + y, "exp(x)"), (exp(x + y) * 2, "exp(x + y)"), (sin(x // y), "sin(x // y)")])
 def test_what_does_not_agree_is_computed_by_numpy_as_an_island(expression, island):
     """NumPy's own routines, which a kernel cannot match on every machine: NumPy computes the part, its operands too,
     and the kernel reads it as an input."""

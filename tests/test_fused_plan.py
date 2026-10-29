@@ -11,9 +11,9 @@ import sys
 import numpy as np
 import pytest
 
-from tidy3a import (all, any, bins, cells, conj, exp, fields, filter, floor, formula, group_by, if_else, infer, max,
-                    mean, median, min, mutate, n, quantile, read_array, register_reduction, rounded, select, sqrt, std,
-                    sum, summarise, tidy, var)
+from tidy3a import (all, any, bins, ceil, cells, conj, exp, fields, filter, floor, formula, group_by, if_else, infer,
+                    max, mean, median, min, mutate, n, quantile, read_array, register_reduction, rounded, select,
+                    sign, sqrt, std, sum, summarise, tidy, var)
 import tidy3a.fused
 from tidy3a.fused import Fusion, plan_for
 
@@ -64,12 +64,13 @@ COMPILED = {
                       >> summarise(w=mean(fields("c")), h=max(fields("c"))),
     "a boolean key": lambda: grid() >> group_by(fields("on")) >> summarise(w=mean(fields("t"))),
     "no key": lambda: cloud() >> summarise(m=mean(x)),
+    "floor division and remainder": lambda: cloud() >> filter(x % 2 == 0) >> mutate(a=x // 2) >> group_by(ring)
+                                            >> summarise(m=mean(a)),
+    "ceil and sign": lambda: cloud() >> mutate(a=ceil(x) * sign(y)) >> group_by(ring) >> summarise(m=mean(a)),
 }
 ISLANDS = {  # computed by NumPy for each block, the kernel reading them (milestone 18)
     "exp": (lambda: cloud() >> mutate(a=exp(x)) >> group_by(ring) >> summarise(m=mean(a)), "exp(x)"),
     "a cube": (lambda: cloud() >> mutate(a=x ** 3) >> group_by(ring) >> summarise(m=mean(a)), "x ** 3"),
-    "floor division": (lambda: cloud() >> mutate(a=x // 2) >> group_by(ring) >> summarise(m=mean(a)), "x // 2"),
-    "a remainder": (lambda: cloud() >> filter(x % 2 == 0) >> group_by(ring) >> summarise(k=n()), "x % 2"),
     "of a variable made before": (lambda: cloud() >> NEAR >> mutate(w=exp(-distance / 20)) >> group_by(ring)
                                   >> summarise(m=sum(fields("w") * intensity)), "exp(-distance / 20)"),
 }

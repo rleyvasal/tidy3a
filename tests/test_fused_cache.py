@@ -72,7 +72,7 @@ def test_a_kernel_is_named_by_its_source_and_what_decides_its_code(tmp_path, mon
     assert out.tolist() == [0.0, 2.0, 4.0]
     first = {path.name for path in tmp_path.glob("k*.py")}
     assert len(first) == 1
-    assert (tmp_path / first.pop()).read_text().startswith("import numba\nimport numpy as np\n\ndef twice(")
+    assert (tmp_path / first.pop()).read_text().startswith("import math\nimport numba\nimport numpy as np\n\ndef twice(")
     cache.load(SOURCE.replace("* 2", "* 3"), "twice")  # another source
     assert len(list(tmp_path.glob("k*.py"))) == 2
     monkeypatch.setattr(cache, "fingerprint", lambda: "numba 99.0")  # another Numba, say

@@ -383,7 +383,7 @@ def test_islands_numpy_computes_give_numpys_bits(threads, monkeypatch):
              >> summarise(weighted=sum(w * intensity), glow=mean(tidy3a.log(abs(intensity) + 1)), cube=max(z ** 3),
                           steps=min(x // 7), rest=max(x % 5), k=n()))
     frame = read_array(values, blocks=3_000, threads=threads, **OPTIONS) >> verbs
-    assert "with NumPy for exp(-d / 20), sin(x), log(abs(intensity) + 1), z ** 3, x // 7, x % 5" in repr(frame)
+    assert "with NumPy for exp(-d / 20), sin(x), log(abs(intensity) + 1), z ** 3" in repr(frame)  # // and %: compiled
     frame.collect()
     assert frame._result._notes[-1] == "ran: 7 blocks in a compiled kernel"
     same_bits(frame, numpy_run(monkeypatch, lambda: read_array(values, blocks=3_000, **OPTIONS) >> verbs))
