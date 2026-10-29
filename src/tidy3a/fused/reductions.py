@@ -52,20 +52,10 @@ class Slot:
 
     @property
     def kind(self) -> str:
-        op, dtype = self.node.op, self.dtype
-        if op in ("sum", "mean"):
-            if dtype == np.float32:
-                return "estimate"
-            return "int" if op == "sum" and dtype.kind in "biu" else "float"
-        if op in ("min", "max"):
-            return "extreme"
-        if op in ("any", "all"):
-            return "flagged" if dtype.kind == "f" else "flag"
-        if op in ("std", "var"):
-            return "moments"
-        if op in ("median", "quantile"):
-            return "rank"
-        raise Unsupported(f"{self.node.text()} runs on NumPy")
+        kind = kind_of(self.node.op, self.dtype)
+        if kind is None:
+            raise Unsupported(f"{self.node.text()} runs on NumPy")
+        return kind
 
     def arrays(self, groups: int) -> dict[str, np.ndarray]:
         """The slot's accumulators, allocated for the kernel to fill, by name."""
@@ -179,6 +169,24 @@ class Slot:
             return "moments", np.stack([present, mean, arrays[f"squares{k}"],
                                         arrays[f"missing{k}"].astype(np.float64)])
         return f"rank:{self.dtype.str}", np.stack([arrays[f"present{k}"], arrays[f"missing{k}"]])
+
+
+def kind_of(op: str, dtype: np.dtype) -> str | None:
+    """How a kernel accumulates the reduction *op* of values of *dtype*, or None where it does not."""
+    dtype = np.dtype(dtype)
+    if op in ("sum", "mean"):
+        if dtype == np.float32:
+            return "estimate"
+        return "int" if op == "sum" and dtype.kind in "biu" else "float"
+    if op in ("min", "max"):
+        return "extreme"
+    if op in ("any", "all"):
+        return "flagged" if dtype.kind == "f" else "flag"
+    if op in ("std", "var"):
+        return "moments"
+    if op in ("median", "quantile"):
+        return "rank"
+    return None
 
 
 def _estimate(k: int) -> list[str]:

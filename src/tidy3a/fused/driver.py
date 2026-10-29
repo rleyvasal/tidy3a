@@ -78,6 +78,7 @@ class Fused:
     threads: int = 1  # the blocks run at once, which choose how positions of many values are reduced
     tested: list = field(default_factory=list)  # the filters' tests as kernel source
     group_bytes: int = field(init=False, default=8)
+    row_bytes: int = field(init=False, default=8)
     learned: list = field(init=False, default_factory=list)  # per key, each bucket a block held: its label
     unlearned: bool = field(init=False, default=False)  # a block's groups were sorted, its buckets not learned
     counting: dict = field(init=False, default_factory=dict)  # per slot, its later passes' kernel (or None)
@@ -86,6 +87,7 @@ class Fused:
 
     def __post_init__(self) -> None:
         self.group_bytes = 8 + sum(array.itemsize for slot in self.slots for array in slot.arrays(1).values())
+        self.row_bytes = 8 + -(-(self.group_bytes - 8) // 8) * 8  # a running table's row (``interleaved``)
         self.learned = [{} for _ in self.keys]
 
     def run(self, block: Any) -> tuple[Any, str | None]:
@@ -521,7 +523,7 @@ class _Running:
     @staticmethod
     def _fits(sizes: list[int], fused: Fused) -> bool:
         groups = math.prod(sizes) if sizes else 1
-        return groups <= DENSE_GROUPS and groups * fused.group_bytes <= fused.limit and groups < CODES
+        return groups <= DENSE_GROUPS and groups * fused.row_bytes <= fused.limit and groups < CODES
 
     @classmethod
     def for_block(cls, ranges: np.ndarray, fused: Fused) -> _Running | None:

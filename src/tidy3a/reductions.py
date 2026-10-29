@@ -544,6 +544,10 @@ class Median(Reduction):
     def count_whole(self, node, ask, value, each, codes):
         """One block's counts, whole, by a compiled kernel into a dense table (``fused.ranks``), or None where the
         table would be too large or nothing compiles; the same counts ``again`` gives, without sorting."""
+        from tidy3a.fused import unavailable
+
+        if unavailable() is not None:  # nothing compiles: the sparse pass, without importing the kernel's module
+            return None
         from tidy3a.fused.ranks import counted
 
         return counted(ask.state, lambda: (_keys(value).astype(np.uint64), _present(value)), len(value), each, codes)

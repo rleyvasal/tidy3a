@@ -642,3 +642,59 @@ def test_what_a_join_brings_over_the_other_axes_is_a_fixed_cost_per_block():
                for dtype in ("float32", "float64")}
     small, large = (cost([frame >> left_join(weights[dtype]) >> CLIMATE["sum"]]) for dtype in ("float32", "float64"))
     assert large.fixed - small.fixed == 9 * 12 * 4 and large.work == small.work
+
+
+RUNS = {  # compiled summaries whose tables outlive a block (milestone 20): a thread's running table, a pass's digits
+    "coarse voxels, running tables": DISTANCE >> filter(distance <= 50)
+    >> group_by(cells(x, 5), cells(y, 5), cells(z, 5), axis="voxel") >> summarise(k=n(), m=mean(intensity), top=max(z)),
+    "fine voxels, tables a block": DISTANCE >> filter(distance <= 50)
+    >> group_by(cells(x, 1), cells(y, 1), cells(z, 1), axis="voxel") >> summarise(k=n(), top=max(z)),
+    "the median by ring, its passes compiled": DISTANCE >> filter(distance <= 50) >> group_by(ring)
+    >> summarise(m=median(intensity), k=n()),
+}
+
+
+@pytest.mark.parametrize("name", list(RUNS))
+def test_a_compiled_runs_peak_stays_within_the_estimates_bound(name, monkeypatch):
+    """A whole run on three threads, every table it holds at once counted (``tracemalloc``), within what the
+    estimate bounds it by for the blocks chosen: the running tables and their copies, and a pass's digits, included."""
+    pytest.importorskip("numba")
+    from tidy3a.fused import driver
+
+    rng = np.random.default_rng(6)
+    values = (rng.normal(size=(2_000_000, 5)) * 30).astype(np.float32)
+    values[:, 4] = rng.integers(0, 32, len(values))
+    make = lambda: read_array(values, blocks="auto", memory=RESERVE + 200 * 2**20, threads=3,  # noqa: E731
+                              dims={"point": infer, "feature": 5}, labels={"feature": names}, field_axis="feature") >> RUNS[name]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        make().collect()  # compiled once
+        added = []
+        add = driver._Running.add
+        monkeypatch.setattr(driver._Running, "add", lambda self, *args: added.append(1) or add(self, *args))
+        frame = make()
+        rows, estimate = frame._layout().rows, cost([frame])
+        tracemalloc.start()
+        try:
+            base = tracemalloc.get_traced_memory()[0]
+            tracemalloc.reset_peak()
+            frame.collect()
+            peak = tracemalloc.get_traced_memory()[1] - base
+        finally:
+            tracemalloc.stop()
+    assert peak <= estimate.bound(rows, 3) - RESERVE, (peak, rows, estimate)
+    assert bool(added) == (name != "fine voxels, tables a block")  # a million cells pass a thread's dense limit
+
+
+def test_running_tables_and_a_passes_digits_count_in_the_fixed_cost():
+    pytest.importorskip("numba")
+    from tidy3a.fused.driver import dense_limit
+    from tidy3a.fused.ranks import DENSE_DIGITS
+
+    memory = RESERVE + 200 * 2**20
+    frames = {name: read_array(np.zeros((10, 5), np.float32), blocks="auto", memory=memory, threads=3,
+                               dims={"point": infer, "feature": 5}, labels={"feature": names},
+                               field_axis="feature") >> verbs for name, verbs in RUNS.items()}
+    limit = dense_limit(memory, 3)
+    assert cost([frames["coarse voxels, running tables"]]).fixed >= 2 * limit  # a running table and its copy
+    assert cost([frames["the median by ring, its passes compiled"]]).fixed >= 4 * DENSE_DIGITS

@@ -202,8 +202,11 @@ def test_repr_and_explain_say_what_is_planned_and_what_ran(monkeypatch):
 
 
 def test_auto_sizing_counts_the_dense_tables(monkeypatch):
-    """A compiled frame's blocks each hold their dense tables, an eighth of a block's share of the budget at most."""
+    """A compiled frame's blocks each hold their dense tables, an eighth of a block's share of the budget at most;
+    a summary free of its additions' order, a thread's running table and its copy while it widens (milestone 20);
+    one with a median, a later pass's table of digits."""
     from tidy3a.fused.driver import DENSE_BYTES, dense_limit
+    from tidy3a.fused.ranks import DENSE_DIGITS
     from tidy3a.sizing import RESERVE, cost
 
     assert dense_limit(None, 4) == DENSE_BYTES
@@ -219,8 +222,9 @@ def test_auto_sizing_counts_the_dense_tables(monkeypatch):
 
     compiled = fixed()
     numpy = numpy_run(monkeypatch, fixed)
-    assert compiled[0] == dense_limit(budget, 2) and numpy[0] == 0
-    assert compiled[1] == builtins.max(numpy[1], dense_limit(budget, 2))  # the exact sums' and median's own
+    assert compiled[0] == 2 * dense_limit(budget, 2) and numpy[0] == 0  # order-free: a running table
+    # a spread among them: a table a block; the exact sums', the median's own, and its digits
+    assert compiled[1] == builtins.max(numpy[1], dense_limit(budget, 2), 4 * DENSE_DIGITS)
 
 
 @pytest.mark.parametrize("dropna", [True, False])

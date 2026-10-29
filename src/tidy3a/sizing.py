@@ -37,6 +37,7 @@ from tidy3a.chunked import SLICE, ChunkedFrame, _Leaf, _needs, _Node, _trie
 from tidy3a.errors import GroupError, ReadError, SummariseError
 from tidy3a.expr import Context, Ref, evaluate
 from tidy3a.frame import TidyArray
+from tidy3a.fused.reductions import kind_of
 from tidy3a.reductions import REGISTRY
 
 RESERVE = 256 * 2**20  # the interpreter, the libraries, and the summary table, set aside from a budget
@@ -176,12 +177,15 @@ def _leaf(frame: ChunkedFrame, rows: TidyArray, axis: str) -> tuple[int, int, in
     work = sum(_per_position(key, axis) + KEY for key in keys) + (COMBINED if keys else 0) + 8
     droppable = any(np.dtype(key.dtype).kind in "fcmMO" for key in keys)  # a missing key leaves its rows out
     values = first = later = fixed = 0
+    kinds, most = [], 1  # how a kernel accumulates each reduction, and the most values a position holds
     for node in plan.reductions.values():
         if node.arg is None:
             continue
         value = evaluate(node.arg, context)
         dtype = np.dtype(value.dtype)
         each = _each(value, axis)
+        kinds.append(kind_of(node.op, dtype))
+        most = max(most, each)
         if droppable or not isinstance(node.arg, Ref) or value.dims[0] != axis:
             values += each * _itemsize(dtype)  # computed, copied without the rows left out, or reshaped
         entry = REGISTRY[node.op]
@@ -196,9 +200,16 @@ def _leaf(frame: ChunkedFrame, rows: TidyArray, axis: str) -> tuple[int, int, in
 
     fusion = plan_for(frame)
     if fusion.compiled:  # its blocks' dense tables (``fused.driver``), whatever a block's size, and its islands
-        from tidy3a.fused.driver import dense_limit
+        from tidy3a.fused.driver import BY_POSITION, KERNEL_THREADS, ORDER_FREE, dense_limit
+        from tidy3a.fused.ranks import DENSE_DIGITS
 
-        fixed = max(fixed, dense_limit(frame._blocks.memory, frame._blocks.threads))
+        threads = frame._blocks.threads
+        limit = dense_limit(frame._blocks.memory, threads)
+        fixed = max(fixed, limit)
+        if all(kind in ORDER_FREE for kind in kinds) and not (most >= BY_POSITION and threads < KERNEL_THREADS):
+            fixed = max(fixed, 2 * limit)  # a thread's running table, and its copy while it widens or is merged
+        if "rank" in kinds:
+            fixed = max(fixed, 4 * DENSE_DIGITS)  # a later pass's running table of digits, a thread's (milestone 20)
         work += fusion.island_bytes
     return work + values + max(first, later), 0, fixed  # a block's pieces are per group
 
