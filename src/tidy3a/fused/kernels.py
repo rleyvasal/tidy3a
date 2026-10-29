@@ -13,6 +13,7 @@ from collections.abc import Sequence
 from typing import Any
 
 import math
+import threading
 
 import numpy as np
 
@@ -92,12 +93,21 @@ def _helpers(source: str) -> tuple[str, tuple[str, ...]]:
 
 
 COMPILED: dict[tuple[str, str], Any] = {}  # this process's kernels by their source: each compiled once
+_COMPILING = threading.Lock()  # a block's thread may compile a kernel (a later pass's), so one thread at a time
 
 
 def compile_source(source: str, name: str, helpers: tuple[str, ...] = ()) -> Any:
     """*source*'s function *name*, with the *helpers* it defines and calls, compiled by Numba, once a process for
     each source, and kept on disk between runs (``fused.cache``) where it can be."""
     found = COMPILED.get((name, source))
+    if found is not None:
+        return found
+    with _COMPILING:
+        return _compiled(source, name, helpers)
+
+
+def _compiled(source: str, name: str, helpers: tuple[str, ...]) -> Any:
+    found = COMPILED.get((name, source))  # another thread's, compiled while this one waited
     if found is not None:
         return found
     prelude, called = _helpers(source)

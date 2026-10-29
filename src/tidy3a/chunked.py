@@ -1549,7 +1549,7 @@ def _scan_once(frames: Sequence[ChunkedFrame], writers: Sequence[tuple[ChunkedFr
             if leaf.table is not None and leaf.table.keys is not None:
                 leaf.table.complete()
                 settled[id(leaf)] = leaf.table.settle()
-        _passes(leaves, blocks, pool, settled, names)
+        _passes(leaves, blocks, pool, settled, names, fused)
     for leaf in leaves:
         frame, table = leaf.frame, leaf.table
         if leaf.writer is not None:
@@ -1587,12 +1587,14 @@ def _kept_blocks(frame: ChunkedFrame, blocks: Blocks) -> set[int]:
 
 def _passes(leaves: Sequence[_Leaf], blocks: Blocks, pool: ThreadPoolExecutor,
             settled: Mapping[int, tuple[dict[str, np.ndarray], dict[str, list[Any]]]],
-            names: frozenset | None = None) -> None:
+            names: frozenset | None = None, fused: Mapping[int, Any] | None = None) -> None:
     """The passes reductions ask for after the first (``tidy3a.reductions.Ask``), shared by every frame of the scan:
     the asks are packed, whole and in order, into rounds whose answers hold at most ``pass_budget()`` values per
     block; each round reads the blocks once, every block answers every ask in it (``again``), the answers join across
     the blocks in any order (``join``), and each reduction resolves its ask into its column, perhaps asking again
-    (``resolve``), until no ask is left."""
+    (``resolve``), until no ask is left. A compiled frame's rows are found by its kernels (``Fused.rows``), as in
+    the first pass, not by NumPy's verbs again (plan milestone 20)."""
+    fused = fused or {}
     pending = [(leaf, hidden, ask) for leaf in leaves if id(leaf) in settled
                for hidden, asks in settled[id(leaf)][1].items() for ask in asks]
     budget = pass_budget()
@@ -1604,24 +1606,50 @@ def _passes(leaves: Sequence[_Leaf], blocks: Blocks, pool: ThreadPoolExecutor,
         wanted: dict[int, list[tuple[int, str, Any]]] = {}
         for index, (leaf, hidden, ask) in enumerate(round_):
             wanted.setdefault(id(leaf), []).append((index, hidden, ask))
-        root = _trie(list({id(leaf): leaf for leaf, _, _ in round_}.values()))
+        asked = list({id(leaf): leaf for leaf, _, _ in round_}.values())
+        root = _trie([leaf for leaf in asked if id(leaf) not in fused])
 
         def block(span: tuple[int, int]) -> list[tuple[int, Any]]:
             answers: list[tuple[int, Any]] = []
 
-            def visit(leaf: _Leaf, frame: TidyArray) -> None:
+            def counted(leaf: _Leaf, rows: _Rows, asks: Sequence[tuple[int, str, Any]] | None = None) -> None:
                 assert leaf.table is not None and leaf.table.keys is not None
-                rows = _block(leaf.table.plan, frame, blocks.axis)
                 if rows.kept == 0:
                     return
                 codes = _table_codes(leaf.table, rows)
-                for index, hidden, ask in wanted[id(leaf)]:
+                for index, hidden, ask in wanted[id(leaf)] if asks is None else asks:
                     value, each = rows.values[hidden]
                     node = leaf.table.plan.reductions[hidden]
                     answers.append((index, _again(node, ask, value, each, codes, len(leaf.table.keys))))
 
+            def visit(leaf: _Leaf, frame: TidyArray) -> None:
+                assert leaf.table is not None
+                counted(leaf, _block(leaf.table.plan, frame, blocks.axis))
+
             with _naming(blocks, span):
-                _walk(root, blocks.load(*span, names), visit)
+                loaded = blocks.load(*span, names)
+                for leaf in asked:
+                    kernels = fused.get(id(leaf))
+                    if kernels is None:
+                        continue
+                    rest = []  # the asks its one-loop pass does not count (``Fused.count``)
+                    for index, hidden, ask in wanted[id(leaf)]:
+                        found = kernels.count(loaded, leaf.table, hidden, ask)
+                        if found is None:
+                            rest.append((index, hidden, ask))
+                        else:
+                            answers.append((index, found))
+                    if not rest:
+                        continue
+                    rows = kernels.rows(loaded)
+                    if rows is None:  # this block on NumPy, as its first pass was: the row-wise verbs, then the keys
+                        frame = loaded
+                        for verb in leaf.frame._steps:
+                            if verb._operation in ROW_WISE:
+                                frame = frame >> verb
+                        rows = _block(leaf.table.plan, frame, blocks.axis)  # type: ignore[union-attr]
+                    counted(leaf, rows, rest)
+                _walk(root, loaded, visit)
             return answers
 
         totals: dict[int, Any] = {}
@@ -1646,6 +1674,10 @@ def _again(node: Reduce, ask: Any, value: np.ndarray, each: int, codes: np.ndarr
     """One block's answer to *ask*: ``again`` on slices of at most ``SLICE`` values, rows whole, their answers joined
     as blocks' are, so a later pass works in the same memory whatever the block's size."""
     entry = REGISTRY[node.op]
+    whole = getattr(entry, "count_whole", None)  # a compiled pass over the whole block, where the reduction has one
+    found = whole(node, ask, value, each, codes) if whole is not None else None
+    if found is not None:
+        return found
     rows = max(1, SLICE // each)
     answer = None
     for start in range(0, max(len(codes), 1), rows):

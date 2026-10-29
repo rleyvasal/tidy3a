@@ -75,46 +75,27 @@ class Fused:
     dense: Any = None
     limit: int = DENSE_BYTES  # the bytes its dense tables may take (``dense_limit``)
     threads: int = 1  # the blocks run at once, which choose how positions of many values are reduced
+    tested: list = field(default_factory=list)  # the filters' tests as kernel source
     group_bytes: int = field(init=False, default=8)
+    learned: list = field(init=False, default_factory=list)  # per key, each bucket a block held: its label
+    unlearned: bool = field(init=False, default=False)  # a block's groups were sorted, its buckets not learned
+    counting: dict = field(init=False, default_factory=dict)  # per slot, its later passes' kernel (or None)
+    looked: Any = field(init=False, default=None)  # the table the lookups were made for, and them
 
     def __post_init__(self) -> None:
         self.group_bytes = 8 + sum(array.itemsize for slot in self.slots for array in slot.arrays(1).values())
+        self.learned = [{} for _ in self.keys]
 
     def run(self, block: Any) -> tuple[Any, str | None]:
         """The block's table, or None and why it runs on NumPy instead."""
         from tidy3a.chunked import _Table
 
-        for join in self.joins:  # NumPy joins the block first; the kernels read what it brings (milestone 19)
-            block = block >> join
-
-        axis = self.compiler.axis
-        context = Context(block, verb="summarise", error=SummariseError, grouped=False)
-        inputs = self._inputs(block, context)
-        positions = int(block._backend.sizes(block._data)[axis])
-        cells = math.prod(size for _, size in (self.compiler.cells or ()))
-        count = len(self.keys)
-        ks = np.empty((count, positions), np.int64)
-        missing = np.zeros((count, positions), np.bool_)
-        keep = np.zeros(positions, np.bool_)
-        ranges = np.zeros((max(count, 1), 3), np.int64)
-        edges = [key.constants["edges"] for key in self.keys if key.how == "bins"]
-        placed = [array for k in range(count) for array in (ks[k], missing[k])]
-        if self.place(positions, *inputs, *edges, *placed, keep, ranges) != 0:
-            return None, "a value where agreement with NumPy is not established"
-        groups = self._groups(positions, keep, ks, missing, ranges)
-        if groups is None:  # a key's range far wider than its values: its groups by sorting them
-            groups = self._sorted(positions, keep, ks, missing, ranges)
-        found, sizes, ranked, dense = groups
+        placed = self._placed(block)
+        if isinstance(placed, str):
+            return None, placed
+        inputs, positions, cells, found, sizes, dense, valid, dropped = placed
         combinations = math.prod(sizes) if sizes else 1
-        if combinations >= CODES:  # the reason says no block's own count, so the result counts blocks by it
-            return None, "its keys' groups make more combinations than 64-bit codes number"
-        if dense is None:
-            dense = np.empty(positions, np.intp)
-            valid = self.dense(positions, keep, ks, missing, *ranked, np.array(sizes, np.int64), dense)
-        else:
-            valid = int(np.count_nonzero(dense >= 0))
         plan = self.frame._plan
-        dropped = int(np.count_nonzero(keep)) - valid
         table = _Table(plan)
         if not valid:
             table.merge(found, None, None, None, dropped)
@@ -144,6 +125,140 @@ class Fused:
                   in zip(found, np.unravel_index(numbered, sizes))] if sizes else []
         table.merge(found, combos, counts[occupied] * plan.per_position, pieces, dropped)
         return table, None
+
+    def rows(self, block: Any) -> Any:
+        """The block's kept rows as ``chunked._block`` finds them, found by the kernels: each key's groups and its
+        rows' codes, and each reduction's values, which a later pass counts (plan milestone 20); None where the block
+        runs on NumPy."""
+        from tidy3a.chunked import _Rows
+
+        placed = self._placed(block)
+        if isinstance(placed, str):
+            return None
+        inputs, _, cells, found, sizes, dense, valid, dropped = placed
+        plan = self.frame._plan
+        rows = np.flatnonzero(dense >= 0)
+        local = [codes.astype(np.intp) for codes in np.unravel_index(dense[rows], sizes)] if sizes else []
+        outputs = [np.empty((valid, cells) if slot.value.cells else valid, slot.dtype) for slot in self.slots]
+        if valid and self.slots:
+            if self.values is None:  # compiled when a later pass first needs it
+                self.values = compile_source(values_source("values", self.compiler, [slot.value for slot in self.slots]),
+                                             "values")
+            self.values(rows, cells, *inputs, *outputs)
+        hidden = [name for name, node in plan.reductions.items() if node.op != "n"]  # the slots' order
+        values = {name: (output.reshape(-1), cells if slot.value.cells else 1)
+                  for name, slot, output in zip(hidden, self.slots, outputs)}
+        return _Rows(found, local, valid, dropped, plan.per_position, values)
+
+    def count(self, block: Any, table: Any, hidden: str, ask: Any) -> Any:
+        """The block's answer to a later pass of the median or a quantile in one compiled loop (``fused.ranks``):
+        its filters, its keys' groups in the finished *table*, and its values counted into the thread's running
+        table, nothing else made; None where the block is counted otherwise (``rows``), as where it holds a bucket
+        or a value the loop cannot place, whose counts it takes back first."""
+        from tidy3a.fused import ranks
+        from tidy3a.fused.kernels import compile_source
+        from tidy3a.fused.keys import HELPERS
+
+        names = [name for name, node in self.frame._plan.reductions.items() if node.op != "n"]
+        if self.unlearned or hidden not in names or table.keys is None:
+            return None
+        k = names.index(hidden)
+        if self.slots[k].kind != "rank":  # a float32 sum's exact pass, say: its own steps
+            return None
+        if k not in self.counting:
+            source = ranks.pass_source("counted", self.keys, self.compiler, self.tested, self.slots[k].value)
+            self.counting[k] = None if source is None else compile_source(HELPERS + source, "counted", ("_at", "_far"))
+        kernel = self.counting[k]
+        lookups = self._lookups(table)
+        state = ask.state
+        if kernel is None or lookups is None:
+            return None
+        for join in self.joins:
+            block = block >> join
+        context = Context(block, verb="summarise", error=SummariseError, grouped=False)
+        inputs = self._inputs(block, context)
+        positions = int(block._backend.sizes(block._data)[self.compiler.axis])
+        cells = math.prod(size for _, size in (self.compiler.cells or ()))
+        out = ranks.running(state, positions * cells)
+        if out is None:
+            return None
+        edges = [key.constants["edges"] for key in self.keys if key.how == "bins"]
+        scratch, bits = ranks.scratch_for(self.slots[k].dtype)
+        arguments = (cells, *inputs, *edges, *lookups, scratch, bits, state.first, state.second, state.prefix,
+                     state.width - 16 * state.done, state.done, out)
+        failed = kernel(0, positions, 1, *arguments)
+        if failed < 0:
+            kernel(0, -failed - 1, -1, *arguments)  # its counts taken back
+            return None
+        return ranks.Counted(state)
+
+    def _lookups(self, table: Any) -> tuple | None:
+        """Per key, the buckets the blocks held, sorted, and their groups' codes in *table*; each key's missing
+        group's code; the combinations' strides; and the table's combinations. None for a table without keys."""
+        from tidy3a.chunked import _label_array
+
+        if self.looked is not None and self.looked[0] is table:
+            return self.looked[1]
+        if len(table.parts) != len(self.keys):
+            return None
+        arrays: list[np.ndarray] = []
+        missing, lows = [], []
+        for key, part, learned in zip(self.keys, table.parts, self.learned):
+            items = sorted(dict(learned).items())
+            buckets = np.array([bucket for bucket, _ in items], np.int64)
+            codes = part.codes(_label_array([label for _, label in items]), False) if items else np.zeros(0, np.intp)
+            buckets, codes = buckets[codes >= 0], codes[codes >= 0].astype(np.int64)
+            low = int(buckets[0]) if len(buckets) else 0
+            direct = np.zeros(0, np.int64)  # each bucket's code from the lowest, where the range is narrow
+            if len(buckets) and int(buckets[-1]) - low < 4 * len(buckets) + 1_024:
+                direct = np.full(int(buckets[-1]) - low + 1, -1, np.int64)
+                direct[buckets - low] = codes
+            arrays += [buckets, codes, direct]
+            lows.append(low)
+            missing.append(part.size - 1 if part.missing is not None else -1 if key.part.dropna else -2)
+        sizes = list(table.sizes)
+        strides = np.array([math.prod(sizes[k + 1:]) for k in range(len(sizes))], np.int64)
+        combinations = np.asarray(table.keys, np.int64)
+        rows = np.zeros(0, np.int64)
+        if math.prod(sizes) <= max(4 * len(combinations), 1 << 20):  # few: each combination's row read directly
+            rows = np.full(math.prod(sizes), -1, np.int64)
+            rows[combinations] = np.arange(len(combinations))
+        looked = (*arrays, np.array(lows, np.int64), np.array(missing, np.int64), strides, combinations, rows)
+        self.looked = (table, looked)
+        return looked
+
+    def _placed(self, block: Any) -> Any:
+        """The block's kernel inputs, positions, values a position, each key's groups and their sizes, each
+        position's combination (-1 where none), the rows kept and those dropped; or why it runs on NumPy."""
+        for join in self.joins:  # NumPy joins the block first; the kernels read what it brings (milestone 19)
+            block = block >> join
+
+        axis = self.compiler.axis
+        context = Context(block, verb="summarise", error=SummariseError, grouped=False)
+        inputs = self._inputs(block, context)
+        positions = int(block._backend.sizes(block._data)[axis])
+        cells = math.prod(size for _, size in (self.compiler.cells or ()))
+        count = len(self.keys)
+        ks = np.empty((count, positions), np.int64)
+        missing = np.zeros((count, positions), np.bool_)
+        keep = np.zeros(positions, np.bool_)
+        ranges = np.zeros((max(count, 1), 3), np.int64)
+        edges = [key.constants["edges"] for key in self.keys if key.how == "bins"]
+        placed = [array for k in range(count) for array in (ks[k], missing[k])]
+        if self.place(positions, *inputs, *edges, *placed, keep, ranges) != 0:
+            return "a value where agreement with NumPy is not established"
+        groups = self._groups(positions, keep, ks, missing, ranges)
+        if groups is None:  # a key's range far wider than its values: its groups by sorting them
+            groups = self._sorted(positions, keep, ks, missing, ranges)
+        found, sizes, ranked, dense = groups
+        if (math.prod(sizes) if sizes else 1) >= CODES:  # the reason names no block's count: the result counts them
+            return "its keys' groups make more combinations than 64-bit codes number"
+        if dense is None:
+            dense = np.empty(positions, np.intp)
+            valid = self.dense(positions, keep, ks, missing, *ranked, np.array(sizes, np.int64), dense)
+        else:
+            valid = int(np.count_nonzero(dense >= 0))
+        return inputs, positions, cells, found, sizes, dense, valid, int(np.count_nonzero(keep)) - valid
 
     def _inputs(self, block: Any, context: Context) -> list[np.ndarray]:
         """The kernels' inputs on *block*, positions first: the variables read, and each island, NumPy applying its
@@ -226,12 +341,16 @@ class Fused:
             if key.how == "bins":
                 labels = labels_of(key, ks[k, :0], dtype)
                 low, rank = 0, np.arange(len(labels), dtype=np.int64)
+                if len(self.learned[k]) != len(labels):
+                    self.learned[k].update(zip(range(len(labels)), labels))
             elif high < low:
                 labels, low, rank = [], 0, np.zeros(0, np.int64)
             elif high - low < 4 * positions + 1_024:
                 occupied = np.zeros(high - low + 1, np.bool_)
                 self.occupied(positions, keep, ks[k], missing[k], low, occupied)
-                labels = labels_of(key, np.flatnonzero(occupied) + low, dtype)
+                buckets = np.flatnonzero(occupied) + low
+                labels = labels_of(key, buckets, dtype)
+                self.learned[k].update(zip(buckets.tolist(), labels))  # what a later pass finds groups by
                 rank = np.cumsum(occupied, dtype=np.int64) - 1
             else:
                 return None
@@ -253,6 +372,7 @@ class Fused:
         position's dense group (-1 for none)."""
         from tidy3a.chunked import _label_array
 
+        self.unlearned = True  # its buckets not learned: a later pass finds its rows as the first did
         found, local, sizes = [], [], []
         valid = keep.copy()
         for k, key in enumerate(self.keys):
@@ -328,9 +448,9 @@ def build(frame: Any) -> Fused | None:
         context = Context(rows, verb="summarise", error=SummariseError, grouped=False)
         slots = [Slot(k, node, compiler.compile(node.arg, context))
                  for k, node in enumerate(node for node in plan.reductions.values() if node.op != "n")]
-    fused = Fused(frame, compiler, tests, keys, slots, limit=dense_limit(blocks.memory, blocks.threads),
-                  threads=blocks.threads)
     tested = [f"np.bool_({cast_bool(test)})" for test in tests]
+    fused = Fused(frame, compiler, tests, keys, slots, limit=dense_limit(blocks.memory, blocks.threads),
+                  threads=blocks.threads, tested=tested)
     fused.place = compile_keys(kernel_source("place", keys, compiler, tested), "place")
     fused.accumulate = compile_summary(summary_source("accumulate", list(compiler.inputs), slots), "accumulate")
     fused.occupied, fused.dense = dense_kernels()

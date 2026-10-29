@@ -450,6 +450,13 @@ def _keys(value: np.ndarray) -> np.ndarray:
     return value.astype(unsigned, copy=False)
 
 
+def _present(value: np.ndarray) -> np.ndarray:
+    """Which values are present: not NaN or NaT."""
+    if value.dtype.kind == "m":
+        return ~np.isnat(value)
+    return ~np.isnan(value) if value.dtype.kind == "f" else np.ones(len(value), dtype=bool)
+
+
 def _values(keys: np.ndarray, dtype: np.dtype) -> np.ndarray:
     """The values whose keys these are (``_keys`` undone)."""
     unsigned, width = _key_type(dtype)
@@ -534,13 +541,19 @@ class Median(Reduction):
         """The ranks to find per group: the middle one, or the two middle ones of an even count."""
         return (present - 1) // 2, present // 2, None
 
+    def count_whole(self, node, ask, value, each, codes):
+        """One block's counts, whole, by a compiled kernel into a dense table (``fused.ranks``), or None where the
+        table would be too large or nothing compiles; the same counts ``again`` gives, without sorting."""
+        from tidy3a.fused.ranks import counted
+
+        return counted(ask.state, lambda: (_keys(value).astype(np.uint64), _present(value)), len(value), each, codes)
+
     def again(self, node, ask, value, codes, groups):
         """One block's count of each target's candidates by their next digit: as ``(target × 2**16 + digit, count)``,
         the candidates being the group's values present whose key starts with the target's prefix."""
         state = ask.state
         keys = _keys(value).astype(np.uint64)
-        present = ~(np.isnat(value) if value.dtype.kind == "m" else np.isnan(value)) if value.dtype.kind in "fm" else (
-            np.ones(len(value), dtype=bool))
+        present = _present(value)
         above = state.width - DIGIT * state.done  # the bits decided lie above this one
         digits = (keys >> np.uint64(above - DIGIT)) & np.uint64(0xFFFF)
         found = []
@@ -553,6 +566,8 @@ class Median(Reduction):
         return pairs, tally.astype(np.int64)
 
     def join(self, node, ask, first, second):
+        if not isinstance(first, tuple):  # dense tables (``fused.ranks.Counted``), as every block's for this ask
+            return first.joined(second)
         pairs, inverse = np.unique(np.concatenate([first[0], second[0]]), return_inverse=True)
         return pairs, np.bincount(inverse.reshape(-1), weights=np.concatenate([first[1], second[1]])).astype(np.int64)
 
@@ -560,7 +575,7 @@ class Median(Reduction):
         """Each target's digit: the one where its group's candidates, counted digit by digit, pass its rank; with every
         digit found, the values, and the median of the one or two per group."""
         state = ask.state
-        pairs, tally = total
+        pairs, tally = total if isinstance(total, tuple) else total.pairs()
         target, digit = pairs // 65_536, (pairs % 65_536).astype(np.uint64)
         before = np.cumsum(tally) - tally  # candidates before each (target, digit), over all targets
         start = np.searchsorted(target, np.arange(len(state.group)))

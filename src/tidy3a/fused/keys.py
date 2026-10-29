@@ -44,16 +44,18 @@ class Key:
         """The type the key's labels are made in: its times', or its value's."""
         return self.time if self.time is not None else self.value.dtype
 
-    def body(self, k: int) -> list[str]:
-        """Kernel lines placing position ``i`` of key *k*: ``ks{k}[i]``, ``missing{k}[i]``, and the block's range."""
+    def body(self, k: int, placing: bool = True) -> list[str]:
+        """Kernel lines placing position ``i`` of key *k*: ``ks{k}[i]``, ``missing{k}[i]``, and the block's range; or,
+        not *placing*, only its bucket ``b{k}``, and ``m{k}`` set where its value is missing (a later pass's)."""
         v = f"v{k}"
         lines = [f"{v} = {self.value.text}"]
         floating = self.value.dtype.kind == "f"
+        missing = [f"    missing{k}[i] = True", f"    count{k} += 1", "    continue"] if placing else [
+            f"    m{k} = True", "    continue"]
         if floating:
-            lines += [f"if {v} != {v}:", f"    missing{k}[i] = True", f"    count{k} += 1", "    continue"]
+            lines += [f"if {v} != {v}:", *missing]
         if self.time is not None:  # NaT, the smallest int64
-            lines += [f"if {v} == {np.iinfo(np.int64).min}:", f"    missing{k}[i] = True", f"    count{k} += 1",
-                      "    continue"]
+            lines += [f"if {v} == {np.iinfo(np.int64).min}:", *missing]
         if self.how == "value":
             if floating:
                 lines += [f"if not (abs({v}) < {EXACT}.0) or {v} != np.floor({v}) or ({v} == 0 and np.signbit({v})):",
@@ -83,8 +85,9 @@ class Key:
                       f"    if edges{k}[mid{k}] > e{k}:", f"        hi{k} = mid{k}", "    else:",
                       f"        lo{k} = mid{k} + 1", f"b{k} = lo{k} - 1",
                       f"if b{k} < 0 or b{k} >= len(edges{k}) - 1:", "    return -1"]
-        lines += [f"ks{k}[i] = b{k}", f"if b{k} < low{k}:", f"    low{k} = b{k}", f"if b{k} > high{k}:",
-                  f"    high{k} = b{k}"]
+        if placing:
+            lines += [f"ks{k}[i] = b{k}", f"if b{k} < low{k}:", f"    low{k} = b{k}", f"if b{k} > high{k}:",
+                      f"    high{k} = b{k}"]
         return lines
 
 
