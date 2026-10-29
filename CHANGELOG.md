@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.13.0 — 2026-10-29
 
 - Joins and slices of data read in blocks (milestone 19). `left_join`,
   `inner_join`, and `full_join` with data in memory join each block on its
