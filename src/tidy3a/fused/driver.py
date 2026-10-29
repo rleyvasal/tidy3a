@@ -29,7 +29,7 @@ import numpy as np
 
 from tidy3a.errors import FilterError, MutateError, SummariseError, TidyError
 from tidy3a.expr import Context, evaluate
-from tidy3a.fused.expressions import Compiler, Source
+from tidy3a.fused.expressions import Compiler, Source, read
 from tidy3a.fused.kernels import compile_source
 from tidy3a.fused.keys import (Key, compile_keys, dense_kernels, groups, kernel_source, key_for, labels_of,
                               missing_label)
@@ -69,6 +69,7 @@ class Fused:
     place: Any = None
     accumulate: Any = None
     values: Any = None  # each kept position's values for NumPy's reductions, where positions hold many
+    operands: dict = field(default_factory=dict)  # island's local name: (its operands' kernel, the inputs it reads, it)
     occupied: Any = None  # ``fused.keys.dense_kernels``
     dense: Any = None
     limit: int = DENSE_BYTES  # the bytes its dense tables may take (``dense_limit``)
@@ -84,7 +85,7 @@ class Fused:
 
         axis = self.compiler.axis
         context = Context(block, verb="summarise", error=SummariseError, grouped=False)
-        inputs = [_positions_first(evaluate(ref, context), axis) for ref, _ in self.compiler.inputs.values()]
+        inputs = self._inputs(block, context)
         positions = int(block._backend.sizes(block._data)[axis])
         cells = math.prod(size for _, size in (self.compiler.cells or ()))
         count = len(self.keys)
@@ -139,6 +140,35 @@ class Fused:
                   in zip(found, np.unravel_index(numbered, sizes))] if sizes else []
         table.merge(found, combos, counts[occupied] * plan.per_position, pieces, dropped)
         return table, None
+
+    def _inputs(self, block: Any, context: Context) -> list[np.ndarray]:
+        """The kernels' inputs on *block*, positions first: the variables read, and each island, NumPy applying its
+        function to the operands its kernel computes from the inputs before it, or evaluating it whole."""
+        axis, cells = self.compiler.axis, math.prod(size for _, size in (self.compiler.cells or ()))
+        positions = int(block._backend.sizes(block._data)[axis])
+        inputs: list[np.ndarray] = []
+        named: dict[str, np.ndarray] = {}
+        for local, (value, per_value) in self.compiler.inputs.items():
+            if local in self.operands:
+                kernel, needed, island = self.operands[local]
+                outputs = [np.empty((positions, cells) if operand.cells else positions, operand.dtype)
+                           for operand in island.operands if isinstance(operand, Source)]
+                kernel(positions, cells, *(named[name] for name in needed), *outputs)
+                computed = iter(outputs)
+                arguments = []
+                for operand in island.operands:
+                    if not isinstance(operand, Source):
+                        arguments.append(operand)
+                        continue
+                    array = next(computed)
+                    arguments.append(array.reshape(-1, 1) if per_value and not operand.cells else array)
+                with np.errstate(all="ignore"):  # NumPy's warnings on a block say nothing the result does not
+                    array = np.ascontiguousarray(island.function(*arguments))
+            else:
+                array = _positions_first(read(value, context), axis)
+            named[local] = array
+            inputs.append(array)
+        return inputs
 
     def _numpy_first(self) -> bool:
         """Whether NumPy's reductions take each position's values first: below ``KERNEL_THREADS`` threads, where they
@@ -278,7 +308,7 @@ def build(frame: Any) -> Fused | None:
                 tests += [compiler.compile(predicate, context) for predicate in verb._arguments]
             elif verb._operation == "mutate":
                 for step in verb._arguments:
-                    compiler.define(step.target, step.value, Context(rows, verb="mutate", error=MutateError))
+                    compiler.define(step.target, step.value, Context(rows, verb="mutate", error=MutateError), step)
                     rows = rows >> mutate(step)
                 continue
             rows = rows >> verb
@@ -294,9 +324,34 @@ def build(frame: Any) -> Fused | None:
     fused.place = compile_keys(kernel_source("place", keys, compiler, tested), "place")
     fused.accumulate = compile_summary(summary_source("accumulate", list(compiler.inputs), slots), "accumulate")
     fused.occupied, fused.dense = dense_kernels()
+    fused.operands = operand_kernels(compiler)
     if slots and compiler.cells:
         fused.values = compile_source(values_source("values", compiler, [slot.value for slot in slots]), "values")
     return fused
+
+
+def operand_kernels(compiler: Compiler) -> dict:
+    """For each island whose operands compile, the kernel computing them, which reads only the inputs before it."""
+    import re
+
+    from tidy3a.fused.expressions import Island
+
+    kernels = {}
+    for local, (value, _) in compiler.inputs.items():
+        if not isinstance(value, Island) or value.function is None:
+            continue
+        sources = [operand for operand in value.operands if isinstance(operand, Source)]
+        needed = sorted({name for source in sources for name in re.findall(r"\ba\d+\b", source.text)},
+                        key=lambda name: int(name[1:]))
+        arguments = ", ".join(["positions", "values", *needed, *(f"out{k}" for k in range(len(sources)))])
+        lines = [f"def operands({arguments}):", "    for i in range(positions):"]
+        lines += [f"        out{k}[i] = {source.text}" for k, source in enumerate(sources) if not source.cells]
+        per_value = [(k, source) for k, source in enumerate(sources) if source.cells]
+        if per_value:
+            lines.append("        for j in range(values):")
+            lines += [f"            out{k}[i, j] = {source.text}" for k, source in per_value]
+        kernels[local] = (compile_source("\n".join(lines) + "\n", "operands"), needed, value)
+    return kernels
 
 
 def values_source(name: str, compiler: Compiler, outputs: list[Source]) -> str:

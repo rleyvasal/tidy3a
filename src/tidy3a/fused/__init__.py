@@ -38,9 +38,11 @@ REDUCTIONS = frozenset({"n", "sum", "mean", "min", "max", "std", "var", "any", "
 
 @dataclass(frozen=True)
 class Fusion:
-    """Whether a frame's summary compiles: no *reasons*, or each step that does not, and why."""
+    """Whether a frame's summary compiles: no *reasons*, or each step that does not, and why; and the parts NumPy
+    computes for the kernel, its *islands* (milestone 18)."""
 
     reasons: tuple[str, ...] = ()
+    islands: tuple[str, ...] = ()
 
     @property
     def compiled(self) -> bool:
@@ -49,7 +51,7 @@ class Fusion:
     def words(self) -> str:
         """How a run is planned to go: a compiled kernel a block, or NumPy and the first reason."""
         if self.compiled:
-            return "a compiled kernel a block"
+            return "a compiled kernel a block" + (f", with NumPy for {', '.join(self.islands)}" if self.islands else "")
         more = len(self.reasons) - 1
         return f"NumPy, as {self.reasons[0]}{f' (and {more} more: explain() lists them)' if more else ''}"
 
@@ -94,7 +96,11 @@ def plan_for(frame: Any) -> Fusion:
             reasons += _summary(frame._plan, rows, compiler)
         except TidyError as error:  # the verbs passed their checks on this block; anything else is not planned for
             return Fusion((f"it could not be planned ({str(error).splitlines()[0]})",))
-    return Fusion(tuple(dict.fromkeys(reasons)))
+    from tidy3a.fused.expressions import Island
+
+    islands = () if reasons else tuple(dict.fromkeys(
+        read.text() for read, _ in compiler.inputs.values() if isinstance(read, Island)))
+    return Fusion(tuple(dict.fromkeys(reasons)), islands)
 
 
 def _summary(plan: Any, rows: Any, compiler: Compiler) -> list[str]:
@@ -138,7 +144,7 @@ def _verb(verb: Any, rows: Any, compiler: Compiler) -> tuple[list[str], Any]:
             if found or inherited:
                 compiler.refuse(step.target)
             else:
-                compiler.define(step.target, step.value, context)
+                compiler.define(step.target, step.value, context, step)
         rows = rows >> mutate(step)
     return reasons, rows
 

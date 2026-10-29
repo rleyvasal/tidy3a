@@ -159,7 +159,7 @@ def test_a_scan_runs_compiled_and_numpy_frames_over_the_same_blocks(monkeypatch)
     values = cloud_values()
     frame = read_array(values, blocks=3_000, threads=2, **OPTIONS)
     compiled = frame >> SUMMARIES["grid"]
-    slow = frame >> mutate(e=tidy3a.exp(x / 100)) >> group_by(ring) >> summarise(s=sum(e), points=n())
+    slow = frame >> mutate(e=tidy3a.conj(x / 100)) >> group_by(ring) >> summarise(s=sum(e), points=n())
     rows = frame >> NEAR
     got_compiled, got_slow, got_rows = scan(compiled, slow, rows)
     assert got_compiled._notes[-1] == "ran: 7 blocks in a compiled kernel"
@@ -167,7 +167,7 @@ def test_a_scan_runs_compiled_and_numpy_frames_over_the_same_blocks(monkeypatch)
     def alone():
         frame = read_array(values, blocks=3_000, **OPTIONS)
         return scan(*(frame >> verbs for verbs in (
-            SUMMARIES["grid"], mutate(e=tidy3a.exp(x / 100)) >> group_by(ring) >> summarise(s=sum(e), points=n()),
+            SUMMARIES["grid"], mutate(e=tidy3a.conj(x / 100)) >> group_by(ring) >> summarise(s=sum(e), points=n()),
             NEAR)))
 
     alone = numpy_run(monkeypatch, alone)
@@ -180,12 +180,13 @@ def test_repr_and_explain_say_what_is_planned_and_what_ran(monkeypatch):
     rings = frame >> SUMMARIES["rings"]
     assert "planned run: a compiled kernel a block" in repr(rings)
     assert str(rings.explain()).endswith("planned run: a compiled kernel a block")
-    slow = frame >> mutate(e=tidy3a.exp(x)) >> mutate(f=e * 2) >> group_by(cells(z, 5.0)) \
-        >> summarise(s=sum(f), m=mean(tidy3a.log(intensity + 1)))
-    assert "planned run: NumPy, as mutate(e = exp(x)): exp() runs on NumPy (and 1 more: explain() lists them)" in \
+    slow = frame >> mutate(e=tidy3a.conj(x)) >> mutate(f=e * 2) >> group_by(cells(z, 5.0)) \
+        >> summarise(s=sum(f), m=mean(tidy3a.conj(intensity + 1)))
+    assert "planned run: NumPy, as mutate(e = conj(x)): conj() runs on NumPy (and 1 more: explain() lists them)" in \
         repr(slow)  # f, made from e, is not a reason of its own
     assert str(slow.explain()).splitlines()[-3:] == [
-        "planned run: NumPy, as", "  mutate(e = exp(x)): exp() runs on NumPy", "  mean(log(intensity + 1)): log() runs on NumPy"]
+        "planned run: NumPy, as", "  mutate(e = conj(x)): conj() runs on NumPy",
+        "  mean(conj(intensity + 1)): conj() runs on NumPy"]
     sample = rings.preview(blocks=[1, 2])
     assert not any(note.startswith("ran:") for note in sample._notes)  # a sample is not the run
     rings.collect()
@@ -368,3 +369,21 @@ def test_positions_of_many_values_take_the_kernel_from_four_threads_where_order_
     frame = tidy(data, blocks={"time": 8}, threads=8) >> ordered
     frame.collect()
     assert len(called) == 12
+
+
+
+@pytest.mark.parametrize("threads", [1, 3])
+def test_islands_numpy_computes_give_numpys_bits(threads, monkeypatch):
+    """exp, log, a cube, // and % computed by NumPy for each block, one of a variable an earlier mutate made, which
+    NumPy makes again for it, and the kernel reading them: NumPy's bits (milestone 18)."""
+    values = cloud_values()
+    d, w = fields("d", "w")
+    verbs = (mutate(d=sqrt(x**2 + y**2 + z**2), w=tidy3a.exp(-d / 20)) >> filter(d <= 60)
+             >> filter(tidy3a.sin(x) > -0.5) >> group_by(ring)
+             >> summarise(weighted=sum(w * intensity), glow=mean(tidy3a.log(abs(intensity) + 1)), cube=max(z ** 3),
+                          steps=min(x // 7), rest=max(x % 5), k=n()))
+    frame = read_array(values, blocks=3_000, threads=threads, **OPTIONS) >> verbs
+    assert "with NumPy for exp(-d / 20), sin(x), log(abs(intensity) + 1), z ** 3, x // 7, x % 5" in repr(frame)
+    frame.collect()
+    assert frame._result._notes[-1] == "ran: 7 blocks in a compiled kernel"
+    same_bits(frame, numpy_run(monkeypatch, lambda: read_array(values, blocks=3_000, **OPTIONS) >> verbs))

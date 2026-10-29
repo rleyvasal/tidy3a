@@ -11,7 +11,7 @@ import sys
 import numpy as np
 import pytest
 
-from tidy3a import (all, any, bins, cells, exp, fields, filter, floor, formula, group_by, if_else, infer, max,
+from tidy3a import (all, any, bins, cells, conj, exp, fields, filter, floor, formula, group_by, if_else, infer, max,
                     mean, median, min, mutate, n, quantile, read_array, register_reduction, rounded, select, sqrt, std,
                     sum, summarise, tidy, var)
 import tidy3a.fused
@@ -65,14 +65,16 @@ COMPILED = {
     "a boolean key": lambda: grid() >> group_by(fields("on")) >> summarise(w=mean(fields("t"))),
     "no key": lambda: cloud() >> summarise(m=mean(x)),
 }
+ISLANDS = {  # computed by NumPy for each block, the kernel reading them (milestone 18)
+    "exp": (lambda: cloud() >> mutate(a=exp(x)) >> group_by(ring) >> summarise(m=mean(a)), "exp(x)"),
+    "a cube": (lambda: cloud() >> mutate(a=x ** 3) >> group_by(ring) >> summarise(m=mean(a)), "x ** 3"),
+    "floor division": (lambda: cloud() >> mutate(a=x // 2) >> group_by(ring) >> summarise(m=mean(a)), "x // 2"),
+    "a remainder": (lambda: cloud() >> filter(x % 2 == 0) >> group_by(ring) >> summarise(k=n()), "x % 2"),
+    "of a variable made before": (lambda: cloud() >> NEAR >> mutate(w=exp(-distance / 20)) >> group_by(ring)
+                                  >> summarise(m=sum(fields("w") * intensity)), "exp(-distance / 20)"),
+}
 NUMPY = {
-    "exp": (lambda: cloud() >> mutate(a=exp(x)) >> group_by(ring) >> summarise(m=mean(a)), "exp() runs on NumPy"),
-    "a cube": (lambda: cloud() >> mutate(a=x ** 3) >> group_by(ring) >> summarise(m=mean(a)),
-               "a power of 3 runs on NumPy"),
-    "floor division": (lambda: cloud() >> mutate(a=x // 2) >> group_by(ring) >> summarise(m=mean(a)),
-                       "// runs on NumPy"),
-    "a remainder": (lambda: cloud() >> filter(x % 2 == 0) >> group_by(ring) >> summarise(k=n()),
-                    "% runs on NumPy"),
+    "conj": (lambda: cloud() >> mutate(a=conj(x)) >> group_by(ring) >> summarise(m=mean(a)), "conj() runs on NumPy"),
     "a time key": (lambda: grid() >> group_by(fields("when")) >> summarise(w=mean(fields("t"))),
                    "when is times, which runs on NumPy"),
     "a text key": (lambda: grid() >> group_by(fields("name")) >> summarise(w=mean(fields("t"))),
@@ -88,6 +90,14 @@ NUMPY = {
 @pytest.mark.parametrize("name", list(COMPILED))
 def test_summaries_of_compilable_steps_compile(name):
     assert plan_for(COMPILED[name]()) == Fusion(), name
+
+
+@pytest.mark.parametrize("name", list(ISLANDS))
+def test_steps_numpy_computes_for_the_kernel_compile_as_islands(name):
+    make, island = ISLANDS[name]
+    fusion = plan_for(make())
+    assert fusion.compiled and fusion.islands == (island,), fusion
+    assert fusion.words() == f"a compiled kernel a block, with NumPy for {island}"
 
 
 @pytest.mark.parametrize("name", list(NUMPY))
@@ -119,7 +129,8 @@ def test_a_registered_reduction_runs_on_numpy(registry_kept):
 
 
 def test_every_reason_is_listed_once():
-    fusion = plan_for(cloud() >> mutate(a=exp(x), b=x // 2) >> group_by(ring) >> summarise(m=mean(a), s=sum(b)))
+    fusion = plan_for(cloud() >> mutate(a=conj(x)) >> mutate(b=conj(y)) >> group_by(ring)
+                      >> summarise(m=mean(a), s=sum(b)))
     assert len(fusion.reasons) == len(set(fusion.reasons)) >= 2
     assert "(and " in fusion.words() and "explain() lists them" in fusion.words()
     assert fusion.lines()[0] == "planned run: NumPy, as" and len(fusion.lines()) == len(fusion.reasons) + 1

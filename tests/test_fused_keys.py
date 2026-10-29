@@ -14,7 +14,7 @@ import pytest
 from tidy3a import bins, cells, fields, rounded, tidy
 from tidy3a.errors import GroupError
 from tidy3a.expr import Context, ValueKey, evaluate, resolve_value_key
-from tidy3a.fused.expressions import Compiler, Unsupported
+from tidy3a.fused.expressions import Compiler, Unsupported, read
 
 pytest.importorskip("numba")
 from tidy3a.fused.keys import compile_keys, groups, kernel_source, key_for  # noqa: E402
@@ -32,7 +32,7 @@ def place(key, data):
     compiler = Compiler("p")
     placed = key_for(key, context, compiler)
     kernel = compile_keys(kernel_source("place", [placed], compiler), "place")
-    arrays = [np.asarray(evaluate(ref, context).values) for ref, _ in compiler.inputs.values()]
+    arrays = [np.asarray(read(value, context).values) for value, _ in compiler.inputs.values()]
     size = len(data)
     ks, missing, ranges = np.empty(size, np.int64), np.zeros(size, bool), np.zeros((1, 3), np.int64)
     edges = [placed.constants["edges"]] if placed.how == "bins" else []

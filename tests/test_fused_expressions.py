@@ -12,10 +12,10 @@ import warnings
 import numpy as np
 import pytest
 
-from tidy3a import exp, fields, floor, formula, if_else, sqrt, tidy
+from tidy3a import conj, exp, fields, floor, formula, if_else, log, sin, sqrt, tidy
 from tidy3a.errors import MutateError
 from tidy3a.expr import Context, evaluate
-from tidy3a.fused.expressions import Compiler, Unsupported
+from tidy3a.fused.expressions import Compiler, Island, Unsupported, read
 
 pytest.importorskip("numba")
 from tidy3a.fused.kernels import compile_source, loop_source  # noqa: E402
@@ -34,6 +34,9 @@ EXPRESSIONS = {
     "x - 273.15": x - 273.15, "x * 2": x * 2, "1 / x": 1 / x, "2.5 + x": 2.5 + x, "x + True": x + True,
     "x * y - x / 3 + 1": x * y - x / 3 + 1,
     "formula": formula(r"\sqrt{x^2 + y^2 + z^2}"),
+    # islands: NumPy's own values, which the kernel reads (milestone 18)
+    "x ** 3": x ** 3, "exp(x)": exp(x), "log(x) + y": log(x) + y, "sin(x) * y": sin(x) * y, "x // y": x // y,
+    "x % y": x % y, "exp(x + y) - 1": exp(x + y) - 1, "if_else(x > 0, log(x), y)": if_else(x > 0, log(x), y),
 }
 TYPES = [("float32", "float32"), ("float64", "float64"), ("float32", "float64"), ("float64", "float32"),
          ("int32", "int64"), ("int64", "float32"), ("int32", "float64"), ("uint8", "int8"), ("bool", "bool"),
@@ -90,7 +93,7 @@ def test_every_operation_gives_numpys_bits(first, second):
         assert len(names) >= 10, names
         source = loop_source("kernel", compiler, sources)
         kernel = compile_source(source, "kernel")
-        arrays = [np.asarray(evaluate(ref, context).values) for ref, _ in compiler.inputs.values()]
+        arrays = [np.asarray(read(value, context).values) for value, _ in compiler.inputs.values()]
         outputs = [np.empty(len(want), source.dtype) for want, source in zip(wanted, sources)]
         kernel(len(wanted[0]), 1, *arrays, *outputs)
     wrong = [name for name, got, want in zip(names, outputs, wanted) if not same(got, want)]
@@ -108,25 +111,38 @@ def test_a_grids_values_and_its_positions_mix_as_numpy_mixes_them():
     sources = [compiler.compile(expression, context) for expression in expressions]
     assert [source.cells for source in sources] == [True, False, True, True, True]
     kernel = compile_source(loop_source("kernel", compiler, sources), "kernel")
-    arrays = [np.asarray(evaluate(ref, context).values) for ref, _ in compiler.inputs.values()]
+    arrays = [np.asarray(read(value, context).values) for value, _ in compiler.inputs.values()]
     outputs = [np.empty((200, 7) if source.cells else 200, source.dtype) for source in sources]
     kernel(200, 7, *arrays, *outputs)
     for expression, got in zip(expressions, outputs):
         assert same(got, np.asarray(evaluate(expression, context).values)), expression.text()
 
 
-@pytest.mark.parametrize("expression, why", [
-    (x ** 3, "a power of 3"), (exp(x), "exp() runs on NumPy"), (x // 2, "// runs on NumPy"),
-    (x % 2, "% runs on NumPy")])
-def test_what_does_not_agree_is_left_to_numpy(expression, why):
+@pytest.mark.parametrize("expression, island", [
+    (x ** 3, "x ** 3"), (exp(x) + y, "exp(x)"), (x // 2, "x // 2"), (x % y, "x % y"),
+    (exp(x + y) * 2, "exp(x + y)")])
+def test_what_does_not_agree_is_computed_by_numpy_as_an_island(expression, island):
+    """NumPy's own routines, which a kernel cannot match on every machine: NumPy computes the part, its operands too,
+    and the kernel reads it as an input."""
     context = Context(frame_of("float32", "float32"), verb="mutate", error=MutateError)
-    with pytest.raises(Unsupported, match=re.escape(why)):
-        Compiler("p").compile(expression, context)
+    compiler = Compiler("p")
+    with warnings.catch_warnings():  # exp of float32's largest value overflows, as NumPy says
+        warnings.simplefilter("ignore", RuntimeWarning)
+        compiler.compile(expression, context)
+    islands = [read.text() for read, _ in compiler.inputs.values() if isinstance(read, Island)]
+    assert islands == [island], islands
 
 
-def test_an_integer_to_the_power_one_half_is_left_to_numpy():
-    """NumPy takes the C library's pow for it, which need not be sqrt on every platform."""
+def test_what_no_kernel_reads_stays_on_numpy():
+    context = Context(frame_of("float32", "float32"), verb="mutate", error=MutateError)
+    with pytest.raises(Unsupported, match="conj"):
+        Compiler("p").compile(conj(x), context)
+
+
+def test_an_integer_to_the_power_one_half_is_an_island():
+    """NumPy takes the C library's pow for it, which need not be sqrt on every platform: NumPy computes it."""
     context = Context(frame_of("int32", "int32"), verb="mutate", error=MutateError)
-    with pytest.raises(Unsupported, match="a power of 0.5"):
-        Compiler("p").compile(x ** 0.5, context)
+    compiler = Compiler("p")
+    assert compiler.compile(x ** 0.5, context).dtype == np.float64
+    assert [read.text() for read, _ in compiler.inputs.values() if isinstance(read, Island)] == ["x ** 0.5"]
     assert Compiler("p").compile(x ** 2, context).dtype == np.int32

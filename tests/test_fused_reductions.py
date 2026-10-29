@@ -16,7 +16,7 @@ from labelarray import sums
 from tidy3a import fields, tidy
 from tidy3a.errors import SummariseError
 from tidy3a.expr import Context, Reduce, Ref, evaluate
-from tidy3a.fused.expressions import Compiler
+from tidy3a.fused.expressions import Compiler, read
 from tidy3a.reductions import REGISTRY
 
 pytest.importorskip("numba")
@@ -63,7 +63,7 @@ def run(op, dtype, na_rm, cells, seed):
     arrays = slot.arrays(count)
     kernel = compile_summary(summary_source("summary", list(compiler.inputs), [slot]), "summary")
     counts = np.zeros(count, np.int64)
-    inputs = [np.asarray(evaluate(ref, context).values) for ref, _ in compiler.inputs.values()]
+    inputs = [np.asarray(read(value, context).values) for value, _ in compiler.inputs.values()]
     kernel(positions, cells, codes.astype(np.intp), *inputs, *arrays.values(), counts)
     got = slot.pieces(arrays, counted_values(counts, slot, cells))
     with warnings.catch_warnings():

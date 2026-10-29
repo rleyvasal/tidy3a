@@ -29,6 +29,10 @@ ARITHMETIC = {"+", "-", "*", "/"}
 COMPARISONS = {"==", "!=", "<", "<=", ">", ">="}
 LOGIC = {"&", "|"}
 FUNCTIONS = {"sqrt", "abs", "floor", "if_else"}
+# Functions of one value at a time that NumPy computes in a way a kernel cannot match on every machine (its own vector
+# routines, chosen by the CPU), so NumPy computes them for each block, as islands the kernel reads (milestone 18).
+ISLANDS = {"exp", "log", "log2", "log10", "sin", "cos", "tan", "arcsin", "arccos", "arctan", "arctan2", "sinh", "cosh",
+           "tanh", "ceil", "sign", "real", "imag", "angle", "is_in"}
 
 
 class Unsupported(Exception):
@@ -38,6 +42,45 @@ class Unsupported(Exception):
 class Inherited(Unsupported):
     """A step reading a variable an earlier ``mutate`` made in a way that runs on NumPy, whose reason was given
     there."""
+
+
+# What NumPy applies to an island's operands, which a kernel computes (milestone 18): its own routines for these.
+APPLIED = {**{name: getattr(np, name) for name in ("exp", "log", "log2", "log10", "sin", "cos", "tan", "arcsin",
+                                                   "arccos", "arctan", "arctan2", "sinh", "cosh", "tanh", "ceil",
+                                                   "sign", "real", "imag", "angle")},
+           "//": np.floor_divide, "%": np.remainder, "**": np.power}
+
+
+@dataclass(frozen=True, eq=False)
+class Island:
+    """A part of an expression NumPy computes for each block (milestone 18), its values read by the kernel as an
+    input. Where its operands compile (*operands*), a kernel computes them, with NumPy's bits, as IEEE arithmetic
+    rounds the same everywhere, and NumPy applies only its function (``APPLIED``) to them; else NumPy evaluates
+    *node* in the frame after the ``mutate`` steps it reads (*steps*, run by NumPy in their order)."""
+
+    node: Any
+    steps: tuple
+    operands: tuple = ()  # each operand's source, or a Python number as it stands
+    function: Any = None
+    kernel: Any = None  # the operands' kernel, compiled by the driver: (function, the inputs it reads)
+
+    def text(self) -> str:
+        return self.node.text()
+
+
+def read(value: Ref | Island, context: Context) -> Any:
+    """What a kernel's input holds on the block of *context*: a variable's values, or an island's, computed by NumPy
+    after the ``mutate`` steps it reads. (An island whose operands compile is computed by the driver, which has the
+    kernels' other inputs; here, as for one that does not, NumPy evaluates it whole, the same bits.)"""
+    if not isinstance(value, Island):
+        return evaluate(value, context)
+    frame = context.frame
+    if value.steps:
+        from tidy3a.verbs import mutate
+
+        for step in value.steps:
+            frame = frame >> mutate(step)
+    return evaluate(value.node, Context(frame, verb=context.verb, error=context.error, grouped=False))
 
 
 @dataclass(frozen=True)
@@ -62,14 +105,17 @@ class Compiler:
     """
 
     axis: Hashable
-    inputs: dict[str, tuple[Ref, bool]] = field(default_factory=dict)  # local name: (reference, per value)
-    definitions: dict[Hashable, tuple[Any, Context, dict] | None] = field(default_factory=dict)  # None: refused
+    inputs: dict[str, tuple[Ref | Island, bool]] = field(default_factory=dict)  # local name: (what it reads, per value)
+    # name: (expression, frame before it, the definitions before it, its mutate step, its place), or None: refused
+    definitions: dict[Hashable, tuple[Any, Context, dict, Any, int] | None] = field(default_factory=dict)
     cells: tuple | None = None  # the other axes of every variable read with values per position, and their sizes
 
-    def define(self, name: Hashable, expression: Any, context: Context) -> None:
+    def define(self, name: Hashable, expression: Any, context: Context, step: Any = None) -> None:
         """``mutate(name = expression)``, with *context* the frame before it: later steps compile *expression*, with
-        the definitions as they stood before it, so ``x = x * 2`` reads the earlier ``x``."""
-        self.definitions = {**self.definitions, name: (expression, context, self.definitions)}
+        the definitions as they stood before it, so ``x = x * 2`` reads the earlier ``x``; *step*, the mutate's
+        assignment, is what an island reading *name* has NumPy run first."""
+        place = sum(1 for value in self.definitions.values() if value is not None)
+        self.definitions = {**self.definitions, name: (expression, context, self.definitions, step, place)}
 
     def refuse(self, name: Hashable) -> None:
         """``mutate(name = ...)`` runs on NumPy: a later step reading *name* is refused as ``Inherited``."""
@@ -84,9 +130,15 @@ class Compiler:
         if isinstance(node, Ref):
             return self._ref(node, context)
         if isinstance(node, Call) and node.name not in FUNCTIONS:  # refused before its values are computed
+            if node.name in ISLANDS:
+                return self._island(node, context)
             raise Unsupported(f"{node.name}() runs on NumPy")
+        if isinstance(node, BinOp) and node.symbol in ("//", "%"):
+            return self._island(node, context)
         if isinstance(node, BinOp) and node.symbol not in ARITHMETIC | COMPARISONS | LOGIC | {"**"}:
             raise Unsupported(f"{node.text()}: {node.symbol} runs on NumPy")
+        if isinstance(node, BinOp) and node.symbol == "**" and not _exact_power(node, context):
+            return self._island(node, context)
         result = value_type(evaluate(node, context))
         if result.kind not in "biuf" or result == np.float16:  # Numba has no half precision, and these are numbers
             raise Unsupported(f"{node.text()} gives {kind_words(result)}, which runs on NumPy")
@@ -106,13 +158,25 @@ class Compiler:
         if node.kind != "label" and node.name in self.definitions:  # made by an earlier mutate: its expression
             if self.definitions[node.name] is None:
                 raise Inherited(f"{node.text()} is made on NumPy")
-            expression, defined, earlier = self.definitions[node.name]
+            expression, defined, earlier, _, _ = self.definitions[node.name]
             now, self.definitions = self.definitions, earlier
             try:
                 source = self.compile(expression, defined)
             finally:
                 self.definitions = now
             return Source(_as(cast(source, dtype), dtype), dtype, source.cells)
+        cells = self._layout(node, value)
+        for local, (ref, _) in self.inputs.items():
+            if isinstance(ref, Ref) and ref.name == node.name and ref.kind == node.kind:
+                break
+        else:
+            local = f"a{len(self.inputs)}"
+            self.inputs[local] = (node, cells)
+        return Source(f"{local}[i, j]" if cells else f"{local}[i]", dtype, cells)
+
+    def _layout(self, node: Any, value: Any) -> bool:
+        """Whether *value*, which a kernel reads, has values per position (a grid's), checking that it varies along
+        the blocked axis, first, and lies as the values read before it."""
         dims = tuple(getattr(value, "dims", ()))
         cells = any(dim != self.axis for dim in dims)
         if self.axis not in dims:
@@ -124,13 +188,80 @@ class Compiler:
             if self.cells is not None and layout != self.cells:
                 raise Unsupported(f"{node.text()} lies over other axes than the values before it, which runs on NumPy")
             self.cells = layout
-        for local, (ref, _) in self.inputs.items():
-            if ref.name == node.name and ref.kind == node.kind:
+        return cells
+
+    def _island(self, node: Any, context: Context) -> Source:
+        """*node* computed by NumPy for each block (``Island``), the kernel reading its values: the same island once,
+        however often it is read."""
+        value = evaluate(node, context)
+        dtype = value_type(value)
+        if dtype.kind not in "biuf" or dtype == np.float16:
+            raise Unsupported(f"{node.text()} gives {kind_words(dtype)}, which runs on NumPy")
+        cells = self._layout(node, value)
+        steps = self._steps(node, context)
+        operands, function = self._operands(node, context)
+        from tidy3a.identity import structure
+
+        key = (structure(node), tuple(id(step) for step in steps))
+        for local, (read, _) in self.inputs.items():
+            if isinstance(read, Island) and (structure(read.node), tuple(id(s) for s in read.steps)) == key:
                 break
         else:
             local = f"a{len(self.inputs)}"
-            self.inputs[local] = (node, cells)
+            self.inputs[local] = (Island(node, steps, operands, function), cells)
         return Source(f"{local}[i, j]" if cells else f"{local}[i]", dtype, cells)
+
+    def _operands(self, node: Any, context: Context) -> tuple[tuple, Any]:
+        """*node*'s operands compiled, for a kernel to compute and NumPy to apply its function to, and that function;
+        or none, where an operand does not compile (NumPy then evaluates the whole island)."""
+        if isinstance(node, Call):
+            key, children = node.name, list(node.args)
+            if node.options:
+                return (), None
+        elif isinstance(node, BinOp):
+            key, children = node.symbol, [node.left, node.right]
+        else:
+            return (), None
+        function = APPLIED.get(key)
+        if function is None:
+            return (), None
+        saved = dict(self.inputs), self.cells
+        operands: list = []
+        try:
+            for child in children:
+                if isinstance(child, Literal) and isinstance(child.value, (bool, int, float, np.number)):
+                    operands.append(child.value)  # a Python number stays one, as NumPy takes it beside an array
+                else:
+                    operands.append(self.compile(child, context))
+        except Unsupported:
+            self.inputs, self.cells = saved[0], saved[1]
+            return (), None
+        if not any(isinstance(operand, Source) for operand in operands):
+            return (), None
+        return tuple(operands), function
+
+    def _steps(self, node: Any, context: Context) -> tuple:
+        """The ``mutate`` steps *node* reads, directly or through the definitions it reads, in their order."""
+        found: dict[int, Any] = {}
+
+        def visit(expression: Any, definitions: dict, context: Context) -> None:
+            lower = getattr(expression, "lower", None)
+            if lower is not None:  # a formula: its names are in what it lowers to on the data
+                expression = lower(context)[0]
+            if isinstance(expression, Ref):
+                if expression.kind != "label" and definitions.get(expression.name) is not None:
+                    inner, defined, earlier, step, place = definitions[expression.name]
+                    if place not in found:
+                        found[place] = step
+                        visit(inner, earlier, defined)
+                return
+            for child in getattr(expression, "children", lambda: ())():
+                visit(child, definitions, context)
+
+        visit(node, self.definitions, context)
+        if any(step is None for step in found.values()):
+            raise Unsupported(f"{node.text()} reads a variable whose step cannot be run again, which runs on NumPy")
+        return tuple(found[place] for place in sorted(found))
 
     def _binary(self, node: BinOp, context: Context, result: np.dtype) -> Source:
         left, right = self.compile(node.left, context), self.compile(node.right, context)
@@ -177,6 +308,16 @@ class Compiler:
             text = f"({cast(true, result)} if {cast(condition, np.dtype(bool))} else {cast(false, result)})"
             return Source(_as(text, result), result, cells)
         raise Unsupported(f"{node.name}() runs on NumPy")
+
+
+def _exact_power(node: BinOp, context: Context) -> bool:
+    """Whether ``_power`` takes *node*: an exponent NumPy computes exactly for its base's type."""
+    value = node.right.value if isinstance(node.right, Literal) else None
+    if not isinstance(value, (int, float, np.integer, np.floating)) or isinstance(value, bool):
+        return False
+    base = value_type(evaluate(node.left, context))
+    exact = {2.0, 1.0} if base.kind in "iu" else {2.0, 0.5, -1.0, 1.0}
+    return float(value) in exact
 
 
 def _power(base: Source, exponent: Any, result: np.dtype, cells: bool) -> Source:
