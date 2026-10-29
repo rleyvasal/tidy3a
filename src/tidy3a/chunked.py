@@ -95,7 +95,8 @@ from tidy3a.plan import Record, Snapshot, Step, _variable, snapshot
 from tidy3a.reductions import REGISTRY, WHOLE_AXIS, pass_budget
 
 JOINS = ("left_join", "inner_join", "full_join")  # with data in memory, a block at a time (milestone 19)
-ROW_WISE = ("select", "filter", "mutate", *JOINS)
+SLICES = ("slice", "slice_head", "slice_tail")
+ROW_WISE = ("select", "filter", "mutate", *JOINS, "slice_axes")  # slice_axes: a slice of other axes (milestone 19)
 
 
 # ── Sources ─────────────────────────────────────────────────────────────────
@@ -288,6 +289,7 @@ class Blocks:
     memory: int | None = None  # the budget in bytes an "auto" size is chosen for (plan milestone 14)
     parts: tuple[tuple[int, int], ...] | None = None  # the storage's chunks an "auto" size's blocks are made of
     tail: bool = False  # a run ends with a block of no positions, a one-pass full join's own (milestone 19)
+    positions: bool = False  # rows joined keep the blocks' positions as labels: a slice's own blocks (milestone 19)
 
     @property
     def axis(self) -> str:
@@ -457,6 +459,13 @@ class ChunkedFrame(TidyArray):
         if operation == "write" and not self._summarised:  # rows written as the blocks arrive, never all in memory
             return _write(self, verb)
         blocks = self._blocks
+        if operation in SLICES and not self._summarised:
+            if blocks.axis in _slice_axes(verb):  # the blocked axis: the blocks holding what it keeps, in memory
+                return _sliced(self, verb)
+            from tidy3a.verbs import Verb
+
+            verb = Verb(verb.text, verb._apply, operation="slice_axes", arguments=(operation, verb._arguments))
+            operation = "slice_axes"  # other axes: a step each block runs, as every block holds them all
         if operation in JOINS and not self._summarised:
             whole = _whole_join(self, verb)
             if whole is None and operation == "full_join" and _along(self, verb):
@@ -639,6 +648,89 @@ def _refuse_unblocked(verb: Any) -> None:
                 raise BlockError(f"{name} = {node.text()}: {node.op}() cannot be combined across blocks; "
                                  f"{', '.join(REGISTRY)} can (register_reduction() adds one, with block steps); "
                                  f"{WHOLE_AXIS}")
+
+
+def _slice_axes(verb: Any) -> dict:
+    """The axes a slice names, with what it keeps of each."""
+    return verb._arguments[1] if verb._operation == "slice" else verb._arguments
+
+
+def _sliced(frame: ChunkedFrame, verb: Any) -> TidyArray:
+    """A slice of the blocked axis, in memory, from only the blocks holding what it keeps (milestone 19). Where the
+    positions are the source's, nothing before the slice removing any, those blocks are known before reading; where a
+    filter or an inner join decides them, blocks are read from the start (from the end for ``slice_tail``), one,
+    then more at a time, until enough rows are kept, as Spark's ``LIMIT`` scales up the partitions it reads. A slice
+    excluding positions, or after a one-pass full join, reads every block."""
+    import bisect
+
+    from tidy3a import verbs
+
+    operation, axes = verb._operation, _slice_axes(verb)
+    layout = frame._layout()
+    axis, every, size = layout.axis, layout.every, layout.size
+    spec = axes[axis]
+    if operation == "slice":
+        if isinstance(spec, (int, np.integer)) and not isinstance(spec, bool):
+            wanted = [int(spec)]
+        elif isinstance(spec, (list, tuple, range, np.ndarray)):
+            wanted = [int(position) for position in spec]
+        else:
+            return verb(frame._run())  # the verb's own message
+        if not wanted or any(position <= 0 for position in wanted):  # excluded, or refused: every block
+            return verb(frame._run())
+    elif isinstance(spec, bool) or not isinstance(spec, (int, np.integer)) or spec < 0:
+        return verb(frame._run())  # the verb's own message
+    if layout.tail:
+        return verb(frame._run())
+    known = not any(step._operation in ("filter", "inner_join") for step in frame._steps)
+    starts = [start for start, _ in every]
+    if known:
+        if operation == "slice_head":
+            index = list(range(min(int(spec), size)))
+        elif operation == "slice_tail":
+            index = list(range(size - min(int(spec), size), size))
+        else:
+            index = [position - 1 for position in wanted if position <= size]
+        if not index:  # nothing kept: the slice of the block of no positions, nothing read
+            return verb._apply(frame)
+        chosen = sorted({bisect.bisect_right(starts, position) - 1 for position in index})
+        rows = _rows_of(frame, layout, chosen)
+        offsets, at = {}, 0
+        for number in chosen:
+            offsets[number] = at
+            at += every[number][1] - every[number][0]
+        relative = [offsets[number] + position - every[number][0]
+                    for position in index for number in [bisect.bisect_right(starts, position) - 1]]
+        kept = rows._evolve(rows._backend.keep(rows._data, axis, relative))
+        rest = {**axes, axis: list(range(1, len(relative) + 1)) if operation == "slice" else len(relative)}
+        again = verbs.slice(drop=verb._arguments[0], **rest) if operation == "slice" else \
+            getattr(verbs, operation)(**rest)
+        return again(kept)
+    need = int(spec) if operation != "slice" else max(wanted)
+    order = list(range(len(every)))
+    if operation == "slice_tail":
+        order.reverse()
+    read: list[int] = []
+    parts: list[TidyArray] = []
+    held = 0
+    while order and held < need:  # one block, then more at a time: twice what was read, or a block a thread
+        take = 1 if not read else max(layout.threads, len(read))
+        batch, order = order[:take], order[take:]
+        part = _rows_of(frame, layout, sorted(batch))
+        held += part._backend.sizes(part._data).get(axis, 0)
+        read += batch
+        parts = [part, *parts] if operation == "slice_tail" else [*parts, part]
+    backend = frame._backend
+    rows = parts[0]._evolve(backend.join_along([part._data for part in parts], axis)) if len(parts) > 1 else parts[0]
+    return verb(rows)
+
+
+def _rows_of(frame: ChunkedFrame, layout: Blocks, chosen: Sequence[int]) -> TidyArray:
+    """The rows *frame*'s verbs keep from the blocks *chosen*, in memory, the blocks' positions their labels."""
+    sample = frame._wrap(frame, dataclasses.replace(layout, chosen=tuple(chosen), positions=True), frame._steps,
+                         frame._plan, frame._reads)
+    _scan([sample])
+    return sample._result
 
 
 def _whole_join(frame: ChunkedFrame, verb: Any) -> str | None:
@@ -1662,10 +1754,10 @@ def _joined(frame: ChunkedFrame, parts: Sequence[Any]) -> TidyArray:
     """The blocks' rows after the row-wise verbs, joined along the blocked axis, in memory."""
     blocks, backend, axis = frame._blocks, frame._backend, frame._blocks.axis
     data = backend.join_along(parts, axis)
-    if blocks.tail:  # a one-pass full join's tail came last: the labels in the order the whole join gives, sorted
+    if blocks.tail and not blocks.positions:  # a one-pass full join's tail came last: the whole join's order
         order = np.argsort(np.asarray(backend.axis_labels(data, axis).values), kind="stable")
         data = backend.isel(data, {axis: order})
-    if not blocks.labelled and not any(step._operation == "filter" for step in frame._steps):
+    if not blocks.labelled and not blocks.positions and not any(step._operation == "filter" for step in frame._steps):
         data = backend.unlabel(data, axis)  # the blocks' positions served the verbs; in memory the axis has no labels
     size = backend.sizes(data).get(axis, 0)
     notes = [note for note in frame._notes if size == 0 or "(all removed by" not in note]
