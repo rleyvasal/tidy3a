@@ -290,7 +290,8 @@ def _positions_first(value: Any, axis: Any) -> np.ndarray:
         return np.ascontiguousarray(values).reshape(-1)
     if values.ndim == 1:
         return values  # a field of a record array stays a view: the kernel reads it in place
-    return np.ascontiguousarray(np.moveaxis(values, dims.index(axis), 0).reshape(values.shape[dims.index(axis)], -1))
+    moved = np.moveaxis(values, dims.index(axis), 0)
+    return np.ascontiguousarray(moved.reshape(moved.shape[0], math.prod(moved.shape[1:])))  # no -1: a block may be empty
 
 
 def build(frame: Any) -> Fused | None:

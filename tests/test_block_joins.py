@@ -52,13 +52,72 @@ def test_a_join_with_data_in_memory_runs_on_each_block(name, threads):
     same(frame, tidy(GRID) >> JOINS[name]())
 
 
-def test_a_full_join_along_the_blocked_axis_runs_on_the_whole_axis_and_says_why():
-    verbs = full_join(INFO) >> group_by(month) >> summarise(k=n())
-    frame = tidy(GRID, blocks={"time": 25}) >> full_join(INFO)
+def along(first, last, seed=7):
+    """A value and a count per time step, for some of the grid's steps and some it lacks."""
+    rng = np.random.default_rng(seed)
+    size = last - first
+    return xr.Dataset({"quality": ("time", rng.random(size).astype(np.float32)),
+                       "visits": ("time", rng.integers(0, 9, size))}, coords={"time": np.arange(first, last)})
+
+
+FULL = {
+    "rows": lambda other: full_join(other),
+    "rows, then a mutate": lambda other: full_join(other) >> mutate(q=quality * 2),
+    "a summary by month, the missing month kept": lambda other: full_join(other) >> group_by(month, dropna=False)
+    >> summarise(k=n(), m=mean(t, na_rm=True), v=sum(fields("visits"))),
+}
+
+
+@pytest.mark.parametrize("threads", [1, 2])
+@pytest.mark.parametrize("span", [(60, 160), (10, 50), (200, 230)],
+                         ids=["overlapping", "inside the grid's steps", "beyond them"])
+@pytest.mark.parametrize("name", list(FULL))
+def test_a_full_join_along_the_blocked_axis_runs_in_one_pass(name, span, threads):
+    """Each block full-joins the other data at its own labels, cast to the types the whole join gives (here the
+    month and the visits as floats, where gaps are), and a last block of no positions joins the labels no block holds:
+    still read in blocks, memory's bits, types, and order (plan milestone 19, after Spark's broadcast nested-loop
+    join)."""
+    other = along(*span)
+    frame = tidy(GRID, blocks={"time": 25}, threads=threads) >> FULL[name](other)
+    assert isinstance(frame, ChunkedFrame)
+    got, want = frame.collect(), (tidy(GRID) >> FULL[name](other)).collect()
+    assert {key: value.dtype for key, value in got.variables.items()} == \
+        {key: value.dtype for key, value in want.variables.items()}
+    same(frame, tidy(GRID) >> FULL[name](other))
+
+
+def test_times_and_small_integers_take_the_whole_joins_types():
+    """int8 to float32, times in days to seconds: the backend's own filling of gaps, which the blocks follow."""
+    days = (np.datetime64("2026-01-01") + np.arange(STEPS).astype("timedelta64[D]"))
+    data = GRID.assign(small=("time", (np.arange(STEPS) % 7).astype(np.int8)), day=("time", days))
+    other = along(100, 140)
+    frame = tidy(data, blocks={"time": 30}) >> full_join(other)
+    same(frame, tidy(data) >> full_join(other))
+    assert frame.collect()["small"].dtype == np.float32
+
+
+def test_a_scan_adds_the_last_block_for_every_frame():
+    from tidy3a import scan
+
+    other = along(60, 160)
+    blocks = tidy(GRID, blocks={"time": 25})
+    joined = blocks >> full_join(other) >> group_by(month, dropna=False) >> summarise(k=n())
+    plain = blocks >> group_by(month) >> summarise(m=mean(t), k=n())
+    got_joined, got_plain = scan(joined, plain)
+    same(got_joined, tidy(GRID) >> full_join(other) >> group_by(month, dropna=False) >> summarise(k=n()))
+    same(got_plain, tidy(GRID) >> group_by(month) >> summarise(m=mean(t), k=n()))
+
+
+@pytest.mark.parametrize("verbs, why", [
+    (lambda other: filter(month > 3) >> full_join(other), "after a filter or an inner join"),
+    (lambda other: full_join(other.rename({"quality": "t"})), "hold variables of the same names"),
+], ids=["after a filter", "names in common"])
+def test_a_full_join_the_blocks_cannot_make_alone_runs_on_the_whole_axis_and_says_why(verbs, why):
+    other = along(60, 160)
+    frame = tidy(GRID, blocks={"time": 25}) >> verbs(other)
     assert not isinstance(frame, ChunkedFrame)
-    assert any("joined on the whole axis, as a full join along time adds the other data's labels no block holds"
-               in note for note in frame._notes)
-    same(frame >> group_by(month) >> summarise(k=n()), tidy(GRID) >> verbs)
+    assert any(why in note for note in frame._notes), frame._notes
+    same(frame, tidy(GRID) >> verbs(other))
 
 
 def test_a_join_of_two_frames_read_in_blocks_runs_on_the_whole_axis():

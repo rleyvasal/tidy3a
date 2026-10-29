@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+from contextvars import ContextVar
 import math
 import warnings
 from collections.abc import Callable, Hashable, Iterator, Mapping, Sequence
@@ -123,6 +124,10 @@ class Source:
         """The storage's chunk boundaries along the axis for the variables *names*, and whether a block within a chunk
         computes the whole chunk (Dask's); None for storage with none (plan milestone 14, step 3)."""
         return None
+
+    def labels(self) -> np.ndarray:
+        """The axis's labels, without reading the data: its positions, as the blocks are labelled with them."""
+        return np.arange(self.size)
 
 
 class FileSource(Source):
@@ -209,6 +214,12 @@ class DatasetSource(Source):
             kept = [min(along, key=lambda name: data[name].size)] if along else []
         return data[kept] if kept else data
 
+    def labels(self) -> np.ndarray:
+        """The axis's labels, its index, which xarray holds in memory however lazy the data; else its positions."""
+        if self.axis in self.data.coords:
+            return np.asarray(self.data[self.axis].values)
+        return np.arange(self.size)
+
     def stored(self, names: frozenset | None) -> tuple[list[tuple[int, int]], bool] | None:
         """The Dask chunks of the variables *names* along the axis; else the chunks a file stores them in (xarray's
         ``preferred_chunks``, for NetCDF4 and Zarr), every variable's whole at once where their sizes differ."""
@@ -276,6 +287,7 @@ class Blocks:
     chosen: tuple[int, ...] | None = None  # a sample's blocks (``preview``), counted from 0; else every block
     memory: int | None = None  # the budget in bytes an "auto" size is chosen for (plan milestone 14)
     parts: tuple[tuple[int, int], ...] | None = None  # the storage's chunks an "auto" size's blocks are made of
+    tail: bool = False  # a run ends with a block of no positions, a one-pass full join's own (milestone 19)
 
     @property
     def axis(self) -> str:
@@ -301,7 +313,9 @@ class Blocks:
     def spans(self) -> list[tuple[int, int]]:
         """The spans a run reads: every block's, or a sample's."""
         every = self.every
-        return every if self.chosen is None else [every[number] for number in self.chosen]
+        if self.chosen is not None:
+            return [every[number] for number in self.chosen]
+        return [*every, (self.size, self.size)] if self.tail else every
 
     def sized(self, frames: Sequence[ChunkedFrame]) -> Blocks:
         """These blocks for *frames*, which run together: with ``blocks="auto"``, the most positions whose blocks, as
@@ -442,8 +456,15 @@ class ChunkedFrame(TidyArray):
         operation = getattr(verb, "_operation", None)
         if operation == "write" and not self._summarised:  # rows written as the blocks arrive, never all in memory
             return _write(self, verb)
+        blocks = self._blocks
         if operation in JOINS and not self._summarised:
             whole = _whole_join(self, verb)
+            if whole is None and operation == "full_join" and _along(self, verb):
+                one = _one_pass(self, verb)
+                if isinstance(one, str):
+                    whole = one
+                else:
+                    verb, blocks = one, dataclasses.replace(blocks, tail=True)
             if whole is not None:  # the blocks' rows in memory, joined there, the result saying why
                 result = verb(self._run())
                 return result._evolve(notes=[f"{verb.text}: joined on the whole axis, as {whole}"])
@@ -459,7 +480,7 @@ class ChunkedFrame(TidyArray):
         steps = (*self._steps, verb)
         plan = _check(self, verb, result, steps)
         reads = None if self._reads is None or EVERYTHING in read else self._reads | frozenset(read)
-        frame = self._wrap(result, self._blocks, steps, plan, reads)
+        frame = self._wrap(result, blocks, steps, plan, reads)
         layout = frame._layout()  # a size chosen now, so a verb that leaves no block within the budget is refused here
         record = frame._record
         last = record.steps[-1]
@@ -628,12 +649,84 @@ def _whole_join(frame: ChunkedFrame, verb: Any) -> str | None:
     other = verb._arguments[0]
     if isinstance(other, ChunkedFrame):
         return "the other data is read in blocks too"
-    axis = frame._blocks.axis
-    if verb._operation == "full_join":
-        right = other if isinstance(other, TidyArray) else tidy(other)
-        if right._backend.has_axis(right._data, axis):
-            return f"a full join along {axis} adds the other data's labels no block holds"
     return None
+
+
+def _along(frame: ChunkedFrame, verb: Any) -> bool:
+    """Whether a join's other data has the blocked axis."""
+    from tidy3a.frame import tidy
+
+    other = verb._arguments[0]
+    right = other if isinstance(other, TidyArray) else tidy(other)
+    return right._backend.has_axis(right._data, frame._blocks.axis)
+
+
+def _one_pass(frame: ChunkedFrame, verb: Any) -> Any:
+    """A full join along the blocked axis in one pass (milestone 19, after Spark's broadcast nested-loop join), or why
+    not: each block full-joins the part of the other data at its own labels, so the other axes widen as in memory,
+    its variables cast to the types the whole join gives them (``_promoted``); and a last block of no positions, the
+    run's tail (``Blocks.tail``), joins the other data's labels no block holds. The blocked axis's labels are the
+    source's, known before anything is read; a filter or an inner join before it would make them the data's."""
+    from tidy3a.frame import tidy
+    from tidy3a.verbs import Verb, full_join
+
+    other, suffix, tolerance = verb._arguments
+    axis, backend = frame._blocks.axis, frame._backend
+    if tolerance is not None:
+        return "a full join along the blocked axis matches labels exactly"
+    if any(step._operation in ("filter", "inner_join") for step in frame._steps):
+        return f"a full join along {axis} after a filter or an inner join keeps labels only the data decides"
+    right = other if isinstance(other, TidyArray) else tidy(other, backend=backend.name)
+    if right._backend is not backend:
+        return "the other data is on another backend"
+    ours, theirs = backend.variable_names(frame._data), right._backend.variable_names(right._data)
+    if set(ours) & set(theirs):
+        return "the two hold variables of the same names"
+    labels = frame._blocks.source.labels()
+    held = np.asarray(right._backend.axis_labels(right._data, axis).values)
+    unheld = ~np.isin(held, labels)  # the other data's labels no block holds: the tail's
+    missing = labels[~np.isin(labels, held)]  # the data's labels the other data lacks
+    target = _promoted(frame, right, axis, bool(unheld.any()), missing[:1])
+
+    def placed(block: TidyArray) -> TidyArray:
+        mine = backend.axis_labels(block._data, axis).values
+        chosen = np.flatnonzero(unheld) if _TAIL.get() else np.flatnonzero(np.isin(held, np.asarray(mine)))
+        part = right._evolve(right._backend.isel(right._data, {axis: chosen}))
+        joined = full_join(part, suffix=suffix)._apply(block)
+        data = joined._data
+        for name, dtype in target.items():
+            if not backend.has_variable(data, name):  # a block holds only the variables a run reads
+                continue
+            value = backend.variable(data, name)
+            if value.dtype != dtype:  # rebuilt in the type the whole join gives it, on its axes and their labels
+                dims = tuple(value.dims)
+                coords = {dim: backend.axis_labels(data, dim).values for dim in dims if backend.has_labels(data, dim)}
+                cast = backend.array(np.asarray(value.values).astype(dtype), dims=dims, coords=coords, name=name)
+                data = backend.assign(data, name, cast)
+        return joined._evolve(data)
+
+    return Verb(verb.text, placed, operation="full_join", arguments=verb._arguments)
+
+
+def _promoted(frame: ChunkedFrame, right: TidyArray, axis: Any, unheld: bool, missing: np.ndarray) -> dict:
+    """The types the whole full join gives each variable, as the backend fills its gaps: the data's where the other
+    data holds labels no block does (the empty block joined with the other data shows them), the other data's where
+    the data holds labels it lacks (it joined with one such label shows them)."""
+    from tidy3a.verbs import full_join
+
+    backend = frame._backend
+    target: dict = {}
+    if unheld:
+        probe = full_join(right)._apply(frame)._data
+        for name in backend.variable_names(frame._data):
+            target[name] = backend.variable(probe, name).dtype
+    if len(missing):
+        label = backend.summary({"_": backend.array(np.zeros(1), dims=(axis,), coords={axis: missing}, name="_")},
+                                {}, {})
+        probe = backend.merge(label, right._data, "outer")
+        for name in right._backend.variable_names(right._data):
+            target[name] = backend.variable(probe, name).dtype
+    return target
 
 
 def _check(frame: ChunkedFrame, verb: Any, result: TidyArray, steps: Sequence[Any]) -> _Plan | None:
@@ -982,7 +1075,8 @@ def scan(*frames: Any, writes: Sequence[tuple[Any, Any]] = ()) -> tuple[TidyArra
                              "after its result: summary >> write(path)")
     pending = {id(frame): frame for frame in frames if frame._result is None}  # the same frame twice runs once
     writers = [(frame, _writer(frame, path, False)) for frame, path in writes]
-    if len({id(frame._blocks) for frame in (*pending.values(), *(frame for frame, _ in writers))}) > 1:
+    # one source: frames from one read_array() or tidy() call share it, a one-pass full join's tail aside
+    if len({id(frame._blocks.source) for frame in (*pending.values(), *(frame for frame, _ in writers))}) > 1:
         raise BlockError("scan() runs one source in one pass; these frames come from different read_array() or "
                          "tidy() calls, so scan each call's frames together")
     if pending or writers:
@@ -1158,15 +1252,24 @@ def _naming(blocks: Blocks, span: tuple[int, int]) -> Iterator[None]:
     """An error raised while a block runs, of its own class, with the block named after its message: a value the
     verb was checked on (the empty block has none) can fail any block, and the verb's message alone does not say
     where."""
+    token = _TAIL.set(blocks.tail and span == (blocks.size, blocks.size))
     try:
         yield
     except (TidyError, LabelArrayError) as error:
         spans = blocks.every
-        where = (f"in block {spans.index(span) + 1:,} of {len(spans):,} "
-                 f"(positions {span[0] + 1:,}–{span[1]:,} on {blocks.axis})")
+        if span not in spans:  # a one-pass full join's own block
+            where = f"in the other data's labels no block holds (on {blocks.axis})"
+        else:
+            where = (f"in block {spans.index(span) + 1:,} of {len(spans):,} "
+                     f"(positions {span[0] + 1:,}–{span[1]:,} on {blocks.axis})")
         named = copy.copy(error)
         named.args = (f"{error.args[0]}\n  {where}" if error.args else where, *error.args[1:])
         raise named.with_traceback(error.__traceback__) from None
+    finally:
+        _TAIL.reset(token)
+
+
+_TAIL: ContextVar[bool] = ContextVar("tidy3a_tail", default=False)  # the block running is a full join's own
 
 
 def _in_order(pool: ThreadPoolExecutor, work: Callable[[Any], Any], items: Sequence[Any]):
@@ -1207,6 +1310,8 @@ def _scan(frames: Sequence[ChunkedFrame], writers: Sequence[tuple[ChunkedFrame, 
 def _scan_once(frames: Sequence[ChunkedFrame], writers: Sequence[tuple[ChunkedFrame, Any]]) -> None:
     every = [*frames, *(frame for frame, _ in writers)]
     blocks = every[0]._layout() if len(every) == 1 else every[0]._blocks.sized(every)
+    if any(frame._blocks.tail for frame in every) and not blocks.tail:  # a one-pass full join's tail, for every frame
+        blocks = dataclasses.replace(blocks, tail=True)
     leaves = [_Leaf(frame, _Table(frame._plan) if frame._summarised else None, []) for frame in frames]
     leaves += [_Leaf(frame, None, [], writer) for frame, writer in writers]
     compiled = {id(leaf): _fused(leaf.frame) for leaf in leaves if leaf.table is not None}
@@ -1557,6 +1662,9 @@ def _joined(frame: ChunkedFrame, parts: Sequence[Any]) -> TidyArray:
     """The blocks' rows after the row-wise verbs, joined along the blocked axis, in memory."""
     blocks, backend, axis = frame._blocks, frame._backend, frame._blocks.axis
     data = backend.join_along(parts, axis)
+    if blocks.tail:  # a one-pass full join's tail came last: the labels in the order the whole join gives, sorted
+        order = np.argsort(np.asarray(backend.axis_labels(data, axis).values), kind="stable")
+        data = backend.isel(data, {axis: order})
     if not blocks.labelled and not any(step._operation == "filter" for step in frame._steps):
         data = backend.unlabel(data, axis)  # the blocks' positions served the verbs; in memory the axis has no labels
     size = backend.sizes(data).get(axis, 0)
