@@ -103,8 +103,9 @@ def counted(state: Any, keyed: Callable[[], tuple[np.ndarray, np.ndarray]], valu
 
 
 def _forget(key: int) -> None:
-    with _LOCK:
-        _RUNNING.pop(key, None)
+    """A collected pass's tables dropped: a finalizer, run wherever the garbage is collected, even in a thread holding
+    ``_LOCK``, so it takes no lock (a dict's ``pop`` is safe on its own)."""
+    _RUNNING.pop(key, None)
 
 
 def pass_source(name: str, keys: list, compiler: Any, tests: list[str], value: Any) -> str | None:
@@ -185,12 +186,20 @@ def running(state: Any, values: int) -> np.ndarray | None:
     targets = len(state.group)
     if not targets or targets * DIGITS > DENSE_DIGITS:
         return None
+    # Nothing is allocated under the lock: an allocation may collect garbage, whose finalizers (``_forget``) would
+    # otherwise wait on the lock this thread holds.
     with _LOCK:
         tables = _RUNNING.get(id(state))
-        if tables is None:
+        table = None if tables is None else tables.get(threading.get_ident())
+    if table is not None:
+        return table.room(values)
+    made = _Running(targets * DIGITS)  # only this thread makes its own
+    with _LOCK:
+        tables = _RUNNING.get(id(state))
+        first = tables is None
+        if first:
             tables = _RUNNING[id(state)] = {}
-            weakref.finalize(state, _forget, id(state))  # a pass left unresolved (an error) frees its tables too
-        table = tables.get(threading.get_ident())
-        if table is None:
-            table = tables[threading.get_ident()] = _Running(targets * DIGITS)
-    return table.room(values)
+        tables[threading.get_ident()] = made
+    if first:
+        weakref.finalize(state, _forget, id(state))  # a pass left unresolved (an error) frees its tables too
+    return made.room(values)
