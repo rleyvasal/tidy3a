@@ -480,8 +480,12 @@ def arrange(*keys: Any) -> Verb:
 def sorted_positions(columns: Sequence[tuple[np.ndarray, bool]]) -> np.ndarray:
     """The positions in ``arrange``'s order of *columns*, each a key's values and whether it sorts downwards: by the
     first, ties by the next, ties in their order; missing values (NaN, NaT) last either way; -0.0 and 0.0 tie."""
-    if len(columns) == 1 and not columns[0][1] and columns[0][0].dtype.kind in "fiubmM":
-        return np.argsort(columns[0][0], kind="stable")  # NumPy's own order: missing values last, the zeros tied
+    if len(columns) == 1 and columns[0][0].dtype.kind in "fiubmM":  # NumPy's own order, the zeros tied, missing last
+        values, downwards = columns[0]
+        if downwards:  # an order-reversing map keeping ties tied, and NaN and NaT last
+            values = -values if values.dtype.kind == "f" else ~(values.view(np.int64) if values.dtype.kind in "mM"
+                                                                 else values)
+        return np.argsort(values, kind="stable")  # stable, so a run already in order is merged, not sorted again
     return np.lexsort([_ranks(values, downwards) for values, downwards in reversed(columns)])
 
 

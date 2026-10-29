@@ -96,7 +96,9 @@ from tidy3a.reductions import REGISTRY, WHOLE_AXIS, pass_budget
 
 JOINS = ("left_join", "inner_join", "full_join")  # with data in memory, a block at a time (milestone 19)
 SLICES = ("slice", "slice_head", "slice_tail")
-ROW_WISE = ("select", "filter", "mutate", *JOINS, "slice_axes")  # slice_axes: a slice of other axes (milestone 19)
+ROW_WISE = ("select", "filter", "mutate", *JOINS, "slice_axes", "arrange_axes", "arrange_block")
+# slice_axes: a slice of other axes (milestone 19); arrange_axes: a sort of another axis, which every block holds whole;
+# arrange_block: each block's rows sorted, for a sort of the blocked axis to merge (milestone 21)
 
 
 # ── Sources ─────────────────────────────────────────────────────────────────
@@ -482,6 +484,13 @@ class ChunkedFrame(TidyArray):
 
             verb = Verb(verb.text, verb._apply, operation="slice_axes", arguments=(operation, verb._arguments))
             operation = "slice_axes"  # other axes: a step each block runs, as every block holds them all
+        if operation == "arrange" and not self._summarised:
+            if _arrange_axis(self, verb) == blocks.axis:  # the blocked axis: each block sorted, then merged, in memory
+                return _arranged(self, verb)
+            from tidy3a.verbs import Verb
+
+            verb = Verb(verb.text, verb._apply, operation="arrange_axes", arguments=verb._arguments)
+            operation = "arrange_axes"  # another axis: a step each block runs, as every block holds it whole
         if operation in JOINS and not self._summarised:
             whole = _whole_join(self, verb)
             paired = None if whole is not None else _by_position(self, verb)
@@ -764,6 +773,31 @@ def _runs(positions: Sequence[int], starts: Sequence[int]) -> list[tuple[int, in
 
 
 GAP = 4_096  # positions a slice's span reads through rather than starting another
+
+
+def _arrange_axis(frame: ChunkedFrame, verb: Any) -> Any:
+    """The axis ``arrange``'s keys vary along, found on the block of no positions (its own checks run on it too);
+    None where it has no keys."""
+    from tidy3a.verbs import Desc
+
+    TidyArray._apply_verb(frame, verb)  # the refusals, as in memory, when called
+    ctx = Context(frame, verb="arrange", error=TidyError)
+    for key in verb._arguments:
+        value = evaluate(as_expr(key.key if isinstance(key, Desc) else key), ctx)
+        return value.dims[0]
+    return None
+
+
+def _arranged(frame: ChunkedFrame, verb: Any) -> TidyArray:
+    """A sort of the blocked axis (milestone 21): each block's kept rows sorted on its own, on the pool, a row-wise
+    step (``arrange_block``); the sorted blocks joined in memory in their order; and the sort run again on them, whose
+    stable sort finds them in runs and merges them, earlier blocks first among ties, so the order is memory's."""
+    from tidy3a.verbs import Verb
+
+    each = Verb(verb.text, verb._apply, operation="arrange_block", arguments=verb._arguments)
+    rows = frame._apply_verb(each)._run()
+    result = verb(rows)
+    return result._evolve(notes=[f"{verb.text}: each block sorted, then the blocks merged"])
 
 
 def _rows_of(frame: ChunkedFrame, layout: Blocks, chosen: Sequence[int] | None) -> TidyArray:

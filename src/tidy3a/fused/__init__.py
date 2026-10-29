@@ -129,6 +129,8 @@ def _verb(verb: Any, rows: Any, compiler: Compiler) -> tuple[list[str], Any]:
 
     if verb._operation == "slice_axes":
         return [f"{verb.text}: a slice of the other axes runs on NumPy"], rows >> verb
+    if verb._operation in ("arrange_axes", "arrange_block"):
+        return [f"{verb.text}: a sort runs on NumPy"], rows >> verb
     if verb._operation in JOINS:  # NumPy joins each block, before the kernels (milestone 19)
         if verb._operation == "full_join":  # it may widen the axes, and change types, of what came before
             return [f"{verb.text}: a full join runs on NumPy"], rows >> verb

@@ -5,7 +5,8 @@ every variable along the axis reordered with its labels, on both backends."""
 import numpy as np
 import pytest
 
-from tidy3a import ArrangeError, arrange, desc, fields, group_by, infer, pull, read_array, tidy
+from tidy3a import ArrangeError, arrange, desc, fields, filter, group_by, infer, mutate, pull, read_array, tidy
+from tidy3a.chunked import ChunkedFrame
 
 xr = pytest.importorskip("xarray")
 pd = pytest.importorskip("pandas")
@@ -94,8 +95,42 @@ def test_desc_twice_and_grouped_data_are_refused():
         tidy(DATA) >> group_by(i) >> arrange(f32)
 
 
-def test_data_read_in_blocks_sorts_on_the_whole_axis_for_now():
-    """Step 2 sorts each block and merges them; until then the blocks' rows in memory, sorted there."""
-    got = (tidy(DATA, blocks={"p": 64}) >> arrange(i, desc(f32))).collect()
-    want = (tidy(DATA) >> arrange(i, desc(f32))).collect()
+BLOCKED = {  # verbs on data read in blocks, sorting the blocked axis (milestone 21, step 2)
+    "one key": lambda: arrange(f32),
+    "one key, downwards": lambda: arrange(desc(f32)),
+    "two keys": lambda: arrange(i, desc(f64)),
+    "times, downwards": lambda: arrange(desc(when)),
+    "text, then a boolean": lambda: arrange(word, b),
+    "after a filter, then a mutate": lambda: filter(i > -2) >> arrange(desc(i), f32) >> mutate(twice=f64 * 2),
+}
+
+
+@pytest.mark.parametrize("threads", [1, 3])
+@pytest.mark.parametrize("name", list(BLOCKED))
+def test_a_sort_of_the_blocked_axis_sorts_each_block_and_merges_them(name, threads):
+    """Each block sorted on its own, the blocks merged, earlier ones first among ties: memory's order and bits."""
+    got = tidy(DATA, blocks={"p": 64}, threads=threads) >> BLOCKED[name]()
+    assert not isinstance(got, ChunkedFrame)  # the rows in memory, as a slice's
+    assert any("each block sorted, then the blocks merged" in note for note in got._notes)
+    want = (tidy(DATA) >> BLOCKED[name]()).collect()
+    got = got.collect()
     assert got["p"].values.tolist() == want["p"].values.tolist()
+    for variable in want.data_vars:
+        assert np.asarray(got[variable].values).tobytes() == np.asarray(want[variable].values).tobytes(), variable
+
+
+def test_a_sort_of_another_axis_runs_on_each_block():
+    """A key along an axis every block holds whole sorts it the same in each: the frame stays read in blocks."""
+    grid = xr.Dataset({"t": (("time", "lat"), rng.normal(size=(100, 9))), "w": ("lat", rng.random(9))},
+                      coords={"time": np.arange(100), "lat": np.arange(9.0)})
+    verbs = arrange(desc(fields("w"))) >> mutate(u=fields("t") * 2)
+    got = tidy(grid, blocks={"time": 30}) >> verbs
+    assert isinstance(got, ChunkedFrame)
+    got, want = got.collect(), (tidy(grid) >> verbs).collect()
+    assert got["lat"].values.tolist() == want["lat"].values.tolist()
+    assert np.asarray(got["u"].values).tobytes() == np.asarray(want["u"].values).tobytes()
+
+
+def test_a_sort_of_the_blocked_axis_is_refused_as_in_memory_when_called():
+    with pytest.raises(ArrangeError, match="varies along p and q"):
+        tidy(DATA, blocks={"p": 64}) >> arrange(fields("grid"))
