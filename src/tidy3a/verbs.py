@@ -443,38 +443,73 @@ def arrange(*keys: Any) -> Verb:
     text = _call_text("arrange", keys)
 
     def apply(frame: TidyArray) -> TidyArray:
-        if frame._groups:
-            raise ArrangeError(f"{text} on grouped data is not supported yet; ungroup() first")
-        if not keys:
-            return frame
-        ctx = Context(frame, verb="arrange", error=ArrangeError)
-        data, backend = ctx.data, ctx.backend
-        columns, axis = [], None
-        for key in keys:
-            downwards = isinstance(key, Desc)
-            expr = as_expr(key.key if downwards else key)
-            value = evaluate(expr, ctx)
-            key_text = expr.text()
-            if not backend.is_array(value) or value.ndim == 0:
-                raise ArrangeError(f"{key_text} is a single value; arrange sorts by a key that varies along one axis, "
-                                   "e.g. arrange(distance)")
-            if value.ndim > 1:
-                raise ArrangeError(f"{key_text} varies along {' and '.join(map(str, value.dims))}; arrange sorts one "
-                                   f"axis by a key along it alone, e.g. a reduction of it over the others")
-            dim = value.dims[0]
-            if dim == ctx.field_axis:
-                raise ArrangeError(f"{key_text} varies along {dim}, the field axis; fields are columns, so use "
-                                   "select() to order them")
-            if axis is not None and dim != axis:
-                raise ArrangeError(f"{key_text} varies along {dim}, the keys before it along {axis}; arrange sorts "
-                                   "one axis")
-            axis = dim
-            value = align_to(value, data, key_text, ctx.notes, backend=backend)
-            columns.append((np.asarray(value.values), downwards))
-        data = backend.keep(data, axis, sorted_positions(columns))
-        return frame._evolve(data, notes=list(ctx.notes))
+        return sorted_frame(frame, keys, text)
 
     return Verb(text, apply, operation="arrange", arguments=keys)
+
+
+def sorted_frame(frame: TidyArray, keys: Sequence[Any], text: str, first: int | None = None,
+                 last: bool = False) -> TidyArray:
+    """*frame* sorted by *keys* as ``arrange`` sorts it; with *first*, only the first (or, *last*, the last) *first*
+    positions of that order kept, in it (a block's part of a sort then a slice, milestone 21)."""
+    if frame._groups:
+        raise ArrangeError(f"{text} on grouped data is not supported yet; ungroup() first")
+    if not keys:
+        return frame
+    ctx = Context(frame, verb="arrange", error=ArrangeError)
+    data, backend = ctx.data, ctx.backend
+    columns, axis = [], None
+    for key in keys:
+        downwards = isinstance(key, Desc)
+        expr = as_expr(key.key if downwards else key)
+        value = evaluate(expr, ctx)
+        key_text = expr.text()
+        if not backend.is_array(value) or value.ndim == 0:
+            raise ArrangeError(f"{key_text} is a single value; arrange sorts by a key that varies along one axis, "
+                               "e.g. arrange(distance)")
+        if value.ndim > 1:
+            raise ArrangeError(f"{key_text} varies along {' and '.join(map(str, value.dims))}; arrange sorts one "
+                               f"axis by a key along it alone, e.g. a reduction of it over the others")
+        dim = value.dims[0]
+        if dim == ctx.field_axis:
+            raise ArrangeError(f"{key_text} varies along {dim}, the field axis; fields are columns, so use "
+                               "select() to order them")
+        if axis is not None and dim != axis:
+            raise ArrangeError(f"{key_text} varies along {dim}, the keys before it along {axis}; arrange sorts "
+                               "one axis")
+        axis = dim
+        value = align_to(value, data, key_text, ctx.notes, backend=backend)
+        columns.append((np.asarray(value.values), downwards))
+    order = sorted_positions(columns) if first is None else first_positions(columns, first, last)
+    return frame._evolve(backend.keep(data, axis, order), notes=list(ctx.notes))
+
+
+def first_positions(columns: Sequence[tuple[np.ndarray, bool]], count: int, last: bool = False) -> np.ndarray:
+    """The first *count* positions of ``sorted_positions``'s order (the last, with *last*), in that order: for one key
+    of numbers or booleans, those found by a partial sort, ties at the edge by position, then sorted; else from the
+    whole order."""
+    values, downwards = columns[0]
+    size = len(values)
+    if len(columns) != 1 or values.dtype.kind not in "fiub" or count >= size:
+        order = sorted_positions(columns)
+        return order[size - min(count, size):] if last else order[:count]
+    if count <= 0:
+        return np.zeros(0, np.intp)
+    if downwards:
+        values = -values if values.dtype.kind == "f" else ~values
+    edge = np.partition(values, size - count if last else count - 1)[size - count if last else count - 1]
+    if edge != edge:  # NaN at the edge: the first take every number and the earliest NaNs, the last the latest NaNs
+        numbers = values == values
+        inside, tied = (np.zeros(size, bool) if last else numbers), ~numbers
+    else:
+        inside = (values > edge) | (values != values) if last else values < edge
+        tied = values == edge
+    chosen = np.flatnonzero(inside)
+    room = count - len(chosen)
+    at_edge = np.flatnonzero(tied)
+    chosen = np.concatenate([chosen, at_edge[len(at_edge) - room:] if last else at_edge[:room]])
+    chosen.sort()  # in position order, so the stable sort keeps the ties' order
+    return chosen[np.argsort(values[chosen], kind="stable")]
 
 
 def sorted_positions(columns: Sequence[tuple[np.ndarray, bool]]) -> np.ndarray:

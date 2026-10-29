@@ -474,9 +474,22 @@ class ChunkedFrame(TidyArray):
 
     def _apply_verb(self, verb: Any) -> Any:
         operation = getattr(verb, "_operation", None)
-        if operation == "write" and not self._summarised:  # rows written as the blocks arrive, never all in memory
-            return _write(self, verb)
+        if operation == "write" and not self._summarised and not self._sorting:  # rows written as the blocks arrive,
+            return _write(self, verb)  # never all in memory (a sort's rows are merged first, below)
         blocks = self._blocks
+        if self._sorting:  # after a sort of the blocked axis: a slice of it becomes each block's part of it
+            last = self._steps[-1]
+            if (operation in ("slice_head", "slice_tail") and last._arguments[1] is None
+                    and set(verb._arguments) == {blocks.axis}):
+                count = verb._arguments[blocks.axis]
+                if isinstance(count, (int, np.integer)) and not isinstance(count, bool) and count >= 0:
+                    unsorted = self._wrap(self, blocks, self._steps[:-1], self._plan, self._reads)
+                    unsorted._record = dataclasses.replace(self._record, steps=self._record.steps[:-1])
+                    from tidy3a.verbs import arrange
+
+                    return _arranged(unsorted, arrange(*last._arguments[0]), int(count), operation == "slice_tail",
+                                     f"{last.text} >> {verb.text}")
+            return verb(self._run())  # anything else on the merged rows, in memory
         if operation in SLICES and not self._summarised:
             if blocks.axis in _slice_axes(verb):  # the blocked axis: the blocks holding what it keeps, in memory
                 return _sliced(self, verb)
@@ -564,6 +577,11 @@ class ChunkedFrame(TidyArray):
     @property
     def _summarised(self) -> bool:
         return bool(self._steps) and self._steps[-1]._operation == "summarise"
+
+    @property
+    def _sorting(self) -> bool:
+        """Whether its last step sorts each block for a sort of the blocked axis, which its run merges."""
+        return bool(self._steps) and self._steps[-1]._operation == "arrange_block"
 
     def _run(self) -> TidyArray:
         """The recorded verbs over every block: the merged summaries, or the rows kept, in memory, computed once."""
@@ -788,16 +806,35 @@ def _arrange_axis(frame: ChunkedFrame, verb: Any) -> Any:
     return None
 
 
-def _arranged(frame: ChunkedFrame, verb: Any) -> TidyArray:
-    """A sort of the blocked axis (milestone 21): each block's kept rows sorted on its own, on the pool, a row-wise
-    step (``arrange_block``); the sorted blocks joined in memory in their order; and the sort run again on them, whose
-    stable sort finds them in runs and merges them, earlier blocks first among ties, so the order is memory's."""
-    from tidy3a.verbs import Verb
+def _arranged(frame: ChunkedFrame, verb: Any, first: int | None = None, last: bool = False,
+              shown: str | None = None) -> ChunkedFrame:
+    """A sort of the blocked axis (milestone 21), still read in blocks: each block's kept rows sorted on their own, on
+    the pool, a row-wise step (``arrange_block``), and, once the blocks are in, merged (``_merged_sort``). With
+    *first*, a slice after the sort: each block keeps only its first (or, *last*, its last) *first* rows of the order,
+    found by a partial sort, from which the merge takes the overall ones."""
+    from tidy3a.verbs import Verb, sorted_frame
 
-    each = Verb(verb.text, verb._apply, operation="arrange_block", arguments=verb._arguments)
-    rows = frame._apply_verb(each)._run()
-    result = verb(rows)
-    return result._evolve(notes=[f"{verb.text}: each block sorted, then the blocks merged"])
+    keys, text = verb._arguments, verb.text
+    each = Verb(shown or text, lambda block: sorted_frame(block, keys, text, first, last), operation="arrange_block",
+                arguments=(keys, first, last))
+    return frame._apply_verb(each)
+
+
+def _merged_sort(frame: ChunkedFrame, rows: TidyArray) -> TidyArray:
+    """The sorted blocks' rows, joined in their order, sorted again: NumPy's stable sort finds them in runs and merges
+    them, earlier blocks first among ties, so the order is memory's; and sliced as the sort's slice asks."""
+    from tidy3a import verbs
+
+    keys, first, last = frame._steps[-1]._arguments
+    sort = verbs.arrange(*keys)
+    text = sort.text
+    rows = sort(rows)
+    if first is None:
+        return rows._evolve(notes=[*rows._notes, f"{text}: each block sorted, then the blocks merged"])
+    axis = frame._blocks.axis
+    rows = (verbs.slice_tail if last else verbs.slice_head)(**{axis: first})(rows)
+    words = "last" if last else "first"
+    return rows._evolve(notes=[*rows._notes, f"{text}: each block's {words} {first:,} found, then the blocks merged"])
 
 
 def _rows_of(frame: ChunkedFrame, layout: Blocks, chosen: Sequence[int] | None) -> TidyArray:
@@ -1601,6 +1638,8 @@ def _scan_once(frames: Sequence[ChunkedFrame], writers: Sequence[tuple[ChunkedFr
             leaf.writer.finish()
         elif table is None:
             frame._result = _joined(frame, leaf.parts)
+            if frame._sorting:  # each block sorted: merged now
+                frame._result = _merged_sort(frame, frame._result)
         elif table.keys is None:  # no block kept a row, the first included, so its summary is the answer
             frame._result = frame._evolve()
         else:

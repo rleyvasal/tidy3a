@@ -109,11 +109,11 @@ BLOCKED = {  # verbs on data read in blocks, sorting the blocked axis (milestone
 @pytest.mark.parametrize("name", list(BLOCKED))
 def test_a_sort_of_the_blocked_axis_sorts_each_block_and_merges_them(name, threads):
     """Each block sorted on its own, the blocks merged, earlier ones first among ties: memory's order and bits."""
-    got = tidy(DATA, blocks={"p": 64}, threads=threads) >> BLOCKED[name]()
-    assert not isinstance(got, ChunkedFrame)  # the rows in memory, as a slice's
-    assert any("each block sorted, then the blocks merged" in note for note in got._notes)
+    frame = tidy(DATA, blocks={"p": 64}, threads=threads) >> BLOCKED[name]()
     want = (tidy(DATA) >> BLOCKED[name]()).collect()
-    got = got.collect()
+    got = frame.collect()
+    if isinstance(frame, ChunkedFrame):  # still read in blocks until a result is asked for (step 3)
+        assert any("each block sorted, then the blocks merged" in note for note in frame._result._notes)
     assert got["p"].values.tolist() == want["p"].values.tolist()
     for variable in want.data_vars:
         assert np.asarray(got[variable].values).tobytes() == np.asarray(want[variable].values).tobytes(), variable
@@ -134,3 +134,65 @@ def test_a_sort_of_another_axis_runs_on_each_block():
 def test_a_sort_of_the_blocked_axis_is_refused_as_in_memory_when_called():
     with pytest.raises(ArrangeError, match="varies along p and q"):
         tidy(DATA, blocks={"p": 64}) >> arrange(fields("grid"))
+
+
+SLICED = {  # a sort then a slice of the blocked axis: each block's part, then the overall (milestone 21, step 3)
+    "the first 10 of a float key with NaN": (lambda: arrange(f32), "slice_head", 10),
+    "the last 10, downwards": (lambda: arrange(desc(f32)), "slice_tail", 10),
+    "the first 37, where NaN reaches the edge": (lambda: arrange(desc(f32)), "slice_head", 372),
+    "the last 50 of an integer key": (lambda: arrange(i), "slice_tail", 50),
+    "a boolean key, its first 5": (lambda: arrange(desc(b)), "slice_head", 5),
+    "two keys, a whole sort a block": (lambda: arrange(i, desc(f64)), "slice_head", 25),
+    "times, a whole sort a block": (lambda: arrange(when), "slice_tail", 30),
+    "none": (lambda: arrange(f32), "slice_head", 0),
+    "more than there are": (lambda: arrange(desc(f64)), "slice_head", 5_000),
+    "after a filter": (lambda: filter(b) >> arrange(f64), "slice_head", 7),
+}
+
+
+@pytest.mark.parametrize("threads", [1, 3])
+@pytest.mark.parametrize("name", list(SLICED))
+def test_a_slice_after_a_sort_takes_each_blocks_part_then_the_overall(name, threads, monkeypatch):
+    """Each block keeps only its first or last n of the order (a partial sort for one key of numbers or booleans,
+    ties at the edge by position), merged into the overall n: memory's rows, in memory's order."""
+    from tidy3a import slice_head, slice_tail
+
+    verbs, which, count = SLICED[name]
+    cut = {"slice_head": slice_head, "slice_tail": slice_tail}[which](p=count)
+    frame = tidy(DATA, blocks={"p": 64}, threads=threads) >> verbs() >> cut
+    assert isinstance(frame, ChunkedFrame)
+    got, want = frame.collect(), (tidy(DATA) >> verbs() >> cut).collect()
+    assert got["p"].values.tolist() == want["p"].values.tolist()
+    for variable in want.data_vars:
+        assert np.asarray(got[variable].values).tobytes() == np.asarray(want[variable].values).tobytes(), variable
+    words = "first" if which == "slice_head" else "last"
+    assert any(f"each block's {words} {count:,} found" in note for note in frame._result._notes)
+
+
+def test_other_verbs_after_a_sort_run_on_its_merged_rows():
+    from tidy3a import slice_head
+
+    for verbs in (arrange(f32) >> mutate(u=f64 + 1), arrange(f32) >> slice_head(q=2),
+                  arrange(f32) >> slice_head(p=4) >> mutate(u=f64 + 1)):
+        got = tidy(DATA, blocks={"p": 64}) >> verbs
+        want = (tidy(DATA) >> verbs).collect()
+        assert got.collect()["p"].values.tolist() == want["p"].values.tolist()
+
+
+def test_a_sorted_frame_reads_nothing_until_a_result_is_asked_for():
+    frame = tidy(DATA, blocks={"p": 64}) >> arrange(f32)
+    assert "nothing read yet" in repr(frame)
+    assert frame.preview(blocks=[1]).collect()["p"].values.tolist() == sorted(
+        DATA["p"].values[:64].tolist(), key=lambda label: (np.isnan(DATA["f32"].values[label // 10]),
+                                                          DATA["f32"].values[label // 10]))
+
+
+def test_a_sort_written_writes_the_merged_rows(tmp_path):
+    from tidy3a import write
+
+    pytest.importorskip("zarr")
+    path = tmp_path / "sorted.zarr"
+    tidy(DATA[["f32", "f64", "i"]], blocks={"p": 64}) >> arrange(desc(f64)) >> write(path)
+    want = (tidy(DATA[["f32", "f64", "i"]]) >> arrange(desc(f64))).collect()
+    got = xr.open_zarr(path, consolidated=False)
+    assert got["p"].values.tolist() == want["p"].values.tolist()
