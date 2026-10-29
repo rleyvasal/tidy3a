@@ -70,6 +70,7 @@ class Fused:
     accumulate: Any = None
     values: Any = None  # each kept position's values for NumPy's reductions, where positions hold many
     operands: dict = field(default_factory=dict)  # island's local name: (its operands' kernel, the inputs it reads, it)
+    joins: list = field(default_factory=list)  # the frame's joins, which NumPy makes on each block first
     occupied: Any = None  # ``fused.keys.dense_kernels``
     dense: Any = None
     limit: int = DENSE_BYTES  # the bytes its dense tables may take (``dense_limit``)
@@ -82,6 +83,9 @@ class Fused:
     def run(self, block: Any) -> tuple[Any, str | None]:
         """The block's table, or None and why it runs on NumPy instead."""
         from tidy3a.chunked import _Table
+
+        for join in self.joins:  # NumPy joins the block first; the kernels read what it brings (milestone 19)
+            block = block >> join
 
         axis = self.compiler.axis
         context = Context(block, verb="summarise", error=SummariseError, grouped=False)
@@ -278,11 +282,14 @@ def _bytes(size: int) -> str:
 
 
 def _positions_first(value: Any, axis: Any) -> np.ndarray:
-    """A variable's values with the blocked axis first and the rest flattened, as a kernel indexes them."""
+    """A variable's values with the blocked axis first and the rest flattened, as a kernel indexes them; one without
+    the blocked axis flattened alone, a position's values (``Compiler._layout``)."""
     values = np.asarray(value.values)
+    dims = list(getattr(value, "dims", ()))
+    if values.ndim > 1 and axis not in dims:
+        return np.ascontiguousarray(values).reshape(-1)
     if values.ndim == 1:
         return values  # a field of a record array stays a view: the kernel reads it in place
-    dims = list(getattr(value, "dims", ()))
     return np.ascontiguousarray(np.moveaxis(values, dims.index(axis), 0).reshape(values.shape[dims.index(axis)], -1))
 
 
@@ -327,6 +334,9 @@ def build(frame: Any) -> Fused | None:
     fused.accumulate = compile_summary(summary_source("accumulate", list(compiler.inputs), slots), "accumulate")
     fused.occupied, fused.dense = dense_kernels()
     fused.operands = operand_kernels(compiler)
+    from tidy3a.chunked import JOINS
+
+    fused.joins = [verb for verb in frame._steps if verb._operation in JOINS]
     if slots and compiler.cells:
         fused.values = compile_source(values_source("values", compiler, [slot.value for slot in slots]), "values")
     return fused

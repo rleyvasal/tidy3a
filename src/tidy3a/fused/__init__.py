@@ -125,6 +125,18 @@ def _verb(verb: Any, rows: Any, compiler: Compiler) -> tuple[list[str], Any]:
     """Why a row-wise verb does not compile, and the block of no positions after it."""
     if verb._operation == "select":
         return [], rows >> verb
+    from tidy3a.chunked import JOINS
+
+    if verb._operation in JOINS:  # NumPy joins each block, before the kernels (milestone 19)
+        if verb._operation == "full_join":  # it may widen the axes, and change types, of what came before
+            return [f"{verb.text}: a full join runs on NumPy"], rows >> verb
+        other = verb._arguments[0]
+        names = set(other._backend.variable_names(other._data)) if hasattr(other, "_backend") else set(
+            getattr(other, "data_vars", ()))
+        made = {name for name, value in compiler.definitions.items() if value is not None}
+        if names & made:  # joined first, its names would meet the mutate's differently
+            return [f"{verb.text}: its variables share names with ones a mutate made, which runs on NumPy"], rows >> verb
+        return [], rows >> verb
     if verb._operation == "filter":
         context = Context(rows, verb="filter", error=FilterError)
         reasons = []

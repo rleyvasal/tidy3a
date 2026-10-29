@@ -890,4 +890,4 @@ def _join(how: str, other: Any, suffix: Any, tolerance: Any) -> Verb:
         field_axis = frame._field_axis or right_frame._field_axis
         return frame._evolve(merged, notes=notes, origins=origins, field_axis=field_axis)
 
-    return Verb(f"{name}(…)", apply)
+    return Verb(f"{name}(…)", apply, operation=name, arguments=(other, tuple(suffix), tolerance))

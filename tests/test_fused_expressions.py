@@ -12,7 +12,7 @@ import warnings
 import numpy as np
 import pytest
 
-from tidy3a import ceil, conj, exp, fields, floor, formula, if_else, log, sign, sin, sqrt, tidy
+from tidy3a import ceil, conj, exp, fields, floor, formula, if_else, log, nan, sign, sin, sqrt, tidy
 from tidy3a.errors import MutateError
 from tidy3a.expr import Context, evaluate
 from tidy3a.fused.expressions import Compiler, Island, Unsupported, read
@@ -31,6 +31,7 @@ EXPRESSIONS = {
     "(x > 0) & (y < 0)": (x > 0) & (y < 0), "(x > 0) | ~(y > 0)": (x > 0) | ~(y > 0), "x & y": x & y,
     "x | y": x | y, "~x": ~x,
     "if_else(x > y, x, y)": if_else(x > y, x, y), "if_else(x > 0, x, 2)": if_else(x > 0, x, 2),
+    "if_else(x > 0, x, nan)": if_else(x > 0, x, nan), "x * inf": x * float("inf"), "x - -inf": x - float("-inf"),
     "x - 273.15": x - 273.15, "x * 2": x * 2, "1 / x": 1 / x, "2.5 + x": 2.5 + x, "x + True": x + True,
     "x * y - x / 3 + 1": x * y - x / 3 + 1,
     "formula": formula(r"\sqrt{x^2 + y^2 + z^2}"),

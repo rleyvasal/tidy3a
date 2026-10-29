@@ -93,7 +93,8 @@ from tidy3a.frame import TidyArray
 from tidy3a.plan import Record, Snapshot, Step, _variable, snapshot
 from tidy3a.reductions import REGISTRY, WHOLE_AXIS, pass_budget
 
-ROW_WISE = ("select", "filter", "mutate")
+JOINS = ("left_join", "inner_join", "full_join")  # with data in memory, a block at a time (milestone 19)
+ROW_WISE = ("select", "filter", "mutate", *JOINS)
 
 
 # ── Sources ─────────────────────────────────────────────────────────────────
@@ -441,6 +442,11 @@ class ChunkedFrame(TidyArray):
         operation = getattr(verb, "_operation", None)
         if operation == "write" and not self._summarised:  # rows written as the blocks arrive, never all in memory
             return _write(self, verb)
+        if operation in JOINS and not self._summarised:
+            whole = _whole_join(self, verb)
+            if whole is not None:  # the blocks' rows in memory, joined there, the result saying why
+                result = verb(self._run())
+                return result._evolve(notes=[f"{verb.text}: joined on the whole axis, as {whole}"])
         if self._summarised or operation not in (*ROW_WISE, "group_by", "summarise"):
             return verb(self._run())  # needs the whole axis: the blocks' result, in memory
         if operation == "select":
@@ -612,6 +618,22 @@ def _refuse_unblocked(verb: Any) -> None:
                 raise BlockError(f"{name} = {node.text()}: {node.op}() cannot be combined across blocks; "
                                  f"{', '.join(REGISTRY)} can (register_reduction() adds one, with block steps); "
                                  f"{WHOLE_AXIS}")
+
+
+def _whole_join(frame: ChunkedFrame, verb: Any) -> str | None:
+    """Why a join of *frame*'s blocks runs on the whole axis, or None where each block joins on its own (milestone
+    19): the other data read in blocks too, or a full join along the blocked axis, which adds labels no block holds."""
+    from tidy3a.frame import tidy
+
+    other = verb._arguments[0]
+    if isinstance(other, ChunkedFrame):
+        return "the other data is read in blocks too"
+    axis = frame._blocks.axis
+    if verb._operation == "full_join":
+        right = other if isinstance(other, TidyArray) else tidy(other)
+        if right._backend.has_axis(right._data, axis):
+            return f"a full join along {axis} adds the other data's labels no block holds"
+    return None
 
 
 def _check(frame: ChunkedFrame, verb: Any, result: TidyArray, steps: Sequence[Any]) -> _Plan | None:

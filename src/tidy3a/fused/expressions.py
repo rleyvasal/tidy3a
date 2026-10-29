@@ -200,14 +200,22 @@ class Compiler:
         else:
             local = f"a{len(self.inputs)}"
             self.inputs[local] = (node, cells)
+        if self.axis not in tuple(getattr(value, "dims", ())):  # the same for every position: read by value
+            return Source(f"{local}[j]", dtype, True)
         return Source(f"{local}[i, j]" if cells else f"{local}[i]", dtype, cells)
 
     def _layout(self, node: Any, value: Any) -> bool:
         """Whether *value*, which a kernel reads, has values per position (a grid's), checking that it varies along
-        the blocked axis, first, and lies as the values read before it."""
+        the blocked axis, first, and lies as the values read before it; or that, without the blocked axis, it lies
+        over exactly the other axes a position's values do (a mask joined over lat and lon, milestone 19), which
+        ``_ref`` reads by value alone."""
         dims = tuple(getattr(value, "dims", ()))
         cells = any(dim != self.axis for dim in dims)
         if self.axis not in dims:
+            layout = tuple(zip(dims, getattr(value, "shape", ())))
+            if dims and (self.cells is None or layout == self.cells):
+                self.cells = layout
+                return True
             raise Unsupported(f"{node.text()} does not vary along {self.axis}, which runs on NumPy")
         if cells:
             if dims[0] != self.axis:
@@ -401,8 +409,18 @@ def _literal(node: Literal) -> Source:
     if isinstance(value, (int, np.integer)):
         return Source(repr(int(value)), None if isinstance(value, int) else np.dtype(type(value)), value=value)
     if isinstance(value, (float, np.floating)) and not isinstance(value, np.float16):
-        return Source(repr(float(value)), None if isinstance(value, float) else np.dtype(type(value)), value=value)
+        return Source(_float_text(float(value)), None if isinstance(value, float) else np.dtype(type(value)),
+                      value=value)
     raise Unsupported(f"{node.text()} is not a number, which runs on NumPy")
+
+
+def _float_text(value: float) -> str:
+    """A float as kernel source: NaN and the infinities by name, as ``repr`` gives no Python they are."""
+    if value != value:
+        return "np.nan"
+    if value in (np.inf, -np.inf):
+        return "np.inf" if value > 0 else "-np.inf"
+    return repr(value)
 
 
 def _operand(source: Source) -> Any:
@@ -423,7 +441,7 @@ def _as(text: str, dtype: np.dtype) -> str:
 
 
 def _number(value: Any, dtype: np.dtype) -> str:
-    return f"{_type(dtype)}({value!r})"
+    return f"{_type(dtype)}({_float_text(float(value)) if isinstance(value, float) else repr(value)})"
 
 
 def _type(dtype: np.dtype) -> str:
