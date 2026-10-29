@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.12.0 — 2026-10-28
 
 - More of a summary compiles (milestone 18). `exp`, `log`, the
   trigonometric and hyperbolic functions, and powers other than 2, 0.5, -1,
