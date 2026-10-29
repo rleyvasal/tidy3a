@@ -159,7 +159,7 @@ def _walk(node: _Node, frame: TidyArray, axis: str) -> tuple[int, int, int]:
         peak, held, fixed = max(peak, work), held + result, max(fixed, extra)
     for verb, child in node.next:
         after = frame >> verb
-        new = _new(frame, after, axis)
+        new = _new(frame, after, axis) + _held_while(verb, frame, axis)
         work, result, extra = _walk(child, after, axis)
         across = _across(frame, after, axis)
         peak, held, fixed = max(peak, 2 * new, new + work), held + result, max(fixed, across + extra)
@@ -212,6 +212,26 @@ def _leaf(frame: ChunkedFrame, rows: TidyArray, axis: str) -> tuple[int, int, in
             fixed = max(fixed, 4 * DENSE_DIGITS)  # a later pass's running table of digits, a thread's (milestone 20)
         work += fusion.island_bytes
     return work + values + max(first, later), 0, fixed  # a block's pieces are per group
+
+
+def _held_while(verb: Any, frame: TidyArray, axis: str) -> int:
+    """What a step holds per position while it runs beyond the arrays it leaves (milestone 21): a join with data read
+    in blocks too, the other's part a block reads, as read; a block's sort, its order and its keys."""
+    from tidy3a.chunked import JOINS, ChunkedFrame, _needs
+
+    if verb._operation in JOINS and isinstance(verb._arguments[0], ChunkedFrame):
+        other = verb._arguments[0]
+        part = other._blocks.source.empty(_needs(other))
+        return _bytes(part, axis) if part._backend.has_axis(part._data, axis) else 0
+    if verb._operation == "arrange_block":
+        from tidy3a.verbs import sort_columns
+
+        keys = verb._arguments[0]
+        if not keys:
+            return 0
+        _, columns, _ = sort_columns(frame, keys)
+        return 8 + sum(_itemsize(values.dtype) for values, _ in columns)  # the order, and each key's values
+    return 0
 
 
 def _new(before: TidyArray, after: TidyArray, axis: str) -> int:

@@ -17,7 +17,7 @@ import os
 import pickle
 import shutil
 import tempfile
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -143,14 +143,26 @@ class SortedWriter:
         self.runs: list[_Run] = []
         self.spilling: list[Any] = []
         blocks = max(len(frame._layout().spans), 1)
-        self.piece_rows = max(min(PIECE, 1024), min(PIECE, WINDOWS // (2 * blocks)))  # a run a block, two pieces held
-        self.pool = ThreadPoolExecutor(max(1, frame._blocks.threads))
+        rows = min(PIECE, WINDOWS // (2 * blocks))  # a run a block, two pieces of each held while merging
+        memory = frame._blocks.memory
+        if memory is not None:  # and within the budget, the merge's rows and their keys
+            from tidy3a.sizing import RESERVE, _bytes
+
+            data = _bytes(frame, self.axis)  # a round holds a row in its pieces, its joined, ordered, and pending
+            row = 5 * data + 3 * 8 * len(keys) + 16  # parts, and its keys and its place in the order
+            rows = min(rows, max(memory - RESERVE, 0) // (blocks * row))
+        self.piece_rows = max(min(PIECE, 1024), rows)
+        self.threads = max(1, frame._blocks.threads)
+        self.pool = ThreadPoolExecutor(self.threads)
 
     def add(self, data: Any) -> None:
         """One block's rows, sorted: spilled, on the writer's threads, as a run of pieces with their rows' keys."""
         size = int(self.backend.sizes(data).get(self.axis, 0))
         if size == 0:
             return
+        waiting = [spill for spill in self.spilling if not spill.done()]
+        if len(waiting) >= self.threads:  # a block a thread waiting to be spilled, at most, however fast blocks come
+            wait(waiting, return_when=FIRST_COMPLETED)
         run = _Run(os.path.join(self.folder, f"run{len(self.runs)}.pickle"), self.piece_rows, rows=size)
         self.runs.append(run)  # in the blocks' order, whichever is spilled first
         self.spilling.append(self.pool.submit(self._spill, run, data))

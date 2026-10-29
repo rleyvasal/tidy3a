@@ -15,9 +15,9 @@ from concurrent.futures import Future
 import numpy as np
 import pytest
 
-from tidy3a import (any, cells, chunked, exp, fields, filter, formula, full_join, group_by, if_else, infer, inner_join,
-                    left_join, log, max, mean, median, min, mutate, n, nan, pull, quantile, read_array, scan, select,
-                    std, sum, summarise, tidy, var, write)
+from tidy3a import (any, arrange, cells, chunked, desc, exp, fields, filter, formula, full_join, group_by, if_else, infer,
+                    inner_join, left_join, log, max, mean, median, min, mutate, n, nan, pull, quantile, read_array,
+                    scan, select, std, sum, summarise, tidy, var, write)
 from tidy3a.reductions import REGISTRY, Ask, Reduction, Working
 from tidy3a.sizing import RESERVE, Cost, cost, describe
 
@@ -698,3 +698,57 @@ def test_running_tables_and_a_passes_digits_count_in_the_fixed_cost():
     limit = dense_limit(memory, 3)
     assert cost([frames["coarse voxels, running tables"]]).fixed >= 2 * limit  # a running table and its copy
     assert cost([frames["the median by ring, its passes compiled"]]).fixed >= 4 * DENSE_DIGITS
+
+
+def humid():
+    """Another dataset over the same grid, read in blocks of its own, to join (milestone 21)."""
+    xr = pytest.importorskip("xarray")
+    rng = np.random.default_rng(9)
+    data = xr.Dataset({"humidity": (("time", "lat", "lon"), rng.random((320, 9, 12)).astype(np.float32)),
+                       "wind": (("time", "lat", "lon"), rng.random((320, 9, 12)).astype(np.float32))},
+                      coords={"time": np.arange(-20, 300)[::-1].copy(), "lat": np.arange(9.0), "lon": np.arange(12.0)})
+    return tidy(data, blocks={"time": 37}) >> select("humidity")
+
+
+SORTED_OR_JOINED = {  # verbs holding more while they run than they leave (milestone 21)
+    "a join with data read in blocks too, summarised": lambda: left_join(humid())
+    >> mutate(d=t - fields("humidity")) >> group_by(month) >> summarise(m=mean(fields("d"))),
+    "a join with data read in blocks too, rows kept": lambda: inner_join(humid()) >> select("temperature", "humidity"),
+    "a block's sort, rows kept": lambda: select("temperature", "hour", "month") >> arrange(desc(fields("hour") * 2),
+                                                                                         month),
+}
+
+
+@pytest.mark.parametrize("name", list(SORTED_OR_JOINED))
+def test_the_estimate_bounds_a_blocks_peak_with_sorts_and_joins_of_blocks(name, block_peaks, small_slices):
+    bounded(block_peaks, climate, SORTED_OR_JOINED[name](), 50, 100)
+
+
+def test_a_sorted_writes_peak_stays_within_the_estimates_bound(tmp_path):
+    """The whole run, its blocks, their spills, and the merge after them, within what the estimate bounds it by for
+    the blocks chosen under a budget: the merge's windows sized for it."""
+    from tidy3a import external
+
+    pytest.importorskip("numba")
+    rng = np.random.default_rng(10)
+    values = (rng.normal(size=(600_000, 5)) * 30).astype(np.float32)
+    memory = RESERVE + 60 * 2**20
+    frame = read_array(values, blocks="auto", memory=memory, threads=3, dims={"point": infer, "feature": 5},
+                       labels={"feature": names}, field_axis="feature") >> arrange(desc(x))
+    rows, estimate = frame._layout().rows, cost([frame])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        read_array(values[:1000], blocks=500, dims={"point": infer, "feature": 5}, labels={"feature": names},
+                   field_axis="feature") >> arrange(desc(x)) >> write(tmp_path / "warm.npy")  # the merge compiled
+        tracemalloc.start()
+        try:
+            base = tracemalloc.get_traced_memory()[0]
+            tracemalloc.reset_peak()
+            frame >> write(tmp_path / "sorted.npy")
+            peak = tracemalloc.get_traced_memory()[1] - base
+        finally:
+            tracemalloc.stop()
+    assert peak <= estimate.bound(rows, 3) - RESERVE, (peak, rows, estimate)
+    got = np.load(tmp_path / "sorted.npy")
+    assert got[:, 0].tolist() == sorted(values[:, 0].tolist(), reverse=True)
+    assert external.PIECE >= 1024
