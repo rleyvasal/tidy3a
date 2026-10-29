@@ -388,8 +388,8 @@ values are counted by the bits of an order-preserving key, 16 bits a pass,
 until the rank is found, so float32 takes two passes after the first and
 float64 four, which a `scan` shares and which read only the variables
 used. A pipeline without `summarise` joins the blocks' rows in memory,
-for data that fits once filtered; a verb that needs the whole axis
-(`slice`, joins) then runs on the joined rows. What a block cannot answer
+for data that fits once filtered; a verb that needs the whole axis then
+runs on the joined rows. What a block cannot answer
 (a reduction inside `mutate` or `filter`, a grouped `mutate`, an axis key,
 `over=`) is refused when the verb is called, naming `lazy=True`,
 which memory-maps the file, as the whole-axis alternative. Measured on all
@@ -401,6 +401,28 @@ same file written twelve times (29.4 GB, on a 24 GB machine, from a USB
 drive reading at 36 MB/s) ran at the drive's speed with a peak of 1.85 GB
 and the same voxels and mean bits; the plan has the measurements
 (decision 10, stage (b)).
+
+Joins and slices run on blocks too. `left_join`, `inner_join`, and
+`full_join` with data in memory join each block on its own, and the frame
+stays read in blocks, its later verbs and a compiled summary running as
+before: a mask over lat and lon joins every block whole, a value per time
+step the part at each block's labels (or, where neither side labels the
+axis, its positions). A `full_join` along the blocked axis runs in one
+pass, the other data's labels no block holds joined in a last block of
+their own, with the types and order the join gives in memory. A join with
+data read in blocks too, or a `full_join` along the axis after a filter,
+runs on the whole axis, and the result notes why. `slice_head`,
+`slice_tail`, and `slice` of the blocked axis read only the positions they
+keep; after a filter, blocks are read from the start (from the end for
+`slice_tail`), one, then more at a time, until enough rows are kept. A
+filter on the blocked axis's own labels (`filter(time >= june)`) is tried
+on each block's labels before it is read, and the blocks it keeps nothing
+of are skipped ("skipped 11 of 13 blocks"). Results are the same bits as
+in memory. On 2,000 grids of 180 x 360, a land mask joined, masked, and
+averaged by month took 0.52 s in blocks of 48 on one thread against
+0.93 s in memory, and 0.037 s on twelve, with no memory beyond the data's;
+the first ten of 40M points read ten, in 0.001 s, where they read the
+whole 800 MB file before.
 
 A reduction of your own (experimental): `register_reduction` takes its
 NumPy function for data in memory and, for blocks, how one block's pieces
@@ -517,7 +539,7 @@ Laziness: `read_array(..., lazy=True)` memory-maps a file and `tidy()` keeps
 a lazy xarray input lazy until `collect()`, but the verbs themselves run
 eagerly: arithmetic allocates results and `filter` evaluates its mask.
 `read_array(..., blocks=rows)` runs them block by block instead, for
-pipelines that end in `summarise` (above).
+summaries, joins, and slices (above).
 `read_binary`'s options are in [the reader contract](docs/m6-read-binary.md).
 
 ## Notebooks

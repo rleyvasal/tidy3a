@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+- Joins and slices of data read in blocks (milestone 19). `left_join`,
+  `inner_join`, and `full_join` with data in memory join each block on its
+  own, as Spark's broadcast join does, and the frame stays read in blocks,
+  a summary after them compiling as before; a `full_join` along the blocked
+  axis runs in one pass, the other data's labels no block holds joined in a
+  last block of their own. Where neither side labels the blocked axis, each
+  block pairs the other data's part at its own positions, as memory pairs
+  them. `slice_head`, `slice_tail`, and `slice` of the blocked axis read
+  only the positions they keep, and after a filter, blocks one, then more
+  at a time, until enough rows are kept; a slice of another axis runs on
+  each block. A filter on the blocked axis's own labels skips the blocks it
+  keeps nothing of, without reading them. On 2,000 grids of 180 x 360, a
+  land mask joined, masked, and averaged by month took 0.52 s on one thread
+  (2.53 s before, which gathered the blocks in memory first) and 0.037 s
+  on twelve, at no peak above the data's (2.80 GB before); a quality per
+  time step joined and filtered on 0.13 s (1.53 s); the first or last ten
+  of 40M points 0.001 s and 1 MB (0.32 s and 2.2 GB). Results are the same
+  bits as in memory. What a join brings over the other axes is counted in
+  the blocks' size.
+
 ## 0.12.0 — 2026-10-28
 
 - More of a summary compiles (milestone 18). `exp`, `log`, the
