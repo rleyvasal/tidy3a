@@ -21,6 +21,7 @@ why); its table is the same either way.
 from __future__ import annotations
 
 import math
+import threading
 import warnings
 from dataclasses import dataclass, field
 from typing import Any
@@ -81,16 +82,27 @@ class Fused:
     unlearned: bool = field(init=False, default=False)  # a block's groups were sorted, its buckets not learned
     counting: dict = field(init=False, default_factory=dict)  # per slot, its later passes' kernel (or None)
     looked: Any = field(init=False, default=None)  # the table the lookups were made for, and them
+    running: dict = field(init=False, default_factory=dict)  # per thread, its running table (``_Running``)
 
     def __post_init__(self) -> None:
         self.group_bytes = 8 + sum(array.itemsize for slot in self.slots for array in slot.arrays(1).values())
         self.learned = [{} for _ in self.keys]
 
     def run(self, block: Any) -> tuple[Any, str | None]:
-        """The block's table, or None and why it runs on NumPy instead."""
+        """The block's table, or None and why it runs on NumPy instead; or, for a summary free of its additions'
+        order, the tables its thread's running table gave up (``_Running``), usually none."""
         from tidy3a.chunked import _Table
 
-        placed = self._placed(block)
+        if self.order_free:
+            place = self._place(block)
+            if isinstance(place, str):
+                return None, place
+            given = self._run_into(*place)
+            if given is not None:
+                return given, None
+            placed = self._finish_placing(*place)
+        else:
+            placed = self._placed(block)
         if isinstance(placed, str):
             return None, placed
         inputs, positions, cells, found, sizes, dense, valid, dropped = placed
@@ -142,8 +154,8 @@ class Fused:
         outputs = [np.empty((valid, cells) if slot.value.cells else valid, slot.dtype) for slot in self.slots]
         if valid and self.slots:
             if self.values is None:  # compiled when a later pass first needs it
-                self.values = compile_source(values_source("values", self.compiler, [slot.value for slot in self.slots]),
-                                             "values")
+                source = values_source("values", self.compiler, [slot.value for slot in self.slots])
+                self.values = compile_source(source, "values")
             self.values(rows, cells, *inputs, *outputs)
         hidden = [name for name, node in plan.reductions.items() if node.op != "n"]  # the slots' order
         values = {name: (output.reshape(-1), cells if slot.value.cells else 1)
@@ -227,9 +239,87 @@ class Fused:
         self.looked = (table, looked)
         return looked
 
+    @property
+    def order_free(self) -> bool:
+        """Whether a thread's blocks accumulate into one running table (plan milestone 20): where every reduction's
+        result is free of the order of its additions, and none takes each position's values first on NumPy."""
+        cells = math.prod(size for _, size in (self.compiler.cells or ()))
+        return (all(slot.kind in ORDER_FREE for slot in self.slots)
+                and not (cells >= BY_POSITION and self._numpy_first()))
+
+    def _run_into(self, inputs: list, positions: int, cells: int, ks: np.ndarray, missing: np.ndarray,
+                  keep: np.ndarray, ranges: np.ndarray) -> list | None:
+        """The block added into its thread's running table: the tables that gave up to make room (none, or the
+        running table before a block its range could not take), or None where the block's own range is too wide for
+        one and it makes a table of its own."""
+        import threading
+
+        with _LOCK:
+            running = self.running.get(threading.get_ident())
+        given = []
+        if running is not None and not running.takes(ranges, self):
+            given.append(running.table(self))
+            running = None
+        if running is None:
+            running = _Running.for_block(ranges, self)
+            if running is None:
+                return None
+        with _LOCK:
+            self.running[threading.get_ident()] = running
+        running.add(inputs, positions, cells, ks, missing, keep, ranges, self)
+        return given
+
+    def drain(self, pool: Any) -> list:
+        """Every thread's running table, once the blocks are done, as tables to come for the merge: one, the threads'
+        tables merged densely on the pool, pairwise, where their union fits the dense limits; else one each."""
+        with _LOCK:
+            running, self.running = list(self.running.values()), {}
+        if len(running) < 2:
+            return [pool.submit(table.table, self) for table in running]
+        lows, spans = list(running[0].lows), list(running[0].spans)
+        for other in running[1:]:
+            for k in range(len(lows)):
+                if other.spans[k] == 0:
+                    continue
+                if spans[k] == 0:
+                    lows[k], spans[k] = other.lows[k], other.spans[k]
+                    continue
+                top = max(lows[k] + spans[k], other.lows[k] + other.spans[k])
+                lows[k] = min(lows[k], other.lows[k])
+                spans[k] = top - lows[k]
+        if not _Running._fits([span + extra for span, extra in zip(spans, running[0].extra)], self):
+            return [pool.submit(table.table, self) for table in running]
+        made = [pool.submit(table.dense, self, lows, spans) for table in running]
+        while len(made) > 1:  # each merge waits only on work handed to the pool before it
+            made = [pool.submit(_merged_dense, made[k], made[k + 1], self) for k in range(0, len(made) - 1, 2)] + (
+                made[-1:] if len(made) % 2 else [])
+        return [pool.submit(_dense_table, made[0], self)]
+
     def _placed(self, block: Any) -> Any:
         """The block's kernel inputs, positions, values a position, each key's groups and their sizes, each
         position's combination (-1 where none), the rows kept and those dropped; or why it runs on NumPy."""
+        place = self._place(block)
+        return place if isinstance(place, str) else self._finish_placing(*place)
+
+    def _finish_placing(self, inputs: list, positions: int, cells: int, ks: np.ndarray, missing: np.ndarray,
+                        keep: np.ndarray, ranges: np.ndarray) -> Any:
+        """``_placed`` from the placed positions: each key's groups, and each position's combination."""
+        groups = self._groups(positions, keep, ks, missing, ranges)
+        if groups is None:  # a key's range far wider than its values: its groups by sorting them
+            groups = self._sorted(positions, keep, ks, missing, ranges)
+        found, sizes, ranked, dense = groups
+        if (math.prod(sizes) if sizes else 1) >= CODES:  # the reason names no block's count: the result counts them
+            return "its keys' groups make more combinations than 64-bit codes number"
+        if dense is None:
+            dense = np.empty(positions, np.intp)
+            valid = self.dense(positions, keep, ks, missing, *ranked, np.array(sizes, np.int64), dense)
+        else:
+            valid = int(np.count_nonzero(dense >= 0))
+        return inputs, positions, cells, found, sizes, dense, valid, int(np.count_nonzero(keep)) - valid
+
+    def _place(self, block: Any) -> Any:
+        """The block's kernel inputs, positions, and values a position, and each position placed: each key's bucket
+        and whether it is missing, whether it passed the filters, and each key's range; or why it runs on NumPy."""
         for join in self.joins:  # NumPy joins the block first; the kernels read what it brings (milestone 19)
             block = block >> join
 
@@ -247,18 +337,7 @@ class Fused:
         placed = [array for k in range(count) for array in (ks[k], missing[k])]
         if self.place(positions, *inputs, *edges, *placed, keep, ranges) != 0:
             return "a value where agreement with NumPy is not established"
-        groups = self._groups(positions, keep, ks, missing, ranges)
-        if groups is None:  # a key's range far wider than its values: its groups by sorting them
-            groups = self._sorted(positions, keep, ks, missing, ranges)
-        found, sizes, ranked, dense = groups
-        if (math.prod(sizes) if sizes else 1) >= CODES:  # the reason names no block's count: the result counts them
-            return "its keys' groups make more combinations than 64-bit codes number"
-        if dense is None:
-            dense = np.empty(positions, np.intp)
-            valid = self.dense(positions, keep, ks, missing, *ranked, np.array(sizes, np.int64), dense)
-        else:
-            valid = int(np.count_nonzero(dense >= 0))
-        return inputs, positions, cells, found, sizes, dense, valid, int(np.count_nonzero(keep)) - valid
+        return inputs, positions, cells, ks, missing, keep, ranges
 
     def _inputs(self, block: Any, context: Context) -> list[np.ndarray]:
         """The kernels' inputs on *block*, positions first: the variables read, and each island, NumPy applying its
@@ -412,6 +491,244 @@ def _positions_first(value: Any, axis: Any) -> np.ndarray:
         return values  # a field of a record array stays a view: the kernel reads it in place
     moved = np.moveaxis(values, dims.index(axis), 0)
     return np.ascontiguousarray(moved.reshape(moved.shape[0], math.prod(moved.shape[1:])))  # no -1: a block may be empty
+
+
+_LOCK = threading.Lock()
+
+
+class _Running:
+    """A thread's running table for a summary free of its additions' order: dense accumulators over each key's
+    buckets from ``lows[k]`` (``spans[k]`` of them, and one more for its missing group where it keeps one), which a
+    block's positions add into directly; widened when a block holds buckets beyond them, while the table fits the
+    dense limits, else given up as a table of its own. Its order of blocks changes nothing."""
+
+    def __init__(self, lows: list[int], spans: list[int], fused: Fused) -> None:
+        self.lows, self.spans = lows, spans
+        self.extra = [0 if key.part.dropna else 1 for key in fused.keys]  # the missing group's slot
+        self.arrays, self.counts = interleaved(fused.slots, self.size)
+        self.dropped = [0 for _ in fused.keys]
+        self.left = 0  # rows left out for a missing key
+        self.blocks = 0
+
+    @property
+    def sizes(self) -> list[int]:
+        return [span + extra for span, extra in zip(self.spans, self.extra)]
+
+    @property
+    def size(self) -> int:
+        return math.prod(self.sizes) if self.sizes else 1
+
+    @staticmethod
+    def _fits(sizes: list[int], fused: Fused) -> bool:
+        groups = math.prod(sizes) if sizes else 1
+        return groups <= DENSE_GROUPS and groups * fused.group_bytes <= fused.limit and groups < CODES
+
+    @classmethod
+    def for_block(cls, ranges: np.ndarray, fused: Fused) -> _Running | None:
+        lows, spans = [], []
+        for k, key in enumerate(fused.keys):
+            low, high = cls._range(ranges, k, key)
+            lows.append(low)
+            spans.append(high - low + 1)
+        extra = [0 if key.part.dropna else 1 for key in fused.keys]
+        if not cls._fits([span + more for span, more in zip(spans, extra)], fused):
+            return None
+        return cls(lows, spans, fused)
+
+    @staticmethod
+    def _range(ranges: np.ndarray, k: int, key: Key) -> tuple[int, int]:
+        """Key *k*'s buckets in the block: every bin for ``bins``, none where it holds no value."""
+        if key.how == "bins":
+            return 0, len(key.constants["edges"]) - 2
+        low, high = int(ranges[k, 0]), int(ranges[k, 1])
+        return (0, -1) if high < low else (low, high)
+
+    def takes(self, ranges: np.ndarray, fused: Fused) -> bool:
+        """Whether the table holds the block's buckets, widened to if need be and if it fits."""
+        lows, spans = list(self.lows), list(self.spans)
+        for k, key in enumerate(fused.keys):
+            low, high = self._range(ranges, k, key)
+            if high < low:
+                continue
+            if spans[k] == 0:
+                lows[k], spans[k] = low, high - low + 1
+                continue
+            top = max(lows[k] + spans[k] - 1, high)
+            lows[k] = min(lows[k], low)
+            spans[k] = top - lows[k] + 1
+        if lows == self.lows and spans == self.spans:
+            return True
+        if not self._fits([span + extra for span, extra in zip(spans, self.extra)], fused):
+            return False
+        self._widen(lows, spans, fused)
+        return True
+
+    def _widen(self, lows: list[int], spans: list[int], fused: Fused) -> None:
+        """The accumulators widened to *lows* and *spans*, the new groups as each slot starts them (an ``all``'s
+        flags true), the old ones moved to their places."""
+        old = self.sizes
+        where = [np.concatenate([np.arange(span) + (low - new), [new_span] if extra else []]).astype(np.intp)
+                 for span, low, new, new_span, extra in zip(self.spans, self.lows, lows, spans, self.extra)]
+        self.lows, self.spans = lows, spans
+        shape = self.sizes
+
+        def wider(array: np.ndarray, out: np.ndarray) -> None:
+            if shape:
+                out.reshape(shape)[np.ix_(*where)] = array.reshape(old)
+            else:
+                out[:] = array
+
+        arrays, counts = interleaved(fused.slots, self.size)
+        for before, after in zip(self.arrays, arrays):
+            for name, array in before.items():
+                wider(array, after[name])
+        wider(self.counts, counts)
+        self.arrays, self.counts = arrays, counts
+
+    def add(self, inputs: list, positions: int, cells: int, ks: np.ndarray, missing: np.ndarray, keep: np.ndarray,
+            ranges: np.ndarray, fused: Fused) -> None:
+        sizes = self.sizes
+        ranks = [np.arange(span, dtype=np.int64) for span in self.spans]
+        offsets = np.cumsum([0, *self.spans[:-1]], dtype=np.int64) if ranks else np.zeros(0, np.int64)
+        codes = np.array([span if extra else -1 for span, extra in zip(self.spans, self.extra)], np.int64)
+        dense = np.empty(positions, np.intp)
+        valid = fused.dense(positions, keep, ks, missing, np.array(self.lows, np.int64),
+                            np.concatenate(ranks) if ranks else np.zeros(0, np.int64), offsets, codes,
+                            np.array(sizes, np.int64), dense)
+        for k, key in enumerate(fused.keys):
+            if key.part.dropna:
+                self.dropped[k] += int(ranges[k, 2])
+        self.left += int(np.count_nonzero(keep)) - valid
+        if valid:
+            self.blocks += 1
+            fused.accumulate(positions, cells, dense, *inputs,
+                             *(array for arrays in self.arrays for array in arrays.values()), self.counts)
+
+    def table(self, fused: Fused) -> Any:
+        """The running table as the merge takes a block's (``chunked._Table``): its occupied groups, labelled."""
+        return self.dense(fused).table(fused)
+
+    def dense(self, fused: Fused, lows: list[int] | None = None, spans: list[int] | None = None) -> _Dense:
+        """The table's pieces for every group (``Slot.pieces``), an empty group's as its reduction fills one,
+        widened first to *lows* and *spans* where given."""
+        from tidy3a.reductions import REGISTRY
+
+        if lows is not None and spans is not None and (lows != self.lows or spans != self.spans):
+            self._widen(lows, spans, fused)
+        plan = fused.frame._plan
+        cells = math.prod(size for _, size in (fused.compiler.cells or ()))
+        counts = np.ascontiguousarray(self.counts)
+        empty = counts == 0
+        hidden = [name for name, node in plan.reductions.items() if node.op != "n"]  # the slots' order
+        pieces = {}
+        for name, slot, arrays in zip(hidden, fused.slots, self.arrays):
+            kind, held = slot.pieces(arrays, counted_values(counts, slot, cells))
+            node = plan.reductions[name]
+            held = np.asarray(held)  # its own, or the running table's, used no more
+            held[..., empty] = REGISTRY[node.op].fill(node, kind, held.dtype)
+            pieces[name] = (kind, held)
+        return _Dense(list(self.lows), list(self.spans), list(self.extra), counts, pieces, list(self.dropped),
+                      self.left, 1)
+
+
+@dataclass
+class _Dense:
+    """Running tables' pieces for every group of one layout, which the reductions' own merges add elementwise, so
+    the threads' tables merge without being made tables first (plan milestone 20)."""
+
+    lows: list[int]
+    spans: list[int]
+    extra: list[int]
+    counts: np.ndarray
+    pieces: dict
+    dropped: list[int]
+    left: int
+    blocks: int  # the running tables in it, which the float32 estimates' bounds count as blocks
+
+    @property
+    def sizes(self) -> list[int]:
+        return [span + extra for span, extra in zip(self.spans, self.extra)]
+
+    def merged(self, other: _Dense, fused: Fused) -> _Dense:
+        from tidy3a.reductions import REGISTRY
+
+        plan = fused.frame._plan
+        self.counts += other.counts
+        for name, (kind, held) in self.pieces.items():
+            node = plan.reductions[name]
+            self.pieces[name] = (kind, REGISTRY[node.op].merge(node, kind, held, other.pieces[name][1]))
+        self.dropped = [a + b for a, b in zip(self.dropped, other.dropped)]
+        self.left += other.left
+        self.blocks += other.blocks
+        return self
+
+    def table(self, fused: Fused) -> Any:
+        """Its occupied groups as a table, labelled, as the merge takes a block's (``chunked._Table``)."""
+        from tidy3a.chunked import _label_array, _Table
+
+        plan = fused.frame._plan
+        table = _Table(plan)
+        occupied = np.flatnonzero(self.counts)
+        codes = np.unravel_index(occupied, self.sizes) if self.sizes else []
+        found, combos = [], []
+        for k, key in enumerate(fused.keys):
+            code, span = codes[k], self.spans[k]
+            absent = code == span
+            dtype = key.label_dtype
+            if key.how == "bins":
+                labels = labels_of(key, np.zeros(0, np.int64), dtype)
+                local = code.astype(np.intp)
+            else:
+                buckets = np.unique(code[~absent])
+                labels = labels_of(key, buckets + self.lows[k], dtype)
+                fused.learned[k].update(zip((buckets + self.lows[k]).tolist(), labels))
+                local = np.searchsorted(buckets, code).astype(np.intp)
+            missing_group = missing_label(key, dtype) if absent.any() else None
+            local[absent] = len(labels)
+            found.append((_label_array(labels), missing_group, self.dropped[k]))
+            combos.append((found[-1][0], missing_group, local))
+        if not len(occupied):
+            table.merge(found, None, None, None, self.left)
+            return table
+        pieces = {name: (kind, held[..., occupied]) for name, (kind, held) in self.pieces.items()}
+        table.merge(found, combos, self.counts[occupied] * plan.per_position, pieces, self.left)
+        table.blocks = self.blocks  # one long block a running table: its estimates' bounds count its values
+        return table
+
+
+def _merged_dense(left: Any, right: Any, fused: Fused) -> _Dense:
+    return left.result().merged(right.result(), fused)
+
+
+def _dense_table(made: Any, fused: Fused) -> Any:
+    return made.result().table(fused)
+
+
+def interleaved(slots: list[Slot], groups: int) -> tuple[list[dict[str, np.ndarray]], np.ndarray]:
+    """The slots' accumulators and the counts for *groups* groups, each group's together in one row of a buffer
+    (strided views into it), as each slot starts them: so a value's update touches one or two cache lines, not one
+    an accumulator, where the groups are many and the threads share the memory."""
+    starts = [slot.arrays(1) for slot in slots]
+    fields = [(k, name, array.dtype) for k, start in enumerate(starts) for name, array in start.items()]
+    fields.sort(key=lambda field: -field[2].itemsize)  # each field aligned within the row
+    offsets, row = [], 0
+    for _, _, dtype in fields:
+        offsets.append(row)
+        row += dtype.itemsize
+    row = 8 + -(-row // 8) * 8  # the count first, the row a whole number of 8 bytes
+    buffer = np.zeros(max(groups, 1) * row, np.uint8)  # a row at least, so the views are valid when no group is
+
+    def view(dtype: np.dtype, offset: int) -> np.ndarray:
+        return np.ndarray((groups,), dtype, buffer, offset, (row,))
+
+    arrays: list[dict[str, np.ndarray]] = [{} for _ in slots]
+    for (k, name, dtype), offset in zip(fields, offsets):
+        array = view(dtype, 8 + offset)
+        if starts[k][name][0]:
+            array[:] = starts[k][name][0]  # an ``all``'s flags start true
+        arrays[k][name] = array
+    ordered = [{name: arrays[k][name] for name in starts[k]} for k in range(len(slots))]  # the kernel's order
+    return ordered, view(np.dtype(np.int64), 0)
 
 
 def build(frame: Any) -> Fused | None:

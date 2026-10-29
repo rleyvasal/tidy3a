@@ -1355,9 +1355,13 @@ class _Tree:
         self.pool = pool
         self.stack: list[tuple[int, Future]] = []  # (level, the table of 2**level consecutive blocks, to come)
 
-    def add(self, table: _Table) -> None:
-        merged: Future = Future()
-        merged.set_result(table)
+    def add(self, table: _Table | Future) -> None:
+        """A block's table, or one to come (a running table being made one)."""
+        if isinstance(table, Future):
+            merged = table
+        else:
+            merged = Future()
+            merged.set_result(table)
         level = 0
         while self.stack and self.stack[-1][0] == level:
             merged = self.pool.submit(_merged, self.stack.pop()[1], merged)
@@ -1515,6 +1519,10 @@ def _scan_once(frames: Sequence[ChunkedFrame], writers: Sequence[tuple[ChunkedFr
                 if kernels is None:
                     continue
                 table, why = kernels.run(loaded)
+                if isinstance(table, list):  # into its thread's running table: what that gave up, if anything
+                    found.extend((leaf, given) for given in table)
+                    ran.append((leaf, why))
+                    continue
                 if table is None:  # this block on NumPy: the frame's row-wise verbs, then its summary
                     rows = loaded
                     for verb in leaf.frame._steps:
@@ -1541,6 +1549,9 @@ def _scan_once(frames: Sequence[ChunkedFrame], writers: Sequence[tuple[ChunkedFr
                     leaf.parts.append(part)
                 else:
                     trees[id(leaf)].add(part)
+        for key, kernels in fused.items():  # the threads' running tables, once every block is in, made tables
+            for table in kernels.drain(pool):  # side by side
+                trees[key].add(table)
         for leaf in leaves:
             if leaf.table is not None:
                 leaf.table = trees[id(leaf)].result(leaf.table)

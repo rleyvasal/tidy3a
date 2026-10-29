@@ -54,13 +54,14 @@ def fresh(folder):
 def test_a_later_run_reads_the_kernels_an_earlier_one_kept(tmp_path):
     first = fresh(tmp_path)
     assert first["note"] == "ran: 4 blocks in a compiled kernel"
-    assert first["kernels"] == 4 and first["hits"] == 0 and first["misses"] >= 4
+    # four kernels kept, three run: blocks adding into a running table find no block's groups (``occupied``)
+    assert first["kernels"] == 4 and first["hits"] == 0 and first["misses"] >= 3
     kept = sorted(path.name for path in tmp_path.glob("k*.py"))
     assert len(kept) == 4 and all(len(name) == len("k.py") + 32 for name in kept)
     assert list((tmp_path / "__pycache__").glob("*.nbc")) and not list(tmp_path.glob(".k*"))
     second = fresh(tmp_path)
     assert second["points"] == first["points"] and second["note"] == first["note"]
-    assert second["hits"] >= 4 and second["misses"] == 0  # nothing compiled again
+    assert second["hits"] >= 3 and second["misses"] == 0  # nothing compiled again
     assert sorted(path.name for path in tmp_path.glob("k*.py")) == kept
 
 
