@@ -167,10 +167,13 @@ def test_a_summary_after_joins_compiles_with_numpys_bits(shape, threads, monkeyp
     same(frame, want)
 
 
-def test_joins_that_could_change_what_came_before_stay_on_numpy():
+def test_joins_that_could_change_what_came_before_stay_on_numpy(monkeypatch):
     """A full join may widen the axes, and change the types, of what came before it; a join bringing a name a mutate
     made would meet it differently if made first."""
+    import tidy3a.fused
     from tidy3a.fused import plan_for
+
+    monkeypatch.setattr(tidy3a.fused, "unavailable", lambda: None)  # the plan as where Numba is installed
 
     grid, mask, info = big_grid(9, 18)
     widened = tidy(grid, blocks={"time": 16}) >> full_join(WIDER.rename({"elev": "e"})) >> group_by(month) \

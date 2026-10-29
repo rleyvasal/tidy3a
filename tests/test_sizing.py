@@ -638,6 +638,7 @@ def test_what_a_join_brings_over_the_other_axes_is_a_fixed_cost_per_block():
     """A mask or weights over lat and lon is the same size whatever the block's: counted once a block, not a time
     step (milestone 19)."""
     frame, mask, quality = joined(50)
-    weights = mask.assign(weight=(("lat", "lon"), np.ones((9, 12)))).drop_vars("land")
-    plain, masked = cost([frame >> CLIMATE["sum"]]), cost([frame >> left_join(weights) >> CLIMATE["sum"]])
-    assert masked.fixed - plain.fixed >= weights["weight"].nbytes and masked.work == plain.work
+    weights = {dtype: mask.assign(weight=(("lat", "lon"), np.ones((9, 12), dtype))).drop_vars("land")
+               for dtype in ("float32", "float64")}
+    small, large = (cost([frame >> left_join(weights[dtype]) >> CLIMATE["sum"]]) for dtype in ("float32", "float64"))
+    assert large.fixed - small.fixed == 9 * 12 * 4 and large.work == small.work
