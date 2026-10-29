@@ -331,16 +331,22 @@ whole arrays: one tests the filters and places each key's value, one adds
 every value into its group's reductions. They release the GIL, so blocks
 on many threads keep scaling. What compiles:
 `+ - * /`, `**` with the exponents 2, 0.5, -1, and 1 (so
-`\sqrt{x^2 + y^2 + z^2}` does), comparisons, `& | ~`, `sqrt`, `abs`,
-`floor`, and `if_else`, on booleans, integers, float32, and float64; keys
-of integer, boolean, and whole float fields and their `cells`, `bins`, and
-`rounded`; and the built-in reductions. The rest (`exp`, `log`, the
-trigonometric functions, other powers, `//`, `%`, half-precision and
-complex values, time and text keys, a reduction of your own) runs on NumPy
-as before. Before a run, `repr` says which ("planned run: a compiled kernel
-a block", or "NumPy, as mutate(e = exp(x)): exp() runs on NumPy") and
-`explain()` lists every step that does not compile and why; afterwards the
-result notes how its blocks ran ("ran: 40 blocks in a compiled kernel").
+`\sqrt{x^2 + y^2 + z^2}` does), `//` and `%` (NumPy's floored rules, step
+by step), comparisons, `& | ~`, `sqrt`, `abs`, `floor`, `ceil`, `sign`,
+and `if_else`, on booleans, integers, float32, and float64; keys of
+integer, boolean, and whole float fields and their `cells`, `bins`, and
+`rounded`, and of times and durations, each a group or in `bins` of
+times; and the built-in reductions. `exp`, `log`, the trigonometric and
+hyperbolic functions, and other powers are NumPy's own routines, which no
+kernel matches on every machine, so NumPy computes them for each block,
+as islands the kernel reads, a kernel computing their operands: the
+results stay NumPy's. The rest (half-precision and complex values, text
+keys, a time in an expression, `conj`, `dot`, a reduction of your own)
+runs on NumPy as before. Before a run, `repr` says which ("planned run: a
+compiled kernel a block, with NumPy for exp(-distance / 20)", or "NumPy,
+as mutate(e = conj(x)): conj() runs on NumPy") and `explain()` lists every
+step that does not compile and why; afterwards the result notes how its
+blocks ran ("ran: 40 blocks in a compiled kernel").
 A block runs on NumPy instead, with the same result, where one of its
 values is one the kernel cannot match NumPy on (a float key that is not
 whole, a negative zero, an infinity). Where its keys' groups make more
@@ -358,7 +364,12 @@ kernels going first, and `tidy3a.fused.cache.clear()` empties it.
 summary of 40M points in memory (the distance, a filter, and the count and
 mean brightness per ring) took 0.10 s on twelve threads against 0.42 s on
 NumPy, the daytime summary of 2,000 grids 0.038 s against 0.069 s, and
-the 540,000-voxel summary 1.39 s against 3.16 s. A compiled block knows
+the 540,000-voxel summary 1.39 s against 3.16 s; with islands, the rings
+weighted by `exp(-distance / 20)` with the mean of
+`log(abs(intensity) + 1)` 0.16 s against 0.51 s, and the daytime summary
+with the vapour pressure, `6.112 * exp(17.67 * c / (c + 243.5))`, 0.074 s
+against 0.185 s; 10M timestamped values in weekly `bins` of times 0.038 s
+against 0.199 s. A compiled block knows
 which float32 totals no addition rounded, and those settle from the total
 itself, so the voxels' means, many on a tie between two float32 values,
 need no second pass for their exact sums.

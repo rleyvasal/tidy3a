@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- More of a summary compiles (milestone 18). `exp`, `log`, the
+  trigonometric and hyperbolic functions, and powers other than 2, 0.5, -1,
+  and 1 are NumPy's own routines, which no kernel matches on every machine
+  (they differ even between NumPy on ARM and on x86), so NumPy computes them
+  for each block as islands the kernel reads, a kernel computing their
+  operands, and the results stay NumPy's; `repr` names them ("with NumPy
+  for exp(-distance / 20)"). `//`, `%`, `ceil`, and `sign` compile with
+  NumPy's own rules. Times and durations as keys, each a group or in `bins`
+  of times, compile as the integers they are held in. On twelve threads the
+  rings of 40M points weighted by `exp` with the mean of a `log` took 0.16 s
+  against NumPy's 0.51 s, the daytime summary with the vapour pressure
+  0.074 s against 0.185 s, and weekly bins of 10M times 0.038 s against
+  0.199 s, with NumPy's bits. Islands' arrays are counted in the blocks'
+  size.
 - Fixed: a summary of data read in blocks grouped by times gave its labels
   as their nanoseconds, as integers, where in memory they are times; they
   are times now, a missing time's group NaT, on both backends.
