@@ -2073,6 +2073,20 @@ Step 3 status (2026-10-29): done. The estimate's bytes for each block running (`
 
 Step 4 status (2026-10-29): measured, not kept, as decision 3 allows. A prototype, patched into the running table outside the code: a radix-partitioned accumulation, one sequential pass over a block writing each kept position's group and values into the bucket of its group's high bits (`PART_BYTES` of the table a bucket), then each bucket accumulated alone, its part of the table in cache. The 1 m voxels of 40M points, the best of three, plain against parts of 256 kB, 1 MB, and 4 MB: on the 12-core machine 0.673 s against 0.642–0.649 s on twelve threads and 1.089 s against 1.202–1.219 s on one; on the M4 0.384 s against 0.370–0.383 s on ten and 0.786 s against 0.834–0.853 s on one; the rings unchanged; the same bits. At most 5 percent on many threads, and up to 12 percent slower on one: step 2's interleaved rows already put a value's update in one or two cache lines, and writing and reading every value again costs about what the misses it saves did. The parts are left out; what remains on many threads is the placing (the distance, the filter, the keys) and memory's bandwidth across the threads.
 
+Step 5 status (2026-10-29): measured; the exit is met. Each case a fresh process, under 0.13.0's code and this milestone's on the same machine and data, the best of three after a run that compiles; 40M points in blocks of a million, 2,000 grids of 180 x 360 in blocks of 48.
+
+| Case | 12-core, 0.13.0 | 12-core, now | M4, 0.13.0 | M4, now |
+|---|---|---|---|---|
+| Voxels, one thread | 2.662 s | 1.090 s | 2.099 s | 0.779 s |
+| Voxels, 12 / 10 threads | 1.420 s | 0.670 s (2.1 times) | 0.951 s | 0.384 s (2.5 times) |
+| Median by ring, one thread | 3.024 s | 1.390 s | 3.660 s | 1.405 s |
+| Median by ring, 12 / 10 threads | 0.896 s | 0.254 s (3.5 times) | 0.981 s | 0.277 s (3.5 times) |
+| Rings, 12 / 10 threads | 0.106 s | 0.096 s | 0.090 s | 0.081 s |
+| Daytime grids, 12 / 10 threads | 0.039 s | 0.040 s | 0.077 s | 0.052 s |
+| Masked join, 12 / 10 threads | 0.039 s | 0.039 s | 0.055 s | 0.042 s |
+
+Every result the same bits under both codes, on both machines. With `blocks="auto"` and `memory="3GB"` on 12 (10) threads, the peak within the budget: the voxels 0.18 GB above the data set up on the 12-core machine (0.29 GB under 0.13.0) and 1.53 GB on the M4 (1.60 GB), the median 0.00 and 0.44 GB (0.00 and 0.63 GB); the median 0.995 s against 0.377 s and 1.500 s against 0.799 s. Under that budget the voxels gain nothing (1.948 s against 1.961 s; 1.770 s against 1.775 s): a thread's dense limit there, an eighth of a block's share of the budget (about 34 MB on ten threads, 28 MB on twelve), is below the voxels' running table of a million groups (72 MB), so their blocks keep a sorted table each, as under 0.13.0, and are smaller than a million positions (339,000 to 406,000), as both codes choose them. A running table replaces the blocks' dense tables rather than adding to them, so it could take more of a thread's share; that is not in this milestone.
+
 ## 11. Verification and release strategy
 
 Prioritize meaningful checks rather than copying tidy3's entire test matrix:
