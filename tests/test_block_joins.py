@@ -8,7 +8,7 @@ import pytest
 from tidy3a import (fields, filter, full_join, group_by, if_else, inner_join, left_join, mean, mutate, n, nan, sum,
                     summarise, tidy)
 from tidy3a.chunked import ChunkedFrame
-from tidy3a.errors import BlockError
+from tidy3a.errors import AlignError, BlockError
 
 xr = pytest.importorskip("xarray")
 t, land, month, quality = fields("t", "land", "month", "quality")
@@ -179,3 +179,51 @@ def test_joins_that_could_change_what_came_before_stay_on_numpy():
     clash = tidy(grid, blocks={"time": 16}) >> mutate(quality=t * 0) >> left_join(info, suffix=("", "_info")) \
         >> group_by(month) >> summarise(k=n())
     assert any("share names with ones a mutate made" in reason for reason in plan_for(clash).reasons)
+
+
+UNLABELLED = xr.Dataset({"t": (("time", "lat"), rng.normal(280, 10, (STEPS, 9)).astype(np.float32)),
+                         "month": ("time", np.arange(STEPS) // 10 % 12 + 1)})
+PER_STEP = xr.Dataset({"quality": ("time", rng.random(STEPS).astype(np.float32))})
+BY_POSITION = {
+    "filtered on, by month": lambda join: join(PER_STEP) >> filter(quality > 0.2) >> group_by(month)
+    >> summarise(m=mean(t), k=n()),
+    "rows kept": lambda join: join(PER_STEP) >> mutate(q=quality * 2),
+}
+
+
+@pytest.mark.parametrize("threads", [1, 2])
+@pytest.mark.parametrize("join", [left_join, inner_join, full_join], ids=lambda join: join.__name__)
+@pytest.mark.parametrize("name", list(BY_POSITION))
+def test_a_join_unlabelled_on_the_blocked_axis_pairs_each_blocks_positions(name, join, threads):
+    """In memory the two pair by position; each block joins the other data's part at its own positions, still read
+    in blocks, with memory's bits (milestone 19, step 7: the grids' time steps are unlabelled)."""
+    frame = tidy(UNLABELLED, blocks={"time": 25}, threads=threads) >> BY_POSITION[name](join)
+    assert isinstance(frame, ChunkedFrame)
+    same(frame, tidy(UNLABELLED) >> BY_POSITION[name](join))
+
+
+@pytest.mark.parametrize("verbs", [lambda: filter(month > 3) >> left_join(PER_STEP),
+                                   lambda: left_join(PER_STEP.isel(time=slice(0, 90)))],
+                         ids=["after a filter, which labels the positions", "of another length"])
+def test_positions_that_cannot_be_paired_are_refused_as_in_memory(verbs):
+    with pytest.raises(AlignError) as memory:
+        tidy(UNLABELLED) >> verbs()
+    with pytest.raises(AlignError) as blocks:
+        tidy(UNLABELLED, blocks={"time": 25}) >> verbs()
+    assert str(blocks.value) == str(memory.value)
+
+
+def test_a_summary_after_a_join_by_position_compiles(monkeypatch):
+    pytest.importorskip("numba")
+    from tidy3a.fused import plan_for
+
+    verbs = BY_POSITION["filtered on, by month"](left_join)
+    frame = tidy(UNLABELLED, blocks={"time": 25}, threads=2) >> verbs
+    assert plan_for(frame).compiled, plan_for(frame).reasons
+    frame.collect()
+    assert frame._result._notes[-1] == "ran: 5 blocks in a compiled kernel"
+    with monkeypatch.context() as patch:
+        patch.setenv("TIDY3A_COMPILED", "0")
+        want = tidy(UNLABELLED, blocks={"time": 25}) >> verbs
+        want.collect()
+    same(frame, want)

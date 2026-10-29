@@ -101,3 +101,18 @@ def test_excluding_positions_reads_every_block(reads):
     got = read_array(CLOUD, blocks=1_000, **OPTIONS) >> take(point=[-1, -2])
     assert len(reads) == 10
     same(got, read_array(CLOUD, **OPTIONS) >> take(point=[-1, -2]))
+
+
+@pytest.mark.parametrize("verb, spans", [
+    (slice_head(point=10), [(0, 10)]),
+    (slice_tail(point=10), [(9_990, 10_000)]),
+    (slice_head(point=2_500), [(0, 1_000), (1_000, 2_000), (2_000, 2_500)]),
+    (take(point=[9_999, 3, 4_500, 3, 50_000]), [(2, 3), (4_499, 4_500), (9_998, 9_999)]),
+    (take(point=[5, 8, 900]), [(4, 900)]),
+], ids=["head", "tail", "across blocks", "scattered", "near one another"])
+def test_known_positions_are_read_alone_not_the_blocks_holding_them(verb, spans, reads):
+    """A slice of ten positions reads ten, a block's worth of data never held for it; positions near one another
+    are read in one span (milestone 19, step 7)."""
+    got = read_array(CLOUD, blocks=1_000, **OPTIONS) >> mutate(w=x * 2) >> verb
+    assert sorted(reads) == spans
+    same(got, read_array(CLOUD, **OPTIONS) >> mutate(w=x * 2) >> verb)

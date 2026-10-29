@@ -302,6 +302,7 @@ class Blocks:
     positions: bool = False  # rows joined keep the blocks' positions as labels: a slice's own blocks (milestone 19)
     prunes: tuple = ()  # filters reading only the axis's labels, which settle whether a block keeps anything
     skipped: frozenset = frozenset()  # the blocks a run need not read, none of whose positions those filters keep
+    narrowed: tuple[tuple[int, int], ...] | None = None  # spans read in place of the blocks: a slice's positions
 
     @property
     def axis(self) -> str:
@@ -326,6 +327,8 @@ class Blocks:
     @property
     def spans(self) -> list[tuple[int, int]]:
         """The spans a run reads: every block's, or a sample's."""
+        if self.narrowed is not None:
+            return list(self.narrowed)
         every = self.every
         if self.chosen is not None:
             return [every[number] for number in self.chosen]
@@ -481,7 +484,10 @@ class ChunkedFrame(TidyArray):
             operation = "slice_axes"  # other axes: a step each block runs, as every block holds them all
         if operation in JOINS and not self._summarised:
             whole = _whole_join(self, verb)
-            if whole is None and operation == "full_join" and _along(self, verb):
+            paired = None if whole is not None else _by_position(self, verb)
+            if paired is not None:
+                verb = paired
+            elif whole is None and operation == "full_join" and _along(self, verb):
                 one = _one_pass(self, verb)
                 if isinstance(one, str):
                     whole = one
@@ -674,8 +680,9 @@ def _sliced(frame: ChunkedFrame, verb: Any) -> TidyArray:
     """A slice of the blocked axis, in memory, from only the blocks holding what it keeps (milestone 19). Where the
     positions are the source's, nothing before the slice removing any, those blocks are known before reading; where a
     filter or an inner join decides them, blocks are read from the start (from the end for ``slice_tail``), one,
-    then more at a time, until enough rows are kept, as Spark's ``LIMIT`` scales up the partitions it reads. A slice
-    excluding positions, or after a one-pass full join, reads every block."""
+    then more at a time, until enough rows are kept, as Spark's ``LIMIT`` scales up the partitions it reads. Known
+    positions are read alone, in runs (``_runs``), not the blocks holding them. A slice excluding positions, or
+    after a one-pass full join, reads every block."""
     import bisect
 
     from tidy3a import verbs
@@ -708,14 +715,15 @@ def _sliced(frame: ChunkedFrame, verb: Any) -> TidyArray:
             index = [position - 1 for position in wanted if position <= size]
         if not index:  # nothing kept: the slice of the block of no positions, nothing read
             return verb._apply(frame)
-        chosen = sorted({bisect.bisect_right(starts, position) - 1 for position in index})
-        rows = _rows_of(frame, layout, chosen)
-        offsets, at = {}, 0
-        for number in chosen:
-            offsets[number] = at
-            at += every[number][1] - every[number][0]
-        relative = [offsets[number] + position - every[number][0]
-                    for position in index for number in [bisect.bisect_right(starts, position) - 1]]
+        spans = _runs(sorted(set(index)), starts)
+        rows = _rows_of(frame, dataclasses.replace(layout, narrowed=tuple(spans)), None)
+        offsets, at = [], 0
+        for start, stop in spans:
+            offsets.append(at)
+            at += stop - start
+        firsts = [start for start, _ in spans]
+        relative = [offsets[number] + position - firsts[number]
+                    for position in index for number in [bisect.bisect_right(firsts, position) - 1]]
         kept = rows._evolve(rows._backend.keep(rows._data, axis, relative))
         rest = {**axes, axis: list(range(1, len(relative) + 1)) if operation == "slice" else len(relative)}
         again = verbs.slice(drop=verb._arguments[0], **rest) if operation == "slice" else \
@@ -740,9 +748,29 @@ def _sliced(frame: ChunkedFrame, verb: Any) -> TidyArray:
     return verb(rows)
 
 
-def _rows_of(frame: ChunkedFrame, layout: Blocks, chosen: Sequence[int]) -> TidyArray:
-    """The rows *frame*'s verbs keep from the blocks *chosen*, in memory, the blocks' positions their labels."""
-    sample = frame._wrap(frame, dataclasses.replace(layout, chosen=tuple(chosen), positions=True), frame._steps,
+def _runs(positions: Sequence[int], starts: Sequence[int]) -> list[tuple[int, int]]:
+    """The spans to read for sorted *positions*: each run of them within a block, gaps of up to ``GAP`` positions
+    read through, so a slice of ten positions reads ten, not the block holding them, and scattered ones few spans."""
+    import bisect
+
+    spans: list[list[int]] = []
+    for position in positions:
+        block = bisect.bisect_right(starts, position) - 1
+        if spans and spans[-1][2] == block and position - spans[-1][1] <= GAP:
+            spans[-1][1] = position + 1
+        else:
+            spans.append([position, position + 1, block])
+    return [(start, stop) for start, stop, _ in spans]
+
+
+GAP = 4_096  # positions a slice's span reads through rather than starting another
+
+
+def _rows_of(frame: ChunkedFrame, layout: Blocks, chosen: Sequence[int] | None) -> TidyArray:
+    """The rows *frame*'s verbs keep from the blocks *chosen* (else the spans the layout narrows the run to), in
+    memory, the blocks' positions their labels."""
+    chosen = None if chosen is None else tuple(chosen)
+    sample = frame._wrap(frame, dataclasses.replace(layout, chosen=chosen, positions=True), frame._steps,
                          frame._plan, frame._reads)
     _scan([sample])
     return sample._result
@@ -766,6 +794,42 @@ def _along(frame: ChunkedFrame, verb: Any) -> bool:
     other = verb._arguments[0]
     right = other if isinstance(other, TidyArray) else tidy(other)
     return right._backend.has_axis(right._data, frame._blocks.axis)
+
+
+def _by_position(frame: ChunkedFrame, verb: Any) -> Any:
+    """A join whose other data is unlabelled on the blocked axis, as the data is still (a filter labels it with its
+    positions, as in memory), or None: in memory the two pair by position, the same length; each block joins the
+    other data's part at its own positions, labelled with them as the block is (``Blocks.load``), so every join
+    keeps them all as in memory."""
+    from tidy3a import verbs
+    from tidy3a.errors import AlignError
+    from tidy3a.frame import tidy
+
+    blocks, backend = frame._blocks, frame._backend
+    other, suffix, tolerance = verb._arguments
+    right = other if isinstance(other, TidyArray) else tidy(other, backend=backend.name)
+    axis = blocks.axis
+    if backend.has_labels(frame._data, axis) or right._backend is not backend \
+            or not backend.has_axis(right._data, axis) or backend.has_labels(right._data, axis):
+        return None
+    length = backend.sizes(right._data)[axis]
+    if length != blocks.size:
+        raise AlignError(f"{axis} is unlabelled on both sides with different lengths ({blocks.size:,} and "
+                         f"{length:,}); positions cannot be paired")
+    numbered = backend.label_positions(right._data, axis, 0)
+    join = getattr(verbs, verb._operation)
+
+    def placed(block: TidyArray) -> TidyArray:
+        if not backend.has_labels(block._data, axis):  # the block of no positions, checked as in memory
+            part = right._evolve(backend.isel(right._data, {axis: slice(0, 0)}))
+        else:
+            mine = np.asarray(backend.axis_labels(block._data, axis).values, dtype=np.int64)
+            part = right._evolve(backend.isel(numbered, {axis: mine - 1}))
+        return join(part, suffix=suffix, tolerance=tolerance)._apply(block)
+
+    from tidy3a.verbs import Verb
+
+    return Verb(verb.text, placed, operation=verb._operation, arguments=verb._arguments)
 
 
 def _one_pass(frame: ChunkedFrame, verb: Any) -> Any:
@@ -1364,10 +1428,11 @@ def _naming(blocks: Blocks, span: tuple[int, int]) -> Iterator[None]:
         yield
     except (TidyError, LabelArrayError) as error:
         spans = blocks.every
-        if span not in spans:  # a one-pass full join's own block
+        if blocks.tail and span == (blocks.size, blocks.size):  # a one-pass full join's own block
             where = f"in the other data's labels no block holds (on {blocks.axis})"
-        else:
-            where = (f"in block {spans.index(span) + 1:,} of {len(spans):,} "
+        else:  # a block, or the part of one a slice reads
+            number = next(number for number, (start, stop) in enumerate(spans) if start <= span[0] < max(stop, 1))
+            where = (f"in block {number + 1:,} of {len(spans):,} "
                      f"(positions {span[0] + 1:,}–{span[1]:,} on {blocks.axis})")
         named = copy.copy(error)
         named.args = (f"{error.args[0]}\n  {where}" if error.args else where, *error.args[1:])
