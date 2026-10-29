@@ -130,6 +130,11 @@ class Source:
         """The axis's labels, without reading the data: its positions, as the blocks are labelled with them."""
         return np.arange(self.size)
 
+    def block_labels(self, start: int, stop: int) -> np.ndarray:
+        """A block's labels on the axis, without reading its data: its 1-based positions, as ``Blocks.load`` labels
+        them."""
+        return np.arange(start + 1, stop + 1)
+
 
 class FileSource(Source):
     """A file memory-mapped again for each block; the block is a copy, and the map closes with it."""
@@ -221,6 +226,11 @@ class DatasetSource(Source):
             return np.asarray(self.data[self.axis].values)
         return np.arange(self.size)
 
+    def block_labels(self, start: int, stop: int) -> np.ndarray:
+        if self.axis in self.data.coords:
+            return np.asarray(self.data[self.axis].values[start:stop])
+        return np.arange(start + 1, stop + 1)
+
     def stored(self, names: frozenset | None) -> tuple[list[tuple[int, int]], bool] | None:
         """The Dask chunks of the variables *names* along the axis; else the chunks a file stores them in (xarray's
         ``preferred_chunks``, for NetCDF4 and Zarr), every variable's whole at once where their sizes differ."""
@@ -290,6 +300,8 @@ class Blocks:
     parts: tuple[tuple[int, int], ...] | None = None  # the storage's chunks an "auto" size's blocks are made of
     tail: bool = False  # a run ends with a block of no positions, a one-pass full join's own (milestone 19)
     positions: bool = False  # rows joined keep the blocks' positions as labels: a slice's own blocks (milestone 19)
+    prunes: tuple = ()  # filters reading only the axis's labels, which settle whether a block keeps anything
+    skipped: frozenset = frozenset()  # the blocks a run need not read, none of whose positions those filters keep
 
     @property
     def axis(self) -> str:
@@ -317,7 +329,8 @@ class Blocks:
         every = self.every
         if self.chosen is not None:
             return [every[number] for number in self.chosen]
-        return [*every, (self.size, self.size)] if self.tail else every
+        kept = [span for number, span in enumerate(every) if number not in self.skipped] if self.skipped else every
+        return [*kept, (self.size, self.size)] if self.tail else kept
 
     def sized(self, frames: Sequence[ChunkedFrame]) -> Blocks:
         """These blocks for *frames*, which run together: with ``blocks="auto"``, the most positions whose blocks, as
@@ -489,6 +502,8 @@ class ChunkedFrame(TidyArray):
         steps = (*self._steps, verb)
         plan = _check(self, verb, result, steps)
         reads = None if self._reads is None or EVERYTHING in read else self._reads | frozenset(read)
+        if operation == "filter" and read and EVERYTHING not in read and set(read) <= {blocks.axis}:
+            blocks = dataclasses.replace(blocks, prunes=(*blocks.prunes, verb))  # a block's labels settle it
         frame = self._wrap(result, blocks, steps, plan, reads)
         layout = frame._layout()  # a size chosen now, so a verb that leaves no block within the budget is refused here
         record = frame._record
@@ -1404,6 +1419,9 @@ def _scan_once(frames: Sequence[ChunkedFrame], writers: Sequence[tuple[ChunkedFr
     blocks = every[0]._layout() if len(every) == 1 else every[0]._blocks.sized(every)
     if any(frame._blocks.tail for frame in every) and not blocks.tail:  # a one-pass full join's tail, for every frame
         blocks = dataclasses.replace(blocks, tail=True)
+    if blocks.chosen is None and every and all(frame._blocks.prunes for frame in every):
+        kept = set().union(*(_kept_blocks(frame, blocks) for frame in every))
+        blocks = dataclasses.replace(blocks, skipped=frozenset(range(len(blocks.every))) - kept)
     leaves = [_Leaf(frame, _Table(frame._plan) if frame._summarised else None, []) for frame in frames]
     leaves += [_Leaf(frame, None, [], writer) for frame, writer in writers]
     compiled = {id(leaf): _fused(leaf.frame) for leaf in leaves if leaf.table is not None}
@@ -1477,8 +1495,29 @@ def _scan_once(frames: Sequence[ChunkedFrame], writers: Sequence[tuple[ChunkedFr
             frame._result = frame._evolve()
         else:
             frame._result = _result(frame, table.plan, table, table.finish(settled[id(leaf)][0]))
+        if blocks.skipped and frame._result is not None:  # what the filters on the axis's labels spared reading
+            filters = ", ".join(verb.text for verb in frame._blocks.prunes)
+            frame._result = frame._result._evolve(notes=[
+                f"skipped {len(blocks.skipped):,} of {len(blocks.every):,} blocks, which {filters} keeps none of"])
         if id(leaf) in runs and blocks.chosen is None:  # how the blocks ran, beside the result (milestone 16)
             frame._result = _recorded(frame._result._evolve(notes=[_ran(runs[id(leaf)])]))
+
+
+def _kept_blocks(frame: ChunkedFrame, blocks: Blocks) -> set[int]:
+    """The blocks *frame*'s filters on the axis's labels keep a position of, tried on each block's labels alone,
+    nothing read (milestone 19, as Spark prunes partitions by their statistics)."""
+    backend, axis, source = frame._backend, blocks.axis, blocks.source
+    kept = set()
+    for number, (start, stop) in enumerate(blocks.every):
+        labels = source.block_labels(start, stop)
+        probe = TidyArray(backend.summary({"_": backend.array(np.zeros(len(labels), dtype=bool), dims=(axis,),
+                                                               coords={axis: labels}, name="_")}, {}, {}),
+                          backend=backend)
+        for verb in frame._blocks.prunes:
+            probe = verb._apply(probe)
+        if backend.sizes(probe._data).get(axis, 0):
+            kept.add(number)
+    return kept
 
 
 def _passes(leaves: Sequence[_Leaf], blocks: Blocks, pool: ThreadPoolExecutor,
