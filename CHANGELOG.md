@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.15.0 — 2026-10-29
 
 - Sorting (milestone 21). `arrange(*keys)` sorts the positions of the one
   axis its keys vary along, by the first key, ties by the next, ties in
