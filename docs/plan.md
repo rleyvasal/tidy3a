@@ -2138,6 +2138,8 @@ Step 7 status (2026-10-29): measured; the exit met but for two items. On the 12-
 
 Every result the same bits as in memory (the joins every block compiled), the sorted file in order, no spill left. Before this milestone the join ran on the whole axis, 4.52 s and a 9.93 GB peak. Met: the join no slower than memory on one thread and more than twice as fast on twelve; the sort likewise; the 1,000 nearest in 0.11 s and nothing above the data; the sorted write at no peak above the data; the same bits and order. Not met: the join's peak in blocks of 48 on twelve threads, 1.73 GB above the data against at most 1 GB (in blocks of the stores' own 24 steps, or sized for a budget, 0.80 and 0.89 GB); and the sorted write's time against the same sort's rows collected in blocks, 3.18 s against 1.92 s (the merge, on one thread, about 1.6 s of it). Accepted (2026-10-29) by the owner, as measured.
 
+Step 8 status (2026-10-29): done, staged for review. The README has a section on sorting (`arrange`, `desc`, the stable order, missing values last, an example a test runs), the blocks' section the sorts of data read in blocks (merged blocks, a slice after a sort, a sorted write by an external merge sort) and joins of two frames read in blocks, with the measurements, and the API table `arrange` and `desc`. The CHANGELOG's Unreleased entry has the same, and the fix to compiled joins. The README's examples run (10 passed). Milestone 21 is done.
+
 ## 11. Verification and release strategy
 
 Prioritize meaningful checks rather than copying tidy3's entire test matrix:

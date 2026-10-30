@@ -124,6 +124,27 @@ print(data >> group_by(ring) >> summarise(points=n()) >> pull("points"))  # [2 1
 print(data >> group_by(ring, dropna=False) >> summarise(points=n()) >> pull("ring"))  # [ 0.  1. nan]
 ```
 
+## Sorting
+
+`arrange` sorts the positions of the one axis its keys vary along: by the
+first key, ties by the next, and ties left in their order (a stable sort,
+as dplyr's). `desc(key)` sorts a key downwards; missing values (NaN, NaT)
+come last either way. Every variable along the axis moves with it, and its
+labels too:
+
+```python
+import numpy as np
+from tidy3a import arrange, desc, fields, infer, pull, read_array, slice_head
+
+values = np.array([[10, 0], [20, 0], [30, 1], [40, 1], [50, np.nan]], dtype="float32")
+data = read_array(values, dims={"point": infer, "feature": 2},
+                  labels={"feature": ["intensity", "ring"]}, field_axis="feature")
+intensity, ring = fields("intensity", "ring")
+
+print(data >> arrange(desc(ring), intensity) >> pull("intensity"))  # [30. 40. 10. 20. 50.]
+print(data >> arrange(desc(intensity)) >> slice_head(point=2) >> pull("intensity"))  # [50. 40.]
+```
+
 ## Working with xarray
 
 `tidy()` wraps an xarray `Dataset` or `DataArray`, and `collect()` gives the
@@ -425,9 +446,13 @@ before: a mask over lat and lon joins every block whole, a value per time
 step the part at each block's labels (or, where neither side labels the
 axis, its positions). A `full_join` along the blocked axis runs in one
 pass, the other data's labels no block holds joined in a last block of
-their own, with the types and order the join gives in memory. A join with
-data read in blocks too, or a `full_join` along the axis after a filter,
-runs on the whole axis, and the result notes why. `slice_head`,
+their own, with the types and order the join gives in memory. Two frames
+read in blocks along the same axis join block by block too: each block
+looks its labels up among the other's, known before reading, and reads
+only those positions of it, through the other's own verbs. A join the
+blocks cannot make alone (the other read in blocks along another axis, or
+filtered, or a `full_join` along the axis after a filter) runs on the
+whole axis, and the result notes why. `slice_head`,
 `slice_tail`, and `slice` of the blocked axis read only the positions they
 keep; after a filter, blocks are read from the start (from the end for
 `slice_tail`), one, then more at a time, until enough rows are kept. A
@@ -438,7 +463,24 @@ in memory. On 2,000 grids of 180 x 360, a land mask joined, masked, and
 averaged by month took 0.52 s in blocks of 48 on one thread against
 0.93 s in memory, and 0.037 s on twelve, with no memory beyond the data's;
 the first ten of 40M points read ten, in 0.001 s, where they read the
-whole 800 MB file before.
+whole 800 MB file before. The 2,000 grids' temperature from a NetCDF file
+joined with their humidity from a Zarr store, both read in blocks, and
+averaged by month took 0.36 s on twelve threads against 2.30 s in memory,
+where it ran on the whole axis before (4.52 s, peaking at 9.93 GB).
+
+`arrange` sorts data read in blocks as well: each block's rows are sorted
+on their own, side by side, and the sorted blocks merged, earlier blocks
+first among ties, so the order is memory's. The rows come back in memory;
+`arrange` then `slice_head(n)` or `slice_tail(n)` keeps only each block's
+first or last *n* (a partial sort) and merges those, so the 1,000 points
+nearest of 40M took 0.11 s, holding nothing beyond the data, against 6.0 s
+for a sort in memory. `arrange` then `write(path)` writes rows that need
+not fit: each block's sorted rows are spilled to a run of their own beside
+the file, and the runs merged into it in one streaming pass (an external
+merge sort), its memory the blocks in flight and the merge's windows,
+sized for `memory=`. The 40M points sorted by distance took 1.92 s on
+twelve threads with their rows in memory, and 3.18 s written to a file,
+with no peak above the data.
 
 A reduction of your own (experimental): `register_reduction` takes its
 NumPy function for data in memory and, for blocks, how one block's pieces
@@ -538,7 +580,7 @@ first (`nir * 1.0 - red`) when a result can be negative.
 | | |
 |---|---|
 | Reading | `read_array` (raw files, `.npy`, NumPy arrays, `lazy=True` to memory-map, `blocks=` to run the verbs block by block, `blocks="auto"` with `memory=` to size the blocks for a budget), `read_binary` (fixed-width mixed records), `fixed_text`, `infer`, `tidy()` (xarray objects, or Polars and tidy3 tables with `axis=`) |
-| Verbs | `select`, `filter`, `slice`, `slice_head`, `slice_tail`, `mutate`, `group_by`, `ungroup`, `summarise`, `left_join`, `inner_join`, `full_join`, `bind_cols`, `pull` |
+| Verbs | `select`, `filter`, `slice`, `slice_head`, `slice_tail`, `arrange` (with `desc`), `mutate`, `group_by`, `ungroup`, `summarise`, `left_join`, `inner_join`, `full_join`, `bind_cols`, `pull` |
 | Grouping keys | a field or an axis name, `bins`, `rounded`, `cells` |
 | Reductions | `mean`, `sum`, `min`, `max`, `median`, `quantile`, `std`, `var`, `any`, `all`, `n`, with `over=` and `na_rm=`; `register_reduction` adds one of your own (experimental) |
 | Expressions | `fields`, `col`, `variable`, `label`, `env`, `if_else`, `[x, y, z]` vectors, `assign`, `formula` (plain maths or a strict LaTeX dialect) |
@@ -555,7 +597,7 @@ Laziness: `read_array(..., lazy=True)` memory-maps a file and `tidy()` keeps
 a lazy xarray input lazy until `collect()`, but the verbs themselves run
 eagerly: arithmetic allocates results and `filter` evaluates its mask.
 `read_array(..., blocks=rows)` runs them block by block instead, for
-summaries, joins, and slices (above).
+summaries, joins, slices, and sorts (above).
 `read_binary`'s options are in [the reader contract](docs/m6-read-binary.md).
 
 ## Notebooks

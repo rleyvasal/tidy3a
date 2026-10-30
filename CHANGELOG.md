@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+- Sorting (milestone 21). `arrange(*keys)` sorts the positions of the one
+  axis its keys vary along, by the first key, ties by the next, ties in
+  their order (a stable sort); `desc(key)` sorts a key downwards; missing
+  values last either way; every variable along the axis, and its labels,
+  move with it. On data read in blocks each block is sorted on its own and
+  the blocks merged, the order memory's; `arrange` then `slice_head(n)` or
+  `slice_tail(n)` keeps each block's first or last *n* (the 1,000 nearest
+  of 40M points in 0.11 s, against 6.0 s for a sort in memory); and
+  `arrange` then `write(path)` writes rows that need not fit, an external
+  merge sort through runs spilled beside the file, at no peak above the
+  data. 40M points sorted on twelve threads took 1.92 s with the rows in
+  memory and 3.18 s written, against 6.04 s in memory.
+- Joins of two frames read in blocks run block by block: each block reads
+  only the other's rows at its labels, through the other's own verbs, and
+  the frame stays read in blocks, a summary after it compiling. A NetCDF
+  temperature joined with a Zarr humidity and averaged by month took 0.36 s
+  on twelve threads against 2.30 s in memory (4.52 s and a 9.93 GB peak on
+  the whole axis before).
+- Fixed: a compiled summary after a join met a variable a `select` before
+  the join dropped, suffixing it, where the data held one of the name the
+  join brings; each join now meets what the verbs held there.
+
 ## 0.14.0 — 2026-10-29
 
 - The compiled path's slowest summaries, faster (milestone 20). Where every
