@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- Notebooks take two more pieces of R syntax, as tidy3's notebook layer
+  does (tidy3 0.12.7 and 0.12.9): `!` is negation inside a tidy3a verb,
+  `filter(!(x > 10))` and `select(!ring)`, also at the start of a line
+  inside the call, while shell lines outside a verb stay as they are; and a
+  `name = value` may come before a positional argument in `mutate` and
+  `group_by`, `group_by(window = bins(time, "30 days"), lat, lon)`, keeping
+  the order written. `group_by` accepts `assign("name", value)` as a key in
+  place, the form the notebook passes. With tidy3 also loaded, each
+  package's rewrite of the other's calls is handed back to it, in either
+  load order.
+- The README no longer says sharing a notebook with tidy3 waits on a tidy3
+  change: it shipped in tidy3 0.9.0.
+
 ## 0.15.0 — 2026-10-29
 
 - Sorting (milestone 21). `arrange(*keys)` sorts the positions of the one

@@ -4,7 +4,12 @@ import pytest
 pytest.importorskip("IPython")
 from IPython.core.interactiveshell import InteractiveShell  # noqa: E402
 
-from tidy3a.jupyter import apply_masking, rewrite_vector_assignments  # noqa: E402
+from tidy3a.jupyter import (  # noqa: E402
+    apply_masking,
+    rewrite_bang_not,
+    rewrite_keywords_before_positional,
+    rewrite_vector_assignments,
+)
 
 SETUP = (
     "import numpy as np, xarray as xr\n"
@@ -170,15 +175,57 @@ def test_source_rewrites():
     assert apply_masking("filter(x > 1)", {}) == "filter(x > 1)"  # not tidy3a's filter
 
 
+def test_bang_rewrite():
+    assert rewrite_bang_not("d >> filter(!(x > 1), y != 2)") == "d >> filter(~(x > 1), y != 2)"
+    assert rewrite_bang_not("d >> filter(\n  !(x > 50)\n)") == "d >> filter(\n  ~(x > 50)\n)"
+    shell = "!pip install tidy3a\nfiles = !ls\nd >> select(!z)  # !kept"
+    assert rewrite_bang_not(shell) == "!pip install tidy3a\nfiles = !ls\nd >> select(~z)  # !kept"
+    assert rewrite_bang_not('filter(s == "!a", !b)') == 'filter(s == "!a", ~b)'
+
+
+def test_keywords_before_positional_rewrite():
+    rewrite = rewrite_keywords_before_positional
+    assert rewrite('group_by(w = bins(t, "3 days"), lat, dropna=False)') == (
+        'group_by(__tidy3a_assign__(\'w\', bins(t, "3 days")), lat, dropna=False)'
+    )
+    assert rewrite("ta.mutate(c = f(a, b=1), __tidy3a_assign__([x], v), k = 1)") == (
+        "ta.mutate(__tidy3a_assign__('c', f(a, b=1)), __tidy3a_assign__([x], v), k = 1)"
+    )
+    for valid in ("mutate(c = 1, k = 2)", "group_by(lat, w = f(t))", "group_by(axis = 'g', lat)", "select(z = a, b)"):
+        assert rewrite(valid) == valid
+
+
+def test_r_negation_in_notebook_cells(shell):
+    ns = run(shell, "from tidy3a import *\n" + SETUP + "kept = cloud >> filter(!(intensity > 15)) >> pull(point)")
+    assert ns["kept"].tolist() == [1]
+    ns = run(shell, "kept = cloud >> filter(\n    ring == 1,\n    !(x > 10)\n) >> pull(point)")
+    assert ns["kept"].tolist() == [1]
+    ns = run(shell, "xyz = cloud >> select(!ring, !intensity)\nlisted = !echo shell")
+    assert ns["xyz"].collect()["values"].feature.values.tolist() == ["x", "y", "z"]
+    assert list(ns["listed"]) == ["shell"]
+
+
+def test_keywords_before_positional_in_notebook_cells(shell):
+    run(shell, "from tidy3a import *\n" + SETUP)
+    ns = run(shell, "g = cloud >> group_by(big = intensity > 15, ring) >> summarise(m = mean(intensity))")
+    assert list(ns["g"].collect().data_vars)[:2] == ["big", "ring"]
+    ns = run(
+        shell,
+        'R = xr.DataArray(np.eye(3), dims=("i", "feature"), coords={"i": ["x", "y", "z"], "feature": ["x", "y", "z"]})\n'
+        'out = cloud >> mutate(w = intensity * 2, [x, y, z] = dot(R, [x, y, z], over="feature")) >> pull(w)',
+    )
+    assert ns["out"].tolist() == [20.0, 40.0, 60.0, 80.0]
+
+
 # ── tidy3 and tidy3a in one notebook ────────────────────────────────────────
 
 
-def both_shell():
+def both_shell(order=("tidy3", "tidy3a")):
     pytest.importorskip("tidy3")
     InteractiveShell.clear_instance()
     shell = InteractiveShell.instance()
-    shell.run_line_magic("load_ext", "tidy3.jupyter")
-    shell.run_line_magic("load_ext", "tidy3a.jupyter")
+    for package in order:
+        shell.run_line_magic("load_ext", f"{package}.jupyter")
     return shell
 
 
@@ -214,3 +261,30 @@ def test_tidy3_and_tidy3a_share_a_notebook(first):
 def test_arrange_and_desc_take_bare_names(shell):
     ns = run(shell, "from tidy3a import *\n" + SETUP + "ordered = cloud >> arrange(ring, desc(intensity)) >> pull(intensity)")
     assert np.asarray(ns["ordered"]).tolist() == [30.0, 10.0, 40.0, 20.0]
+
+
+@pytest.mark.parametrize("order", [("tidy3", "tidy3a"), ("tidy3a", "tidy3")])
+def test_r_syntax_with_both_packages_loaded(order):
+    masking = pytest.importorskip("tidy3.masking")
+    if not hasattr(masking, "rewrite_keywords_before_positional"):
+        pytest.skip("needs tidy3 0.12.7 or later, which rewrites keywords before positional arguments")
+    shell = both_shell(order)
+    try:
+        tidy3_cell = (
+            "from tidy3 import *\n"
+            'cars = tidy({"mpg": [21.0, 30.0, 25.0], "wt": [2.6, 1.9, 2.6]})\n'
+            "columns = (cars >> group_by(heavy = wt > 2, mpg) >> summarise(n = n())).collect().columns\n"
+            "slow = (cars >> filter(!(mpg > 22))).collect()['mpg'].to_list()"
+        )
+        tidy3a_cell = (
+            "from tidy3a import *\n" + SETUP
+            + "heavy_rows = cloud >> group_by(big = intensity > 15, ring) >> summarise(m = mean(intensity)) >> pull(big)"
+        )
+        for cell in [tidy3_cell, tidy3a_cell] * 2:
+            result = shell.run_cell(cell)
+            assert result.success, result.error_before_exec or result.error_in_exec
+        assert set(shell.user_ns["columns"]) == {"heavy", "mpg", "n"}
+        assert shell.user_ns["slow"] == [21.0]
+        assert shell.user_ns["heavy_rows"].tolist() == [False, True, True]
+    finally:
+        close_both(shell)

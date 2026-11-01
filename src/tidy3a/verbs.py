@@ -810,6 +810,10 @@ def group_by(*keys: Any, dropna: bool = True, axis: str | None = None, **named: 
             if isinstance(key, ValueKey):
                 resolved.append(key.with_dropna(bool(dropna)))
                 continue
+            if isinstance(key, Assignment) and isinstance(key.target, str):
+                # assign("window", bins(...)): name = expression in the written order, as the notebook passes it
+                resolved.append(ValueKey(key.target, as_expr(key.value), dropna=bool(dropna)))
+                continue
             name = key.name if isinstance(key, Ref) else key
             if not isinstance(name, Hashable) or isinstance(key, (Expr, list)) and not isinstance(key, Ref):
                 raise GroupError("group_by() takes names, bins(...), rounded(...), cells(...), or name = expression")

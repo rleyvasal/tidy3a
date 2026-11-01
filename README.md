@@ -612,9 +612,14 @@ from tidy3a import *
 The extension enables bare field names inside verbs, so the examples above
 can omit `fields(...)`. A variable named like a builtin or a tidy3a helper
 (`id`, `type`, `max`, `n`) is the data's wherever only data fits: `id > 1`,
-`max * 2`, `mean(type)`. Multi-line pipes need parentheses. Sharing a notebook
-with tidy3 requires its ownership-aware transformer; the prerequisite is
-recorded in [the plan](docs/plan.md#56-notebook-layer).
+`max * 2`, `mean(type)`. Multi-line pipes need parentheses. Two pieces of R
+syntax that Python rejects are rewritten before the cell runs: `!` is negation
+inside a verb's parentheses (`filter(!(x > 50))`, `select(!ring)`), so shell
+lines such as `!pip install …` outside one stay as they are; and in `mutate`
+and `group_by` a `name = value` may come before a positional argument,
+keeping the order written: `group_by(window = bins(time, "30 days"), lat, lon)`.
+tidy3 0.9.0 or later and tidy3a can share a notebook, each rewriting only
+calls to its own verbs.
 
 ## Examples and development
 
