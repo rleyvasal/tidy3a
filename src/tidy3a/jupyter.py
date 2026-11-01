@@ -33,10 +33,15 @@ from collections.abc import Callable
 from types import ModuleType
 from typing import Any
 
+import tidysyntax
+from tidysyntax.repairs import is_shell_cell, keywords_before_positional, negation
+from tidysyntax.scanner import apply, calls
+
 from tidy3a.expr import MISSING, Expr, NameRef
 
 NAME = "__tidy3a_name__"
-ASSIGN = "__tidy3a_assign__"
+ASSIGN = tidysyntax.ASSIGN  # "__r_assign__", the placeholder tidy3, tidy3a, plot3 and stats3 share
+OLD_ASSIGN = "__tidy3a_assign__"  # tidy3a 0.15's name for it, still read
 TIDY3_ASSIGN = "__tidy3_assign__"  # tidy3's carrier for the same rewrite
 
 # Verbs whose arguments may hold bare names. Others take positions, counts,
@@ -232,6 +237,14 @@ class _Names(ast.NodeTransformer):
     visit_SetComp = visit_DictComp = visit_GeneratorExp = visit_ListComp
 
 
+def _carrier(node: ast.AST, name: str) -> bool:
+    """Whether *node* is ``name('column', value)``, a keyword argument the source pass moved into place."""
+    return (
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == name
+        and len(node.args) == 2 and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)
+    )
+
+
 class Tidy3aMaskTransformer(ast.NodeTransformer):
     """Rewrite bare names in calls to tidy3a's verbs, and nowhere else."""
 
@@ -263,7 +276,7 @@ class Tidy3aMaskTransformer(ast.NodeTransformer):
             name = func.value.id
         elif isinstance(func, ast.Name):
             name = func.id
-            if name == ASSIGN:
+            if name in (ASSIGN, OLD_ASSIGN):
                 return True
         else:
             return False
@@ -294,8 +307,8 @@ class Tidy3aMaskTransformer(ast.NodeTransformer):
             return self.generic_visit(node)
         if self._carries(node):
             for arg in node.args:
-                if _carrier(arg, TIDY3_ASSIGN):
-                    arg.func.id = ASSIGN  # tidy3's source pass ran on this call first
+                if _carrier(arg, TIDY3_ASSIGN) or _carrier(arg, OLD_ASSIGN):
+                    arg.func.id = ASSIGN  # tidy3's source pass ran on this call first, or tidy3a 0.15's name
         names = _Names(self._tidy3a)
         node.args = [names.operand(arg) for arg in node.args]
         node.keywords = [ast.keyword(arg=k.arg, value=names.operand(k.value)) for k in node.keywords]
@@ -303,183 +316,76 @@ class Tidy3aMaskTransformer(ast.NodeTransformer):
 
 
 # ── Source passes: R syntax Python cannot parse ─────────────────────────────
+#
+# The rewrites tidy3, tidy3a, plot3 and stats3 share come from tidysyntax;
+# tidy3a describes which of its verbs take them, and adds its own vector form.
 
-_MUTATE = re.compile(r"\bmutate\s*\(")
 _VECTOR = re.compile(r"(\s*)\[([^\[\]]*)\]\s*=(?!=)(.*)\Z", re.S)
 
 
 def rewrite_vector_assignments(source: str) -> str:
-    """``mutate([x, y, z] = value)`` → ``mutate(__tidy3a_assign__([x, y, z], value))``.
+    """``mutate([x, y, z] = value)`` → ``mutate(__r_assign__([x, y, z], value))``.
 
     ``[x, y, z] = …`` is not valid as a keyword argument, so this runs on the
     source before Python parses it, as tidy3 does for backtick names.
     """
-    out: list[str] = []
-    position = 0
-    while True:
-        match = _MUTATE.search(source, position)
-        if match is None or _in_string_or_comment(source, match.start()):
-            if match is None:
-                break
-            out.append(source[position : match.end()])
-            position = match.end()
-            continue
-        split = _split_arguments(source, match.end())
-        if split is None:
-            break
-        arguments, end = split
-        out.append(source[position : match.end()])
-        out.append(",".join(_vector_argument(rewrite_vector_assignments(arg)) for arg in arguments))
-        out.append(")")
-        position = end
-    out.append(source[position:])
-    return "".join(out)
-
-
-def _carrier(node: ast.AST, name: str) -> bool:
-    """Whether *node* is ``name('column', value)``, a keyword argument the source pass moved into place."""
-    return (
-        isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == name
-        and len(node.args) == 2 and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)
-    )
-
-
-def _verb_calls(source: str, verbs: frozenset[str]) -> list[re.Match[str]]:
-    pattern = re.compile(r"(?<![\w.])(?:\w+\.)?(" + "|".join(sorted(verbs)) + r")\s*\(")
-    return [m for m in pattern.finditer(source) if not _in_string_or_comment(source, m.start())]
-
-
-_KEYWORD = re.compile(r"(\s*)([A-Za-z_]\w*)\s*=(?!=)(.*)\Z", re.S)
-
-
-def rewrite_keywords_before_positional(source: str) -> str:
-    """``group_by(window = bins(time, "30 days"), lat)`` → ``group_by(__tidy3a_assign__('window', …), lat)``.
-
-    R takes ``name = value`` before a positional argument and Python does
-    not, so in ``mutate`` and ``group_by`` each such keyword becomes the
-    ordered carrier the vector form uses, keeping the order written (tidy3
-    0.12.7). Keywords after the last positional argument, ``**`` spreads, and
-    settings such as ``dropna=`` are left alone, so valid Python is unchanged.
-    """
-    if "=" not in source:
+    if "mutate" not in source or "]" not in source:
         return source
-    # Right to left, so an edit never moves a call still to be handled.
-    for match in reversed(_verb_calls(source, _ORDERED)):
-        split = _split_arguments(source, match.end())
-        if split is None:
-            continue
-        arguments, end = split
-        keywords = [_KEYWORD.match(arg) for arg in arguments]
-        positional = [i for i, (arg, kw) in enumerate(zip(arguments, keywords))
-                      if kw is None and arg.strip() and not arg.lstrip().startswith("*")]
-        if not positional:
-            continue
-        moved = [
-            f"{kw.group(1)}{ASSIGN}({kw.group(2)!r}, {kw.group(3).strip()})" if kw and kw.group(2) not in _SETTINGS else arg
-            for arg, kw in zip(arguments[: positional[-1]], keywords)
-        ]
-        if moved != arguments[: positional[-1]]:
-            source = source[: match.end()] + ",".join(moved + arguments[positional[-1] :]) + ")" + source[end:]
+    # One call at a time from the right, so an edit never moves a call still to be handled.
+    for index in reversed(range(len(calls(source, {"mutate"})))):
+        call = calls(source, {"mutate"})[index]
+        edits = []
+        for a, b in call.arguments:
+            match = _VECTOR.match(source[a:b])
+            if match is not None:
+                space, names, value = match.groups()
+                edits.append((a, b, f"{space}{ASSIGN}([{names}], {value.strip()})"))
+        source = apply(source, edits)
     return source
 
 
+DIALECT = tidysyntax.Dialect(
+    "tidy3a",
+    negation_calls=_REWRITTEN,
+    ordered_calls=_ORDERED,
+    settings=_SETTINGS,
+    stages=(rewrite_vector_assignments,),
+)
+
+
+def rewrite_keywords_before_positional(source: str) -> str:
+    """``group_by(window = bins(time, "30 days"), lat)`` → ``group_by(__r_assign__('window', (…)), lat)``.
+
+    R takes ``name = value`` before a positional argument and Python does
+    not, so in ``mutate`` and ``group_by`` each such keyword becomes the
+    ordered placeholder the vector form uses, keeping the order written.
+    Keywords after the last positional argument, ``**`` spreads, and settings
+    such as ``dropna=`` are left alone, so valid Python is unchanged.
+    """
+    return keywords_before_positional(source, [DIALECT])
+
+
 def rewrite_bang_not(source: str) -> str:
-    """R's ``!`` → ``~`` inside tidy3a verbs: ``filter(!(x > 50))``, ``select(!z)`` (tidy3 0.12.9).
+    """R's ``!`` → ``~`` inside tidy3a verbs: ``filter(!(x > 50))``, ``select(!z)``.
 
     Only inside a verb's parentheses, where ``!`` is not valid Python, so a
     shell line (``!pip install …``, ``x = !ls``) outside one stays as it is,
     and so do ``!=``, strings, and comments; a ``!`` that starts a line inside
     a verb call is negation, not a shell escape.
     """
-    if "!" not in source:
-        return source
-    inside = [(m.end() - 1, _split_arguments(source, m.end())) for m in _verb_calls(source, _REWRITTEN)]
-    spans = [(start, split[1]) for start, split in inside if split is not None]
-    out = list(source)
-    quote: str | None = None
-    i = 0
-    while i < len(source):
-        ch = source[i]
-        if quote:
-            if ch == "\\":
-                i += 2
-                continue
-            if source.startswith(quote, i):
-                i += len(quote)
-                quote = None
-                continue
-        elif ch in "'\"":
-            quote = source[i : i + 3] if source[i : i + 3] in ("'''", '"""') else ch
-            i += len(quote)
-            continue
-        elif ch == "#":
-            newline = source.find("\n", i)
-            i = len(source) if newline == -1 else newline
-            continue
-        elif ch == "!" and source[i + 1 : i + 2] != "=" and any(a < i < b for a, b in spans):
-            out[i] = "~"
-        i += 1
-    return "".join(out)
+    return negation(source, [DIALECT])
 
 
 def rewrite_source(source: str) -> str:
-    """Every source pass, in order: ``!``, vector assignments, then keywords before positional arguments."""
+    """The source passes, in order: ``!``, vector assignments, then keywords before positional arguments.
+
+    These are the tidysyntax repairs tidy3a's syntax needs. Its backtick
+    repair is left out until tidy3 reads the ``__r_name__`` placeholder,
+    since a tidy3a pass may meet tidy3's calls first in a shared notebook.
+    """
+    if is_shell_cell(source):
+        return source
     return rewrite_keywords_before_positional(rewrite_vector_assignments(rewrite_bang_not(source)))
-
-
-def _vector_argument(text: str) -> str:
-    match = _VECTOR.match(text)
-    if match is None:
-        return text
-    space, names, value = match.groups()
-    return f"{space}{ASSIGN}([{names}], {value.strip()})"
-
-
-def _split_arguments(source: str, start: int) -> tuple[list[str], int] | None:
-    """Top-level arguments of a call whose ``(`` ends at *start*, and the index after ``)``."""
-    depth = 0
-    arguments: list[str] = []
-    current = start
-    i = start
-    quote: str | None = None
-    while i < len(source):
-        ch = source[i]
-        if quote:
-            if ch == "\\":
-                i += 2
-                continue
-            if source.startswith(quote, i):
-                i += len(quote)
-                quote = None
-                continue
-            i += 1
-            continue
-        if ch in "'\"":
-            quote = source[i : i + 3] if source[i : i + 3] in ("'''", '"""') else ch
-            i += len(quote)
-            continue
-        if ch == "#":
-            newline = source.find("\n", i)
-            i = len(source) if newline == -1 else newline
-            continue
-        if ch in "([{":
-            depth += 1
-        elif ch in ")]}":
-            if depth == 0:
-                arguments.append(source[current:i])
-                return arguments, i + 1
-            depth -= 1
-        elif ch == "," and depth == 0:
-            arguments.append(source[current:i])
-            current = i + 1
-        i += 1
-    return None
-
-
-def _in_string_or_comment(source: str, index: int) -> bool:
-    line_start = source.rfind("\n", 0, index) + 1
-    prefix = source[line_start:index]
-    return "#" in prefix or prefix.count('"') % 2 == 1 or prefix.count("'") % 2 == 1
 
 
 def tidy3a_source_transform(lines: list[str]) -> list[str]:
@@ -507,6 +413,7 @@ def load_ipython_extension(ipython: Any) -> None:
     unload_ipython_extension(ipython)
     ipython.user_ns[NAME] = make_name
     ipython.user_ns[ASSIGN] = assign
+    ipython.user_ns[OLD_ASSIGN] = assign
     ipython.input_transformers_cleanup.append(tidy3a_source_transform)
     ipython.ast_transformers.append(Tidy3aMaskTransformer(ipython.user_ns))
 

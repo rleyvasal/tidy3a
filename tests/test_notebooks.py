@@ -167,7 +167,7 @@ def test_prefixed_calls_are_rewritten(shell):
 
 
 def test_source_rewrites():
-    assert rewrite_vector_assignments("d >> mutate([x, y] = f(x), k = 1)") == "d >> mutate(__tidy3a_assign__([x, y], f(x)), k = 1)"
+    assert rewrite_vector_assignments("d >> mutate([x, y] = f(x), k = 1)") == "d >> mutate(__r_assign__([x, y], f(x)), k = 1)"
     assert rewrite_vector_assignments('mutate(s = "[a] = b")') == 'mutate(s = "[a] = b")'
     assert rewrite_vector_assignments("filter([x] == y)") == "filter([x] == y)"
     text = apply_masking("cloud >> filter(x > limit)", {"filter": __import__("tidy3a").filter})
@@ -186,13 +186,19 @@ def test_bang_rewrite():
 def test_keywords_before_positional_rewrite():
     rewrite = rewrite_keywords_before_positional
     assert rewrite('group_by(w = bins(t, "3 days"), lat, dropna=False)') == (
-        'group_by(__tidy3a_assign__(\'w\', bins(t, "3 days")), lat, dropna=False)'
+        'group_by(__r_assign__(\'w\', (bins(t, "3 days"))), lat, dropna=False)'
     )
-    assert rewrite("ta.mutate(c = f(a, b=1), __tidy3a_assign__([x], v), k = 1)") == (
-        "ta.mutate(__tidy3a_assign__('c', f(a, b=1)), __tidy3a_assign__([x], v), k = 1)"
+    assert rewrite("ta.mutate(c = f(a, b=1), __r_assign__([x], v), k = 1)") == (
+        "ta.mutate(__r_assign__('c', (f(a, b=1))), __r_assign__([x], v), k = 1)"
     )
     for valid in ("mutate(c = 1, k = 2)", "group_by(lat, w = f(t))", "group_by(axis = 'g', lat)", "select(z = a, b)"):
         assert rewrite(valid) == valid
+
+
+def test_tidy3a_015_assign_name_still_runs(shell):
+    # Cells or exports holding tidy3a 0.15's carrier name keep working.
+    ns = run(shell, "from tidy3a import *\n" + SETUP + "w = cloud >> mutate(__tidy3a_assign__('w', intensity * 2)) >> pull(w)")
+    assert ns["w"].tolist() == [20.0, 40.0, 60.0, 80.0]
 
 
 def test_r_negation_in_notebook_cells(shell):

@@ -14,6 +14,13 @@
   load order.
 - The README no longer says sharing a notebook with tidy3 waits on a tidy3
   change: it shipped in tidy3 0.9.0.
+- The notebook's source rewrites (`!`, keywords before positional
+  arguments) come from [tidysyntax](https://github.com/rleyvasal/tidysyntax),
+  the notebook syntax tidy3, tidy3a, plot3 and stats3 now share, which
+  tidy3a requires (`tidysyntax>=0.1,<0.2`, standard library only); tidy3a
+  keeps its own `[x, y, z] = …` as a step of its dialect. The placeholder a
+  rewritten cell holds is `__r_assign__`, shared with the other packages;
+  `__tidy3a_assign__` still works.
 
 ## 0.15.0 — 2026-10-29
 
