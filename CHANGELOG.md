@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.16.0 — 2026-11-01
 
 - Notebooks take two more pieces of R syntax, as tidy3's notebook layer
   does (tidy3 0.12.7 and 0.12.9): `!` is negation inside a tidy3a verb,
