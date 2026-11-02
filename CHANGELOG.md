@@ -1,6 +1,7 @@
 # Changelog
 
-## Unreleased
+## 0.17.0 — 2026-11-01
+
 
 - In a notebook, names that are not Python identifiers can be written in
   backticks, as in R: `` filter(`intensity (raw)` > 15) ``,
