@@ -377,7 +377,13 @@ DIALECT = tidy3syntax.Dialect(
     settings=_SETTINGS,
     stages=(rewrite_vector_assignments,),
     pipe_operators={">>"},  # cloud >> filter(...) continued on the next line, as in tidy3
+    extension="tidy3a.jupyter:load_ipython_extension",
 )
+
+
+def dialect() -> tidy3syntax.Dialect:
+    """tidy3a's dialect for tidy3syntax (its ``tidy3syntax.dialects`` entry point)."""
+    return DIALECT
 
 
 def rewrite_keywords_before_positional(source: str) -> str:
