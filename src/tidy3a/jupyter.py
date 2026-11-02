@@ -7,6 +7,7 @@ Load it in IPython or Jupyter with ``%load_ext tidy3a.jupyter``. Then::
     cloud >> mutate([x, y, z] = dot(R, [x, y, z], over="feature"))
     cloud >> filter(!(x > 50))
     cloud >> group_by(window = bins(time, "30 days"), lat, lon)
+    cloud >> filter(`intensity (raw)` > 15) >> mutate(`twice x` = x * 2)
 
 A bare name inside a tidy3a verb becomes a deferred reference, settled when
 the verb runs: data if only the data has it, the Python value if only the
@@ -34,15 +35,18 @@ from types import ModuleType
 from typing import Any
 
 import tidy3syntax
-from tidy3syntax.repairs import is_shell_cell, keywords_before_positional, negation
+from tidy3syntax.repairs import backtick_assignments, backticks, is_shell_cell, keywords_before_positional, negation
 from tidy3syntax.scanner import apply, calls
 
-from tidy3a.expr import MISSING, Expr, NameRef
+from tidy3a.expr import MISSING, Expr, NameRef, col
 
 NAME = "__tidy3a_name__"
 ASSIGN = tidy3syntax.ASSIGN  # "__r_assign__", the placeholder tidy3, tidy3a, plot3 and stats3 share
 OLD_ASSIGN = "__tidy3a_assign__"  # tidy3a 0.15's name for it, still read
 TIDY3_ASSIGN = "__tidy3_assign__"  # tidy3's carrier for the same rewrite
+COL = "__tidy3a_col__"  # tidy3a's col(), for backtick names
+# A backtick name as tidy3syntax writes it, or as tidy3's or plot3's own pass does when it runs first.
+_BACKTICK_NAMES = frozenset({tidy3syntax.NAME, "__tidy3_bt__", "__plot3_bt__"})
 
 # Verbs whose arguments may hold bare names. Others take positions, counts,
 # outside arrays, or other data (slice, bind_cols, joins) and are left alone.
@@ -210,6 +214,9 @@ class _Names(ast.NodeTransformer):
         return node
 
     def visit_Call(self, node: ast.Call) -> ast.AST:
+        if _backtick_name(node):
+            # `intensity (raw)`: a data name that is not a Python identifier.
+            return ast.copy_location(ast.Call(func=ast.Name(id=COL, ctx=ast.Load()), args=node.args, keywords=[]), node)
         # The function itself keeps its name; its arguments may hold data names.
         func = node.func
         helper = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
@@ -235,6 +242,15 @@ class _Names(ast.NodeTransformer):
         return node
 
     visit_SetComp = visit_DictComp = visit_GeneratorExp = visit_ListComp
+
+
+def _backtick_name(node: ast.AST) -> bool:
+    """Whether *node* is ``__r_name__('a b')``, a backtick name the source pass rewrote."""
+    return (
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _BACKTICK_NAMES
+        and len(node.args) == 1 and not node.keywords
+        and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)
+    )
 
 
 def _carrier(node: ast.AST, name: str) -> bool:
@@ -377,15 +393,17 @@ def rewrite_bang_not(source: str) -> str:
 
 
 def rewrite_source(source: str) -> str:
-    """The source passes, in order: ``!``, vector assignments, then keywords before positional arguments.
+    """The source passes, in tidy3syntax's order: ``!``, backtick assignments
+    (`` `new col` = x ``), vector assignments, keywords before positional
+    arguments, then backtick names (`` `intensity (raw)` ``).
 
-    These are the tidy3syntax repairs tidy3a's syntax needs. Its backtick
-    repair is left out until tidy3 reads the ``__r_name__`` placeholder,
-    since a tidy3a pass may meet tidy3's calls first in a shared notebook.
+    Backtick names become ``__r_name__('…')``, which tidy3 and plot3 read
+    too, since a tidy3a pass may meet their calls first in a shared notebook.
     """
     if is_shell_cell(source):
         return source
-    return rewrite_keywords_before_positional(rewrite_vector_assignments(rewrite_bang_not(source)))
+    source = backtick_assignments(rewrite_bang_not(source))
+    return backticks(rewrite_keywords_before_positional(rewrite_vector_assignments(source)))
 
 
 def tidy3a_source_transform(lines: list[str]) -> list[str]:
@@ -414,6 +432,9 @@ def load_ipython_extension(ipython: Any) -> None:
     ipython.user_ns[NAME] = make_name
     ipython.user_ns[ASSIGN] = assign
     ipython.user_ns[OLD_ASSIGN] = assign
+    ipython.user_ns[COL] = col
+    # A backtick name outside a tidy3a call, where no AST pass claims it, is the plain name.
+    ipython.user_ns.setdefault(tidy3syntax.NAME, tidy3syntax.RName)
     ipython.input_transformers_cleanup.append(tidy3a_source_transform)
     ipython.ast_transformers.append(Tidy3aMaskTransformer(ipython.user_ns))
 

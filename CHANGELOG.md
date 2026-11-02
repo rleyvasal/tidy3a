@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- In a notebook, names that are not Python identifiers can be written in
+  backticks, as in R: `` filter(`intensity (raw)` > 15) ``,
+  `` summarise(m = mean(`intensity (raw)`)) ``, and a new variable
+  `` mutate(`twice x` = x * 2) ``. The rewrites are tidy3syntax's, shared with
+  tidy3, plot3 and stats3, so a cell holding both tidy3 and tidy3a calls
+  works in either load order.
+
 ## 0.16.1 — 2026-11-01
 
 ### Changed

@@ -618,6 +618,8 @@ inside a verb's parentheses (`filter(!(x > 50))`, `select(!ring)`), so shell
 lines such as `!pip install …` outside one stay as they are; and in `mutate`
 and `group_by` a `name = value` may come before a positional argument,
 keeping the order written: `group_by(window = bins(time, "30 days"), lat, lon)`.
+A name that is not a Python identifier goes in backticks, as in R:
+`` filter(`intensity (raw)` > 15) ``, `` mutate(`twice x` = x * 2) ``.
 These rewrites come from [tidy3syntax](https://github.com/rleyvasal/tidy3syntax),
 which tidy3, plot3 and stats3 share. tidy3 0.9.0 or later and tidy3a can share a notebook, each rewriting only
 calls to its own verbs.

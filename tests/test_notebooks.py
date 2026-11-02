@@ -8,6 +8,7 @@ from tidy3a.jupyter import (  # noqa: E402
     apply_masking,
     rewrite_bang_not,
     rewrite_keywords_before_positional,
+    rewrite_source,
     rewrite_vector_assignments,
 )
 
@@ -292,5 +293,44 @@ def test_r_syntax_with_both_packages_loaded(order):
         assert set(shell.user_ns["columns"]) == {"heavy", "mpg", "n"}
         assert shell.user_ns["slow"] == [21.0]
         assert shell.user_ns["heavy_rows"].tolist() == [False, True, True]
+    finally:
+        close_both(shell)
+
+
+def test_backtick_rewrite():
+    assert rewrite_source("filter(`a b` > 1)") == "filter(__r_name__('a b') > 1)"
+    assert rewrite_source("mutate(`new col` = x, y = 1)") == "mutate(__r_assign__('new col', (x)), y = 1)"
+    assert rewrite_source('filter(s == "`kept`")  # `kept`') == 'filter(s == "`kept`")  # `kept`'
+
+
+def test_backtick_names_in_notebook_cells(shell):
+    run(shell, "from tidy3a import *\n" + SETUP.replace('"intensity"', '"intensity (raw)"'))
+    ns = run(shell, "kept = cloud >> filter(`intensity (raw)` > 15) >> pull(point)")
+    assert ns["kept"].tolist() == [2, 3, 4]
+    ns = run(shell, "twice = cloud >> mutate(`twice x` = x * 2, y = y) >> pull(`twice x`)")
+    assert ns["twice"].tolist() == [0.0, 0.0, 102.0, 0.0]
+    ns = run(shell, "m = cloud >> group_by(ring) >> summarise(m = mean(`intensity (raw)`)) >> pull(m)")
+    assert ns["m"].tolist() == [20.0, 30.0]
+
+
+@pytest.mark.parametrize("order", [("tidy3", "tidy3a"), ("tidy3a", "tidy3")])
+def test_backticks_with_both_packages_loaded(order):
+    pytest.importorskip("tidy3.masking")
+    shell = both_shell(order)
+    try:
+        tidy3_cell = (
+            "from tidy3 import *\n"
+            'cars = tidy({"miles per gallon": [21.0, 30.0], "wt": [2.6, 1.9]})\n'
+            "fast = (cars >> filter(`miles per gallon` > 25)).collect()['miles per gallon'].to_list()"
+        )
+        tidy3a_cell = (
+            "from tidy3a import *\n" + SETUP.replace('"intensity"', '"intensity (raw)"')
+            + "kept = (cloud >> filter(`intensity (raw)` > 15) >> pull(point)).tolist()"
+        )
+        for cell in [tidy3_cell, tidy3a_cell] * 2:
+            result = shell.run_cell(cell)
+            assert result.success, result.error_before_exec or result.error_in_exec
+        assert shell.user_ns["fast"] == [30.0]
+        assert shell.user_ns["kept"] == [2, 3, 4]
     finally:
         close_both(shell)
