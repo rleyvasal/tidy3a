@@ -8,7 +8,7 @@ arrays. Pipelines of `select`, `filter`, `mutate`, `group_by`, and
 (and [labelarray](https://github.com/rleyvasal/labelarray), its array layer,
 which needs only NumPy too); xarray is optional.
 
-**Status:** version `0.16.0`, on [PyPI](https://pypi.org/project/tidy3a/).
+**Status:** version `0.16.1`, on [PyPI](https://pypi.org/project/tidy3a/).
 What changed in each release is in [CHANGELOG.md](CHANGELOG.md); the design
 is in [docs/plan.md](docs/plan.md), and the rules fit on one page in
 [docs/decisions.md](docs/decisions.md).
@@ -618,7 +618,7 @@ inside a verb's parentheses (`filter(!(x > 50))`, `select(!ring)`), so shell
 lines such as `!pip install …` outside one stay as they are; and in `mutate`
 and `group_by` a `name = value` may come before a positional argument,
 keeping the order written: `group_by(window = bins(time, "30 days"), lat, lon)`.
-These rewrites come from [tidysyntax](https://github.com/rleyvasal/tidysyntax),
+These rewrites come from [tidy3syntax](https://github.com/rleyvasal/tidy3syntax),
 which tidy3, plot3 and stats3 share. tidy3 0.9.0 or later and tidy3a can share a notebook, each rewriting only
 calls to its own verbs.
 

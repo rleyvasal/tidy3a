@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.16.1 — 2026-11-01
+
+### Changed
+
+- The notebook syntax tidy3a shares with tidy3, plot3 and stats3 is now published as
+  `tidy3syntax` (`tidy3syntax>=0.1,<0.2`), the same code under the tidy3
+  family's name; 0.16.0 required `tidysyntax`, its first name, which this
+  release no longer installs.
+
 ## 0.16.0 — 2026-11-01
 
 - Notebooks take two more pieces of R syntax, as tidy3's notebook layer

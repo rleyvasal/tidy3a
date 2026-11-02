@@ -33,14 +33,14 @@ from collections.abc import Callable
 from types import ModuleType
 from typing import Any
 
-import tidysyntax
-from tidysyntax.repairs import is_shell_cell, keywords_before_positional, negation
-from tidysyntax.scanner import apply, calls
+import tidy3syntax
+from tidy3syntax.repairs import is_shell_cell, keywords_before_positional, negation
+from tidy3syntax.scanner import apply, calls
 
 from tidy3a.expr import MISSING, Expr, NameRef
 
 NAME = "__tidy3a_name__"
-ASSIGN = tidysyntax.ASSIGN  # "__r_assign__", the placeholder tidy3, tidy3a, plot3 and stats3 share
+ASSIGN = tidy3syntax.ASSIGN  # "__r_assign__", the placeholder tidy3, tidy3a, plot3 and stats3 share
 OLD_ASSIGN = "__tidy3a_assign__"  # tidy3a 0.15's name for it, still read
 TIDY3_ASSIGN = "__tidy3_assign__"  # tidy3's carrier for the same rewrite
 
@@ -317,7 +317,7 @@ class Tidy3aMaskTransformer(ast.NodeTransformer):
 
 # ── Source passes: R syntax Python cannot parse ─────────────────────────────
 #
-# The rewrites tidy3, tidy3a, plot3 and stats3 share come from tidysyntax;
+# The rewrites tidy3, tidy3a, plot3 and stats3 share come from tidy3syntax;
 # tidy3a describes which of its verbs take them, and adds its own vector form.
 
 _VECTOR = re.compile(r"(\s*)\[([^\[\]]*)\]\s*=(?!=)(.*)\Z", re.S)
@@ -344,7 +344,7 @@ def rewrite_vector_assignments(source: str) -> str:
     return source
 
 
-DIALECT = tidysyntax.Dialect(
+DIALECT = tidy3syntax.Dialect(
     "tidy3a",
     negation_calls=_REWRITTEN,
     ordered_calls=_ORDERED,
@@ -379,7 +379,7 @@ def rewrite_bang_not(source: str) -> str:
 def rewrite_source(source: str) -> str:
     """The source passes, in order: ``!``, vector assignments, then keywords before positional arguments.
 
-    These are the tidysyntax repairs tidy3a's syntax needs. Its backtick
+    These are the tidy3syntax repairs tidy3a's syntax needs. Its backtick
     repair is left out until tidy3 reads the ``__r_name__`` placeholder,
     since a tidy3a pass may meet tidy3's calls first in a shared notebook.
     """

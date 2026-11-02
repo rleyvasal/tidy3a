@@ -27,7 +27,7 @@ dependencies = [
   "labelarray>=0.1.7",
   # The notebook syntax tidy3, tidy3a, plot3 and stats3 share (`!`, keywords
   # before positional arguments). Standard library only.
-  "tidysyntax>=0.1,<0.2",
+  "tidy3syntax>=0.1,<0.2",
 ]
 
 [project.optional-dependencies]
