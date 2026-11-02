@@ -334,3 +334,19 @@ def test_backticks_with_both_packages_loaded(order):
         assert shell.user_ns["kept"] == [2, 3, 4]
     finally:
         close_both(shell)
+
+
+def test_multi_line_pipes_need_no_parentheses(shell):
+    run(shell, "from tidy3a import *\n" + SETUP)
+    ns = run(shell, "kept = cloud\n>> filter(intensity > 15)\n>> pull(point)")
+    assert ns["kept"].tolist() == [2, 3, 4]
+    # A broken pipe reports its own error, not an unexpected indent.
+    result = shell.run_cell("bad = cloud\n    >> filter(intensity >\n    >> pull(point)")
+    assert not result.success and "indent" not in str(result.error_before_exec or result.error_in_exec)
+
+
+def test_one_transformer_for_tidy3a(shell):
+    import tidy3syntax.ipython
+
+    assert "tidy3a" in tidy3syntax.ipython.registered(shell)
+    assert sum(getattr(t, "tidy3syntax", False) for t in shell.input_transformers_cleanup) == 1

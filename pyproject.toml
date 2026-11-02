@@ -27,7 +27,7 @@ dependencies = [
   "labelarray>=0.1.7",
   # The notebook syntax tidy3, tidy3a, plot3 and stats3 share (`!`, keywords
   # before positional arguments). Standard library only.
-  "tidy3syntax>=0.1,<0.2",
+  "tidy3syntax>=0.1.2,<0.2",
 ]
 
 [project.optional-dependencies]
@@ -48,6 +48,11 @@ zarr = ["xarray>=2024.6", "pandas>=2.2.2", "zarr>=2.18"]
 test = ["xarray>=2024.6", "pandas>=2.2.2", "numba>=0.60", "pytest>=7.0", "flox>=0.9", "ipython>=8.0", "dask[array]",
         "opt_einsum", "zarr>=2.18"]
 dev = ["tidy3a[test]", "polars>=1.0"]
+
+# A notebook cell that imports tidy3a gets its syntax in that same cell
+# (tidy3syntax's coordinator calls this before rewriting the cell).
+[project.entry-points."tidy3syntax.dialects"]
+tidy3a = "tidy3a.jupyter:load_ipython_extension"
 
 [project.urls]
 Homepage = "https://github.com/rleyvasal/tidy3a"

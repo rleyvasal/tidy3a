@@ -8,6 +8,15 @@
   `` mutate(`twice x` = x * 2) ``. The rewrites are tidy3syntax's, shared with
   tidy3, plot3 and stats3, so a cell holding both tidy3 and tidy3a calls
   works in either load order.
+- In a notebook, a pipe may continue on lines that start with `>>`, with
+  no parentheses: `cloud` then `>> filter(intensity > 15)` on the next line.
+  A pipe Python cannot parse reports its real error, not an unexpected
+  indent.
+- The notebook's source rewrites go through tidy3syntax's coordinator
+  (`tidy3syntax>=0.1.2`), one input transformer shared with tidy3, plot3 and
+  stats3, so the packages' load order no longer matters. tidy3a declares a
+  `tidy3syntax.dialects` entry point: when another of those packages is
+  already loaded, a cell that imports tidy3a can use its syntax at once.
 
 ## 0.16.1 — 2026-11-01
 

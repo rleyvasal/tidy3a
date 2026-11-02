@@ -612,7 +612,7 @@ from tidy3a import *
 The extension enables bare field names inside verbs, so the examples above
 can omit `fields(...)`. A variable named like a builtin or a tidy3a helper
 (`id`, `type`, `max`, `n`) is the data's wherever only data fits: `id > 1`,
-`max * 2`, `mean(type)`. Multi-line pipes need parentheses. Two pieces of R
+`max * 2`, `mean(type)`. A pipe may continue on lines that start with `>>`. Two pieces of R
 syntax that Python rejects are rewritten before the cell runs: `!` is negation
 inside a verb's parentheses (`filter(!(x > 50))`, `select(!ring)`), so shell
 lines such as `!pip install …` outside one stay as they are; and in `mutate`

@@ -35,6 +35,7 @@ from types import ModuleType
 from typing import Any
 
 import tidy3syntax
+import tidy3syntax.ipython
 from tidy3syntax.repairs import backtick_assignments, backticks, is_shell_cell, keywords_before_positional, negation
 from tidy3syntax.scanner import apply, calls
 
@@ -42,7 +43,7 @@ from tidy3a.expr import MISSING, Expr, NameRef, col
 
 NAME = "__tidy3a_name__"
 ASSIGN = tidy3syntax.ASSIGN  # "__r_assign__", the placeholder tidy3, tidy3a, plot3 and stats3 share
-OLD_ASSIGN = "__tidy3a_assign__"  # tidy3a 0.15's name for it, still read
+OLD_ASSIGN = "__tidy3a_assign__"  # tidy3a's own name: the AST pass renames the shared one to it in tidy3a's calls
 TIDY3_ASSIGN = "__tidy3_assign__"  # tidy3's carrier for the same rewrite
 COL = "__tidy3a_col__"  # tidy3a's col(), for backtick names
 # A backtick name as tidy3syntax writes it, or as tidy3's or plot3's own pass does when it runs first.
@@ -253,6 +254,14 @@ def _backtick_name(node: ast.AST) -> bool:
     )
 
 
+def _assign_call(node: ast.AST) -> bool:
+    """``__r_assign__(target, value)``, under the shared name, tidy3's, or tidy3a's own."""
+    return (
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id in (ASSIGN, TIDY3_ASSIGN, OLD_ASSIGN) and len(node.args) == 2 and not node.keywords
+    )
+
+
 def _carrier(node: ast.AST, name: str) -> bool:
     """Whether *node* is ``name('column', value)``, a keyword argument the source pass moved into place."""
     return (
@@ -321,10 +330,11 @@ class Tidy3aMaskTransformer(ast.NodeTransformer):
                     if _carrier(arg, ASSIGN):
                         arg.func.id = TIDY3_ASSIGN
             return self.generic_visit(node)
-        if self._carries(node):
-            for arg in node.args:
-                if _carrier(arg, TIDY3_ASSIGN) or _carrier(arg, OLD_ASSIGN):
-                    arg.func.id = ASSIGN  # tidy3's source pass ran on this call first, or tidy3a 0.15's name
+        for arg in node.args:
+            if _assign_call(arg):
+                # Inside tidy3a's calls the placeholder is tidy3a's assign, whichever package's
+                # pass wrote it: the shared name's value in the namespace is not tidy3a's to set.
+                arg.func.id = OLD_ASSIGN
         names = _Names(self._tidy3a)
         node.args = [names.operand(arg) for arg in node.args]
         node.keywords = [ast.keyword(arg=k.arg, value=names.operand(k.value)) for k in node.keywords]
@@ -366,6 +376,7 @@ DIALECT = tidy3syntax.Dialect(
     ordered_calls=_ORDERED,
     settings=_SETTINGS,
     stages=(rewrite_vector_assignments,),
+    pipe_operators={">>"},  # cloud >> filter(...) continued on the next line, as in tidy3
 )
 
 
@@ -425,28 +436,34 @@ def _is_ours(value: Any) -> bool:
 
 
 def load_ipython_extension(ipython: Any) -> None:
-    """``%load_ext tidy3a.jupyter``: turn on bare names in tidy3a verbs."""
+    """``%load_ext tidy3a.jupyter``: turn on bare names and R syntax in tidy3a verbs.
+
+    The source rewrites go through tidy3syntax's coordinator, one input
+    transformer shared with tidy3, plot3 and stats3, whatever the load order.
+    """
     from tidy3a.verbs import assign
 
-    unload_ipython_extension(ipython)
+    _remove_own(ipython)
     ipython.user_ns[NAME] = make_name
-    ipython.user_ns[ASSIGN] = assign
     ipython.user_ns[OLD_ASSIGN] = assign
     ipython.user_ns[COL] = col
-    # A backtick name outside a tidy3a call, where no AST pass claims it, is the plain name.
-    ipython.user_ns.setdefault(tidy3syntax.NAME, tidy3syntax.RName)
-    ipython.input_transformers_cleanup.append(tidy3a_source_transform)
-    ipython.ast_transformers.append(Tidy3aMaskTransformer(ipython.user_ns))
+    tidy3syntax.ipython.register(ipython, DIALECT, ast_transformer=Tidy3aMaskTransformer(ipython.user_ns))
 
 
-def unload_ipython_extension(ipython: Any) -> None:
+def _remove_own(ipython: Any) -> None:
+    """An earlier tidy3a's own transformers, from before the coordinator."""
     ipython.input_transformers_cleanup[:] = [t for t in ipython.input_transformers_cleanup if not _is_ours(t)]
     ipython.ast_transformers[:] = [t for t in ipython.ast_transformers if not _is_ours(t)]
 
 
+def unload_ipython_extension(ipython: Any) -> None:
+    tidy3syntax.ipython.unregister(ipython, "tidy3a")
+    _remove_own(ipython)
+
+
 def apply_masking(source: str, namespace: dict[str, Any] | None = None) -> str:
     """The rewritten source of a cell, for tests and inspection."""
-    tree = ast.parse(rewrite_source(source))
+    tree = ast.parse(tidy3syntax.rewrite(source, [DIALECT], namespace))
     tree = Tidy3aMaskTransformer(namespace).visit(tree)
     ast.fix_missing_locations(tree)
     return ast.unparse(tree)
