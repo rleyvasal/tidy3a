@@ -361,8 +361,69 @@ DIALECT = tidy3syntax.Dialect(
 
 
 def dialect() -> tidy3syntax.Dialect:
-    """tidy3a's dialect for tidy3syntax (its ``tidy3syntax.dialects`` entry point)."""
-    return DIALECT
+    """tidy3a's dialect for tidy3syntax (its ``tidy3syntax.dialects`` entry point), with
+    the masking an export applies (:func:`export_mask`)."""
+    import dataclasses
+
+    return dataclasses.replace(DIALECT, mask=export_mask, export_imports=("import tidy3a",))
+
+
+def export_mask(source: str, known: frozenset[str], context: Any) -> str:
+    """tidy3a's bare names in *source* as public code, for a script exported from a notebook.
+
+    The notebook's own pass defers each bare name to run time (data, or the
+    notebook's value); a script has no notebook, so a name the notebook
+    defines (*known*) stays a Python name and any other becomes
+    ``tidy3a.col("name")``. Backtick names become ``tidy3a.col``, and
+    assignments in the order written ``tidy3a.assign``. Which calls are
+    tidy3a's comes from *context*, the notebook's imports; a notebook that
+    imports nothing from tidy3a is returned unchanged.
+    """
+    import tidy3a
+
+    names = {name for name, module in (context or {}).items() if str(module).split(".")[0] == "tidy3a"}
+    if not names:
+        return source
+    namespace = {name: getattr(tidy3a, name, tidy3a) for name in names}
+    tree = ast.parse(source)
+    before = ast.dump(tree)
+    tree = Tidy3aMaskTransformer(namespace).visit(tree)
+    tree = _Public(frozenset(known), namespace).visit(tree)
+    if ast.dump(tree) == before:
+        return source
+    ast.fix_missing_locations(tree)
+    return ast.unparse(tree)
+
+
+def _tidy3a_call(name: str, args: list[ast.expr]) -> ast.Call:
+    func = ast.Attribute(value=ast.Name(id="tidy3a", ctx=ast.Load()), attr=name, ctx=ast.Load())
+    return ast.Call(func=func, args=args, keywords=[])
+
+
+class _Public(ast.NodeTransformer):
+    """tidy3a's notebook helpers as the public API a script can call."""
+
+    def __init__(self, known: frozenset[str], namespace: dict[str, Any]):
+        self.known = known
+        self.namespace = namespace
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        self.generic_visit(node)
+        func = node.func
+        if not isinstance(func, ast.Name):
+            return node
+        if func.id == NAME and node.args and isinstance(node.args[0], ast.Constant):
+            name = node.args[0].value
+            operand = len(node.args) > 2
+            value = self.namespace.get(name)
+            if (name in self.known or name in self.namespace) and not (operand and callable(value)):
+                return ast.copy_location(ast.Name(id=name, ctx=ast.Load()), node)
+            return ast.copy_location(_tidy3a_call("col", [ast.Constant(value=name)]), node)
+        if func.id == COL:
+            return ast.copy_location(_tidy3a_call("col", node.args), node)
+        if func.id == OWN_ASSIGN:
+            return ast.copy_location(_tidy3a_call("assign", node.args), node)
+        return node
 
 
 def rewrite_keywords_before_positional(source: str) -> str:

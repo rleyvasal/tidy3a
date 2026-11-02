@@ -4,6 +4,11 @@
 
 ### Changed
 
+- `nb_export` (tidy3's) writes tidy3a's notebook syntax as public code: a
+  column the notebook does not define becomes `tidy3a.col("name")`, a
+  backtick assignment `tidy3a.assign(...)`, and the script imports `tidy3a`.
+  tidy3a's dialect carries this as its export mask.
+
 - In notebooks, tidy3a reads only tidy3syntax's `__r_name__` as a backtick
   name, not tidy3's `__tidy3_bt__` or plot3's `__plot3_bt__`, and no longer
   hands `__r_assign__` to tidy3 under tidy3's old name: tidy3 0.17 renames
