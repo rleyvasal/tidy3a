@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- In notebooks, tidy3a reads only tidy3syntax's `__r_name__` as a backtick
+  name, not tidy3's `__tidy3_bt__` or plot3's `__plot3_bt__`, and no longer
+  hands `__r_assign__` to tidy3 under tidy3's old name: tidy3 0.17 renames
+  it in its own calls. Requires tidy3syntax 0.2, whose placeholders the four
+  packages now share alone.
+
 ## 0.17.0 — 2026-11-01
 
 

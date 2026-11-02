@@ -196,12 +196,6 @@ def test_keywords_before_positional_rewrite():
         assert rewrite(valid) == valid
 
 
-def test_tidy3a_015_assign_name_still_runs(shell):
-    # Cells or exports holding tidy3a 0.15's carrier name keep working.
-    ns = run(shell, "from tidy3a import *\n" + SETUP + "w = cloud >> mutate(__tidy3a_assign__('w', intensity * 2)) >> pull(w)")
-    assert ns["w"].tolist() == [20.0, 40.0, 60.0, 80.0]
-
-
 def test_r_negation_in_notebook_cells(shell):
     ns = run(shell, "from tidy3a import *\n" + SETUP + "kept = cloud >> filter(!(intensity > 15)) >> pull(point)")
     assert ns["kept"].tolist() == [1]

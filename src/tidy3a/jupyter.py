@@ -43,11 +43,8 @@ from tidy3a.expr import MISSING, Expr, NameRef, col
 
 NAME = "__tidy3a_name__"
 ASSIGN = tidy3syntax.ASSIGN  # "__r_assign__", the placeholder tidy3, tidy3a, plot3 and stats3 share
-OLD_ASSIGN = "__tidy3a_assign__"  # tidy3a's own name: the AST pass renames the shared one to it in tidy3a's calls
-TIDY3_ASSIGN = "__tidy3_assign__"  # tidy3's carrier for the same rewrite
+OWN_ASSIGN = "__tidy3a_assign__"  # tidy3a's assign: the AST pass renames the shared placeholder to it in tidy3a's calls
 COL = "__tidy3a_col__"  # tidy3a's col(), for backtick names
-# A backtick name as tidy3syntax writes it, or as tidy3's or plot3's own pass does when it runs first.
-_BACKTICK_NAMES = frozenset({tidy3syntax.NAME, "__tidy3_bt__", "__plot3_bt__"})
 
 # Verbs whose arguments may hold bare names. Others take positions, counts,
 # outside arrays, or other data (slice, bind_cols, joins) and are left alone.
@@ -248,7 +245,7 @@ class _Names(ast.NodeTransformer):
 def _backtick_name(node: ast.AST) -> bool:
     """Whether *node* is ``__r_name__('a b')``, a backtick name the source pass rewrote."""
     return (
-        isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _BACKTICK_NAMES
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == tidy3syntax.NAME
         and len(node.args) == 1 and not node.keywords
         and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)
     )
@@ -258,15 +255,7 @@ def _assign_call(node: ast.AST) -> bool:
     """``__r_assign__(target, value)``, under the shared name, tidy3's, or tidy3a's own."""
     return (
         isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-        and node.func.id in (ASSIGN, TIDY3_ASSIGN, OLD_ASSIGN) and len(node.args) == 2 and not node.keywords
-    )
-
-
-def _carrier(node: ast.AST, name: str) -> bool:
-    """Whether *node* is ``name('column', value)``, a keyword argument the source pass moved into place."""
-    return (
-        isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == name
-        and len(node.args) == 2 and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)
+        and node.func.id in (ASSIGN, OWN_ASSIGN) and len(node.args) == 2 and not node.keywords
     )
 
 
@@ -301,7 +290,7 @@ class Tidy3aMaskTransformer(ast.NodeTransformer):
             name = func.value.id
         elif isinstance(func, ast.Name):
             name = func.id
-            if name in (ASSIGN, OLD_ASSIGN):
+            if name in (ASSIGN, OWN_ASSIGN):
                 return True
         else:
             return False
@@ -313,28 +302,18 @@ class Tidy3aMaskTransformer(ast.NodeTransformer):
             return False
         return name in namespace and _owned(namespace[name])
 
-    @staticmethod
-    def _carries(node: ast.Call) -> bool:
-        func = node.func
-        return (func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None) in _ORDERED
-
     def _owns(self, func: ast.AST) -> bool:
         verb = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
         return verb in _REWRITTEN and self._tidy3a(func)
 
     def visit_Call(self, node: ast.Call) -> ast.AST:
         if not self._owns(node.func):
-            if self._carries(node) and TIDY3_ASSIGN in (self.namespace or {}):
-                # tidy3a's source pass ran on a tidy3 call (tidy3 and tidy3a share the notebook): hand it tidy3's carrier.
-                for arg in node.args:
-                    if _carrier(arg, ASSIGN):
-                        arg.func.id = TIDY3_ASSIGN
             return self.generic_visit(node)
         for arg in node.args:
             if _assign_call(arg):
                 # Inside tidy3a's calls the placeholder is tidy3a's assign, whichever package's
                 # pass wrote it: the shared name's value in the namespace is not tidy3a's to set.
-                arg.func.id = OLD_ASSIGN
+                arg.func.id = OWN_ASSIGN
         names = _Names(self._tidy3a)
         node.args = [names.operand(arg) for arg in node.args]
         node.keywords = [ast.keyword(arg=k.arg, value=names.operand(k.value)) for k in node.keywords]
@@ -451,7 +430,7 @@ def load_ipython_extension(ipython: Any) -> None:
 
     _remove_own(ipython)
     ipython.user_ns[NAME] = make_name
-    ipython.user_ns[OLD_ASSIGN] = assign
+    ipython.user_ns[OWN_ASSIGN] = assign
     ipython.user_ns[COL] = col
     tidy3syntax.ipython.register(ipython, DIALECT, ast_transformer=Tidy3aMaskTransformer(ipython.user_ns))
 
