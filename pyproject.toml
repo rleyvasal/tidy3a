@@ -39,6 +39,8 @@ xarray = ["xarray>=2024.6", "pandas>=2.2.2"]
 fast = ["labelarray[fast]>=0.1.7"]
 # as_table() and tidy(table, axis=): Polars DataFrames, and through them tidy3 frames.
 polars = ["polars>=1.0"]
+# table3.view() and table3.show() on a TidyArray: its table in a data explorer or a paged table.
+table3 = ["polars>=1.39", "table3>=0.4,<0.5"]
 # write() to a Zarr store, block by block for data read with blocks=.
 zarr = ["xarray>=2024.6", "pandas>=2.2.2", "zarr>=2.18"]
 # opt_einsum: xarray uses it for dot when installed; the tests check tidy3a's results do not change.
@@ -47,7 +49,7 @@ zarr = ["xarray>=2024.6", "pandas>=2.2.2", "zarr>=2.18"]
 # tables' tests that need Polars skip.
 test = ["xarray>=2024.6", "pandas>=2.2.2", "numba>=0.60", "pytest>=7.0", "flox>=0.9", "ipython>=8.0", "dask[array]",
         "opt_einsum", "zarr>=2.18"]
-dev = ["tidy3a[test]", "polars>=1.0"]
+dev = ["tidy3a[test]", "polars>=1.0", "table3>=0.4,<0.5"]
 
 # A notebook cell that imports tidy3a gets its syntax in that same cell
 # (its dialect names the notebook loader tidy3syntax's coordinator calls).

@@ -617,6 +617,9 @@ class ChunkedFrame(TidyArray):
     def __tidy__(self, **options: Any) -> Any:
         return self._run().__tidy__(**options)
 
+    def __table3__(self, n: int) -> Any:
+        return self._run().__table3__(n)
+
     def explain(self) -> Any:
         """Each step's effect on the schema (``?`` for sizes the data decides), and how a summary's blocks are planned
         to run (``tidy3a.fused``), each step that runs on NumPy and why; or, once a result has been computed, each

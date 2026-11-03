@@ -17,7 +17,7 @@ from tidy3a.backend import reader_backend
 from tidy3a.errors import ReadError, TidyError
 from tidy3a.expr import axis_labels
 from tidy3a.frame import TidyArray, check_field_axis
-from tidy3a.verbs import Verb, _call_text
+from tidy3a.verbs import Verb, _call_text, _position_indexer
 
 # Polars stores times and durations in these units only (and dates as days).
 _POLARS_UNITS = ("ms", "us", "ns")
@@ -138,6 +138,28 @@ def to_tidy3(frame: TidyArray, **options: Any) -> Any:
     except ImportError:
         raise TidyError("tidy3's tidy() needs tidy3, which is not installed: pip install tidy3") from None
     return tidy3.tidy(frame >> as_table(**options))
+
+
+# ── TidyArray.__table3__ ────────────────────────────────────────────────────
+
+
+def to_table3(frame: TidyArray, n: int) -> tuple[Any, int, str]:
+    """table3's rows: the first *n* of ``as_table()``, its row count, and a caption.
+
+    Only the positions those rows need are converted: the first ones on the
+    first observation axis, which ``as_table(long=True)`` varies slowest.
+    """
+    data, backend = frame._data, frame._backend
+    sizes = dict(backend.sizes(data))
+    axes = [dim for dim in sizes if dim != frame._field_axis]
+    if not axes:
+        raise TidyError("table3 shows a table, and this data has no observation axis besides the field axis")
+    total = int(np.prod([sizes[dim] for dim in axes], dtype=np.int64))
+    per_position = int(np.prod([sizes[dim] for dim in axes[1:]], dtype=np.int64))
+    keep = min(sizes[axes[0]], -(-n // per_position)) if per_position else 0
+    first = frame._evolve(backend.keep(data, axes[0], _position_indexer(list(range(keep)))))
+    table = first >> as_table(long=len(axes) > 1)
+    return table.head(n), total, "TidyArray (table)"
 
 
 # ── tidy(table, axis=...) ───────────────────────────────────────────────────

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.19.0 — unreleased
+
+### Added
+
+- `table3.show(frame)` and `table3.view(frame)` take a TidyArray: its
+  `as_table()` (`long=True` for more than one observation axis) as a paged
+  table or in a data explorer to search, sort and filter, as R's `View()`.
+  tidy3a defines the `__table3__` hook table3 calls and converts only the
+  positions the shown rows need. table3 is the optional extra
+  `tidy3a[table3]`.
+
 ## 0.18.0 — 2026-11-02
 
 ### Changed

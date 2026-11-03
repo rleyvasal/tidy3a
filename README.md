@@ -553,6 +553,26 @@ With [tidy3](https://github.com/rleyvasal/tidy3) installed, `tidy3.tidy(cloud)`
 gives a tidy3 frame (tidy3a defines the `__tidy__` hook tidy3 calls), and
 `tidy(frame, axis="point")` reads one back.
 
+With [table3](https://github.com/rleyvasal/table3) (`pip install "tidy3a[table3]"`),
+a notebook shows the same table as a paged table or opens it in a data
+explorer to search, sort and filter, as R's `View()`:
+
+```python
+import numpy as np
+import table3
+from tidy3a import infer, read_array
+
+points = np.array([[3, 4, 0], [0, 0, 50], [60, 0, 0]], dtype="float32")
+cloud = read_array(points, dims={"point": infer, "feature": 3},
+                   labels={"feature": ["x", "y", "z"]}, field_axis="feature")
+table3.show(cloud);  # ten rows a page, through the first 1,000
+table3.view(cloud);  # the explorer, through the first 10,000
+```
+
+tidy3a defines the `__table3__` hook table3 calls; only the positions the
+shown rows need are converted, so a large array opens as fast as a small
+one.
+
 ## Backends
 
 New data uses the NumPy backend wherever it holds the data without loss, and

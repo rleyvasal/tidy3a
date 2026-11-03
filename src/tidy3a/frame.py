@@ -130,6 +130,12 @@ class TidyArray:
 
         return to_tidy3(self, **options)
 
+    def __table3__(self, n: int) -> Any:
+        """table3's hook (``table3.view(frame)``): the first *n* rows of ``as_table()``, its row count, a caption."""
+        from tidy3a.tables import to_table3
+
+        return to_table3(self, n)
+
     def _apply_verb(self, verb: Any) -> Any:
         """Execute a verb and record it on the result (``tidy3a.plan``); experimental frames may override this."""
         result = verb._apply(self)
