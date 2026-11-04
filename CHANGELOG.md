@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- The `tidy3a[table3]` extra takes any table3 from 0.5.1 to before 1.0
+  (`table3>=0.5.1,<1`; it was `<0.5`), so it installs alongside tidy3,
+  which needs table3 0.5, and later table3 releases reach it without a new
+  tidy3a.
+
 ## 0.19.0 — 2026-11-03
 
 ### Added
